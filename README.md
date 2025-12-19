@@ -1,0 +1,2 @@
+# AI_Slide_with_nano_banana
+Nano bananaによるAIスライド作成
