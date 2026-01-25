@@ -1,17 +1,24 @@
 import logging
 import uuid
 from google.cloud import storage
-from src.config.env import GCS_BUCKET_NAME
+from src.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-def upload_to_gcs(file_data: bytes, content_type: str = "image/png") -> str:
+def upload_to_gcs(
+    file_data: bytes, 
+    content_type: str = "image/png",
+    session_id: str | None = None,
+    slide_number: int | None = None
+) -> str:
     """
     Uploads binary data to Google Cloud Storage and returns the public URL.
     
     Args:
         file_data: The binary content to upload
         content_type: The MIME type of the content which helps getting browser to render it correctly.
+        session_id: Optional session/thread ID for organizing files into folders.
+        slide_number: Optional slide number for naming the file.
         
     Returns:
         str: The authenticated public URL of the uploaded blob.
@@ -19,17 +26,30 @@ def upload_to_gcs(file_data: bytes, content_type: str = "image/png") -> str:
     Raises:
         ValueError: If GCS_BUCKET_NAME is not set.
     """
-    if not GCS_BUCKET_NAME:
+    if not settings.GCS_BUCKET_NAME:
         raise ValueError("GCS_BUCKET_NAME environment variable is not set.")
 
     try:
         # Initialize client
         # Implicitly uses GOOGLE_APPLICATION_CREDENTIALS
         storage_client = storage.Client()
-        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        bucket = storage_client.bucket(settings.GCS_BUCKET_NAME)
         
-        # Generate unique filename
-        filename = f"generated_assets/{uuid.uuid4()}"
+        # Generate filename with optional session folder structure
+        unique_id = uuid.uuid4()
+        
+        if session_id:
+            # セッションごとにフォルダ分け: generated_assets/{session_id}/slide_{number}_{uuid}.ext
+            if slide_number is not None:
+                base_name = f"slide_{slide_number:02d}_{unique_id}"
+            else:
+                base_name = str(unique_id)
+            filename = f"generated_assets/{session_id}/{base_name}"
+        else:
+            # フォールバック: 従来の構造
+            filename = f"generated_assets/{unique_id}"
+        
+        # 拡張子を追加
         if content_type == "image/png":
             filename += ".png"
         elif content_type == "image/jpeg":

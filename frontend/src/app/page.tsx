@@ -1,74 +1,29 @@
-"use client";
+"use client"
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Sparkles, ArrowRight } from "lucide-react";
-import { useStore } from "@/lib/store";
+import { ChatInterface } from "@/features/chat/chat-interface";
+import { ResizableLayout } from "@/components/layout/resizable-layout";
+import { ArtifactView } from "@/features/preview/artifact-view";
 
-export default function HomePage() {
-  const router = useRouter();
-  const [topic, setTopic] = useState("");
-  const { setCurrentSessionId, addMessage } = useStore();
-
-  const handleStart = () => {
-    if (!topic.trim()) return;
-
-    // In a real app, we might call API to create session first
-    const newSessionId = `session-${Date.now()}`;
-    setCurrentSessionId(newSessionId);
-
-    // Add initial user message
-    addMessage({
-      id: `msg-${Date.now()}`,
-      role: 'user',
-      content: topic,
-      timestamp: new Date()
-    });
-
-    router.push("/workspace");
-  };
-
+export default function Home() {
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-background p-4">
-      <Card className="w-full max-w-lg border-none shadow-2xl bg-card/50 backdrop-blur-sm">
-        <CardHeader className="text-center">
-          <div className="mx-auto bg-primary/10 p-3 rounded-full w-fit mb-4">
-            <Sparkles className="h-8 w-8 text-primary" />
-          </div>
-          <CardTitle className="text-3xl font-bold">AI Slide Generator</CardTitle>
-          <CardDescription className="text-lg mt-2">
-            What would you like to create a presentation about today?
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="relative">
-            <Input
-              placeholder="e.g. The Future of AI in Healthcare..."
-              className="pl-4 pr-12 h-14 text-lg rounded-full shadow-sm"
-              value={topic}
-              onChange={(e) => setTopic(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleStart()}
-            />
-            <Button
-              size="icon"
-              className="absolute right-1.5 top-1.5 h-11 w-11 rounded-full"
-              onClick={handleStart}
-              disabled={!topic.trim()}
-            >
-              <ArrowRight className="h-5 w-5" />
-            </Button>
-          </div>
+    <main className="h-screen w-screen overflow-hidden bg-background relative selection:bg-primary/20">
+      {/* Animated Aurora Background */}
+      <div className="absolute inset-0 bg-aurora animate-aurora opacity-50 z-0 pointer-events-none" />
 
-          <div className="flex justify-center gap-2 mt-6">
-            <p className="text-xs text-muted-foreground">
-              Powered by Gemini 2.0 & LangGraph
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
+      {/* Glass Overlay for depth */}
+      <div className="absolute inset-0 bg-background/30 backdrop-blur-[1px] z-0 pointer-events-none" />
+
+      {/* Content Layer */}
+      <div className="relative z-10 h-full w-full flex items-center justify-center p-4">
+        <div className="w-full h-full max-w-[1920px] shadow-2xl rounded-2xl overflow-hidden border border-white/5 bg-background/40 backdrop-blur-sm">
+          <ResizableLayout
+            defaultLayout={[40, 60]}
+          >
+            <ChatInterface />
+            <ArtifactView />
+          </ResizableLayout>
+        </div>
+      </div>
+    </main>
   );
 }

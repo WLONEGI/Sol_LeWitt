@@ -32,6 +32,12 @@ def run_agent_workflow(user_input: str, debug: bool = False) -> dict[str, Any]:
     Returns:
         The final state after the workflow completes
     """
+    import asyncio
+    return asyncio.run(run_agent_workflow_async(user_input, debug))
+
+
+async def run_agent_workflow_async(user_input: str, debug: bool = False) -> dict[str, Any]:
+    """Async version of run_agent_workflow. Required because supervisor_node is async."""
     if not user_input:
         raise ValueError("Input could not be empty")
 
@@ -39,14 +45,10 @@ def run_agent_workflow(user_input: str, debug: bool = False) -> dict[str, Any]:
         enable_debug_logging()
 
     logger.info(f"Starting workflow with user input: {user_input}")
-    result = graph.invoke(
+    result = await graph.ainvoke(
         {
-            # Constants
-            "TEAM_MEMBERS": TEAM_MEMBERS,
             # Runtime Variables
             "messages": [{"role": "user", "content": user_input}],
-            "deep_thinking_mode": True,
-            "search_before_planning": True,
         },
         {"recursion_limit": 50}
     )

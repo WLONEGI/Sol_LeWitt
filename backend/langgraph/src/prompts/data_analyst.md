@@ -26,3 +26,5 @@ Return a JSON object with the following structure:
   "design_notes": "Use contrasting colors for the growth bars."
 }
 ```
+
+---

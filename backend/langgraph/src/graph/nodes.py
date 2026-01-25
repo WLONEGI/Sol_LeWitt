@@ -2,20 +2,24 @@ import asyncio
 import logging
 import json
 import random
+import base64
 from copy import deepcopy
 from typing import Literal, Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.types import Command, Send
+from google.genai import types
 
-from src.agents import research_agent, storywriter_agent, visualizer_agent
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.callbacks.manager import adispatch_custom_event
+from langgraph.types import Command, Send
+from langgraph.graph import StateGraph, START, END
+
+from src.agents import storywriter_agent, visualizer_agent
 from src.agents.llm import get_llm_by_type
 from src.config import TEAM_MEMBERS
 from src.config.agents import AGENT_LLM_MAP
 from src.config.settings import settings
 
 from src.prompts.template import apply_prompt_template
-from src.tools.search import google_search_tool
 from src.schemas import (
     PlannerOutput,
     StorywriterOutput,
@@ -27,11 +31,13 @@ from src.schemas import (
     StructuredImagePrompt,
     ResearchTask,     # NEW
     ResearchResult,   # NEW
+    ResearchTaskList, # NEW - for dynamic decomposition
 )
-from src.utils.image_generation import generate_image
+from src.utils.image_generation import generate_image, create_image_chat_session_async, send_message_for_image_async
 from src.utils.storage import upload_to_gcs, download_blob_as_bytes
 
-from .graph_types import State, TaskStep
+
+from .graph_types import State, TaskStep, ResearchSubgraphState
 
 logger = logging.getLogger(__name__)
 
@@ -98,37 +104,28 @@ def _update_artifact(state: State, key: str, value: Any) -> dict[str, Any]:
     return artifacts
 
 
-def research_node(state: State) -> Command[Literal["supervisor"]]:
-    """Node for the researcher agent (ReAct agent with google_search_tool)."""
-    logger.info("Research agent starting task")
-    # Inject specific instruction from plan if available
-    current_step = state["plan"][state["current_step_index"]]
-    instruction_msg = HumanMessage(content=f"Requirement: {current_step['instruction']}", name="supervisor")
-    
-    # Temporarily append instruction to messages for this invoke
-    invoke_state = deepcopy(state)
-    invoke_state["messages"].append(instruction_msg)
-    
-    result = research_agent.invoke(invoke_state, {"recursion_limit": settings.RECURSION_LIMIT_RESEARCHER})  # max tool calls
-    content = result["messages"][-1].content
-    
-    return Command(
-        update={
-            "messages": [
-                HumanMessage(content=settings.RESPONSE_FORMAT.format(role="researcher", content=content), name="researcher")
-            ],
-            "artifacts": _update_artifact(state, f"step_{current_step['id']}_research", content)
-        },
-        goto="reviewer",
-    )
+# Removed legacy research_node
+
 
 
 
 
 def storywriter_node(state: State) -> Command[Literal["supervisor"]]:
-    """Node for storywriter agent - uses structured output."""
+    """
+    Node for the Storywriter agent.
+    
+    Generates slide content and proceeds to Supervisor.
+    """
     logger.info("Storywriter starting task")
-    current_step = state["plan"][state["current_step_index"]]
+    # Find the current in-progress step for this agent
+    try:
+        step_index, current_step = next(
+            (i, step) for i, step in enumerate(state["plan"]) 
+            if step["status"] == "in_progress" and step["role"] == "storywriter"
+        )
+    except StopIteration:
+        logger.error("Storywriter called but no in_progress step found.")
+        return Command(goto="supervisor", update={})
     
     # Provide context including artifacts
     context = f"Instruction: {current_step['instruction']}\n\nAvailable Artifacts: {json.dumps(state.get('artifacts', {}), default=str)}"
@@ -137,25 +134,64 @@ def storywriter_node(state: State) -> Command[Literal["supervisor"]]:
     messages = apply_prompt_template("storywriter", state)
     messages.append(HumanMessage(content=context, name="supervisor"))
     
-    # Use structured output with Pydantic schema
+    # Use with_structured_output for automatic parsing (Gemini Controlled Generation)
     llm = get_llm_by_type(AGENT_LLM_MAP["storywriter"])
     structured_llm = llm.with_structured_output(StorywriterOutput)
     
     try:
+        # with_structured_output returns parsed Pydantic object directly
         result: StorywriterOutput = structured_llm.invoke(messages)
-        content_json = result.model_dump_json(ensure_ascii=False, indent=2)
-        logger.info(f"Storywriter generated {len(result.slides)} slides")
+        content_json = result.model_dump_json(exclude_none=True)
+        logger.info(f"✅ Storywriter generated {len(result.slides)} slides")
+        
     except Exception as e:
         logger.error(f"Storywriter structured output failed: {e}")
         content_json = json.dumps({"error": str(e)}, ensure_ascii=False)
+        result_summary = f"Error: {str(e)}"
+
+    # Update result summary in plan
+    # current_step is a reference to the dict in state["plan"], but we must ensure we save the plan back.
+    current_step["result_summary"] = result.execution_summary if 'result' in locals() else result_summary
+
+    # Create UI-specific messages
+    # 1. Result Summary
+    result_message = AIMessage(
+        content=f"Storywriter generated {len(result.slides)} slides based on the plan.",
+        additional_kwargs={
+            "ui_type": "worker_result", 
+            "role": "storywriter", 
+            "status": "completed",
+            "result_summary": result_summary
+        }, 
+        name="storywriter_ui"
+    )
+    
+    # 2. Artifact Button
+    artifact_message = AIMessage(
+        content="Slides Generated",
+        additional_kwargs={
+            "ui_type": "artifact_view",
+            "artifact_id": f"step_{current_step['id']}_story",
+            "title": "Story Content",
+            "icon": "FileText"
+        },
+        name="storywriter_artifact"
+    )
 
     return Command(
         update={
-            "messages": [HumanMessage(content=settings.RESPONSE_FORMAT.format(role="storywriter", content=content_json), name="storywriter")],
-            "artifacts": _update_artifact(state, f"step_{current_step['id']}_story", content_json)
+            "messages": [
+                HumanMessage(content=settings.RESPONSE_FORMAT.format(role="storywriter", content=content_json), name="storywriter"),
+                result_message,
+                artifact_message
+            ],
+            "artifacts": _update_artifact(state, f"step_{current_step['id']}_story", content_json),
+            "plan": state["plan"]
         },
-        goto="reviewer",
+        goto="supervisor",
     )
+
+
 
 # Helper for single slide processing
 async def process_single_slide(
@@ -163,6 +199,7 @@ async def process_single_slide(
     previous_generations: list[dict] | None = None, 
     override_reference_bytes: bytes | None = None,
     design_context: Any = None,  # DesignContext | None (型ヒントは循環参照を避けるためAny)
+    session_id: str | None = None,  # セッションIDでGCSフォルダ分け
 ) -> ImagePrompt:
     """
     Helper function to process a single slide: generation or edit.
@@ -258,7 +295,7 @@ async def process_single_slide(
                 break
         
         if seed is None:
-            seed = random.randint(0, 2**32 - 1)
+            seed = random.randint(0, 2**31 - 1)
 
         logger.info(f"Generating image {prompt_item.slide_number} with Seed: {seed}, Ref: {bool(reference_image_bytes)}...")
         
@@ -276,7 +313,13 @@ async def process_single_slide(
         
         # 2. Upload to GCS (Blocking -> Thread)
         logger.info(f"Uploading image {prompt_item.slide_number} to GCS...")
-        public_url = await asyncio.to_thread(upload_to_gcs, image_bytes, content_type="image/png")
+        public_url = await asyncio.to_thread(
+            upload_to_gcs, 
+            image_bytes, 
+            content_type="image/png",
+            session_id=session_id,
+            slide_number=prompt_item.slide_number
+        )
         
         # 3. Update Result & Signature
         prompt_item.generated_image_url = public_url
@@ -297,6 +340,93 @@ async def process_single_slide(
     except Exception as image_error:
         logger.error(f"Failed to generate/upload image for prompt {prompt_item.slide_number}: {image_error}")
         # Return item as-is (with None URL) to avoid crashing the whole batch
+        return prompt_item
+
+
+# [NEW] チャットセッションを用いた画像生成（コンテキスト引き継ぎ対応）
+async def process_slide_with_chat(
+    prompt_item: ImagePrompt,
+    chat_session,
+    design_context: Any = None,
+    session_id: str | None = None,  # セッションIDでGCSフォルダ分け
+) -> ImagePrompt:
+    """
+    Helper function to process a single slide using a chat session for context carryover.
+    
+    Unlike process_single_slide(), this function uses an existing chat session
+    where the SDK automatically maintains conversation history.
+    
+    Args:
+        prompt_item (ImagePrompt): The prompt object containing the image generation instruction.
+        chat_session: The chat session object from create_image_chat_session().
+        design_context: DesignContext with layout-based template images (optional).
+        
+    Returns:
+        ImagePrompt: Updated prompt item with `generated_image_url` populated.
+    """
+    try:
+        layout_type = getattr(prompt_item, 'layout_type', 'title_and_content')
+        logger.info(f"[Chat] Processing slide {prompt_item.slide_number} (layout: {layout_type})...")
+        
+        # === Compile Structured Prompt (v2) ===
+        if prompt_item.structured_prompt is not None:
+            final_prompt = compile_structured_prompt(
+                prompt_item.structured_prompt,
+                slide_number=prompt_item.slide_number
+            )
+            logger.info(f"[Chat] Using structured prompt for slide {prompt_item.slide_number}")
+        elif prompt_item.image_generation_prompt:
+            final_prompt = prompt_item.image_generation_prompt
+            logger.info(f"[Chat] Using legacy prompt for slide {prompt_item.slide_number}")
+        else:
+            raise ValueError(f"Slide {prompt_item.slide_number} has neither structured_prompt nor image_generation_prompt")
+        
+        # === Reference Image (Template) ===
+        reference_image_bytes = None
+        if design_context:
+            layout_ref = design_context.get_template_image_for_layout(layout_type)
+            if layout_ref:
+                reference_image_bytes = layout_ref
+                logger.info(f"[Chat] Using template image for layout '{layout_type}'")
+        
+        logger.info(f"[Chat] Generating image {prompt_item.slide_number} via chat session...")
+        
+        # 1. Generate Image via Async Chat Session
+        # Chat session maintains context from previous messages automatically
+        image_bytes = await send_message_for_image_async(
+            chat_session,
+            final_prompt,
+            reference_image=reference_image_bytes
+        )
+        
+        # 2. Upload to GCS (Blocking -> Thread)
+        logger.info(f"[Chat] Uploading image {prompt_item.slide_number} to GCS...")
+        public_url = await asyncio.to_thread(
+            upload_to_gcs, 
+            image_bytes, 
+            content_type="image/png",
+            session_id=session_id,
+            slide_number=prompt_item.slide_number
+        )
+        
+        # 3. Update Result
+        prompt_item.generated_image_url = public_url
+        
+        # ThoughtSignature は Chat 方式では使わない（履歴がセッションで管理されるため）
+        prompt_item.thought_signature = ThoughtSignature(
+            seed=0,  # Chatモードではシードは不使用
+            base_prompt=final_prompt,
+            refined_prompt=None,
+            model_version=AGENT_LLM_MAP["visualizer"],
+            reference_image_url=None,
+            api_thought_signature=None
+        )
+        
+        logger.info(f"[Chat] Image generated and stored at: {public_url}")
+        return prompt_item
+        
+    except Exception as image_error:
+        logger.error(f"[Chat] Failed to generate/upload image for prompt {prompt_item.slide_number}: {image_error}")
         return prompt_item
 
 
@@ -322,7 +452,15 @@ async def visualizer_node(state: State) -> Command[Literal["supervisor"]]:
         Command[Literal["supervisor"]]: Route to supervisor (via reviewer) with generated artifacts.
     """
     logger.info("Visualizer starting task")
-    current_step = state["plan"][state["current_step_index"]]
+    # Find the current in-progress step for this agent
+    try:
+        step_index, current_step = next(
+            (i, step) for i, step in enumerate(state["plan"]) 
+            if step["status"] == "in_progress" and step["role"] == "visualizer"
+        )
+    except StopIteration:
+        logger.error("Visualizer called but no in_progress step found.")
+        return Command(goto="supervisor", update={})
     
     # [NEW] Get DesignContext from state
     design_context = state.get("design_context")
@@ -373,40 +511,75 @@ The template image for each layout will be automatically used as a reference ima
             except Exception:
                 pass
     
-    # Check for previous Anchor URL
-    previous_anchor_url = None
-    for key, json_str in state.get("artifacts", {}).items():
-        if key.endswith("_visual"):
-            try:
-                data = json.loads(json_str)
-                if "anchor_image_url" in data and data["anchor_image_url"]:
-                    previous_anchor_url = data["anchor_image_url"]
-                    logger.info(f"Found existing Anchor URL in artifacts: {previous_anchor_url}")
-                    break # Use the first found anchor
-            except Exception:
-                pass
+    # [REMOVED] Check for previous Anchor URL
+    # previous_anchor_url = None
+    # ... logic removed ...
     
     if previous_generations:
         context += f"\n\n# PREVIOUS GENERATIONS (EDIT MODE)\nUser wants to modify these. Maintain consistency with seed/style if specified:\n{json.dumps(previous_generations, ensure_ascii=False, indent=2)}"
     
     # Build messages with prompt template
     messages = apply_prompt_template("visualizer", state)
-    messages.append(HumanMessage(content=context, name="supervisor"))
     
-    # Use structured output with Pydantic schema
+    # [NEW] Multimodal Context Injection
+    # Constructs a mix of text and image content for the LLM if template images are available.
+    supervisor_content = [{"type": "text", "text": context}]
+    
+    if design_context:
+        # Select representative image for style analysis (Title Slide -> Content -> First Available)
+        target_layout = "title_slide"
+        # Fallback to title_and_content
+        if "title_and_content" in design_context.layout_images or "title_and_content" in design_context.layout_images_base64:
+            target_layout = "title_and_content"
+        # Fallback to first available
+        elif design_context.layout_images:
+            target_layout = list(design_context.layout_images.keys())[0]
+        elif design_context.layout_images_base64:
+            target_layout = list(design_context.layout_images_base64.keys())[0]
+
+        image_url = design_context.layout_images.get(target_layout)
+        # Check base64 map first for in-memory flow
+        image_b64 = design_context.layout_images_base64.get(target_layout)
+
+        if image_url:
+            logger.info(f"Injecting template image (URL) for '{target_layout}' into Visualizer context.")
+            supervisor_content.append({
+                "type": "image_url",
+                "image_url": {"url": image_url}
+            })
+        elif image_b64:
+            logger.info(f"Injecting template image (Base64) for '{target_layout}' into Visualizer context.")
+            supervisor_content.append({
+                "type": "image_url",
+                # LangChain Google GenAI generally accepts 'data:image/png;base64,...' 
+                "image_url": {"url": f"data:image/png;base64,{image_b64}"}
+            })
+
+    messages.append(HumanMessage(content=supervisor_content, name="supervisor"))
+    
+    # Use with_structured_output for automatic parsing (Gemini Controlled Generation)
     llm = get_llm_by_type(AGENT_LLM_MAP["visualizer"])
     structured_llm = llm.with_structured_output(VisualizerOutput)
     
     try:
+        # with_structured_output returns parsed Pydantic object directly
         result: VisualizerOutput = structured_llm.invoke(messages)
-        
+        logger.info("✅ Visualizer output validated.")
+
+        # Proceed with image generation
         prompts = result.prompts
         updated_prompts: list[ImagePrompt] = []
         anchor_bytes: bytes | None = None
         
+        # [NEW] Generate session_id for GCS folder organization
+        import uuid
+        session_id = str(uuid.uuid4())
+        logger.info(f"Generated session_id for GCS storage: {session_id}")
+
+        
         # === [NEW] STRATEGY T: Template-based (Per-Layout Reference) ===
         # This is the highest priority strategy when design_context is available
-        if design_context and design_context.layout_image_bytes:
+        if design_context and design_context.layout_images_base64:
             logger.info("Using per-layout template images (Strategy T)")
             
             # Parallel processing with layout-based reference images
@@ -429,90 +602,32 @@ The template image for each layout will be automatically used as a reference ima
         
         # === Existing Anchor Strategies (when no design_context) ===
         else:
-            anchor_prompt_text = result.anchor_image_prompt
+            # === STRATEGY C (Modified): Sequential Generation ===
+            # No anchor strategy. Visual consistency depends on "Visual style" text in prompt.
+            # We process all slides sequentially or in parallel?
+            # To maintain "Context Carryover" (Chat session), we must process sequentially if we want sharing.
+            # However, without an anchor image, parallel is also fine if prompts are strong enough.
+            # But the requirement is "Visual_style (text prompt) to unify".
+            # The previous logic for sequential processing with chat session was robust for consistency.
+            # Let's keep sequential processing for now as it's safe (Context Carryover).
             
-            if anchor_prompt_text:
-                # === STRATEGY A: Separate Style Anchor (Preferred) ===
-                logger.info("Found 'anchor_image_prompt'. Generating dedicated Style Anchor Image...")
-                
-                anchor_item = ImagePrompt(
-                    slide_number=0, # 0 for Anchor
-                    image_generation_prompt=anchor_prompt_text,
-                    rationale="Style Anchor for consistency"
-                )
-                
-                # Process Anchor
-                processed_anchor = await process_single_slide(
-                    anchor_item, 
-                    previous_generations, 
-                    override_reference_bytes=None,
-                )
-                
-                if processed_anchor.generated_image_url:
-                    try:
-                        anchor_bytes = await asyncio.to_thread(download_blob_as_bytes, processed_anchor.generated_image_url)
-                        logger.info(f"Style Anchor Image downloaded ({len(anchor_bytes)} bytes).")
-                        result.anchor_image_url = processed_anchor.generated_image_url
-                    except Exception as e:
-                        logger.error(f"Failed to download Style Anchor Image: {e}. Proceeding without anchor.")
-                
-                target_prompts = prompts
-
-            elif previous_anchor_url:
-                # === STRATEGY B: Reuse Existing Style Anchor (Deep Edit) ===
-                logger.info(f"Reusing existing Anchor URL: {previous_anchor_url}")
-                try:
-                    anchor_bytes = await asyncio.to_thread(download_blob_as_bytes, previous_anchor_url)
-                    logger.info(f"Existing Style Anchor downloaded ({len(anchor_bytes)} bytes).")
-                    result.anchor_image_url = previous_anchor_url
-                except Exception as e:
-                    logger.error(f"Failed to download existing Style Anchor: {e}. Falling back to Slide 1 strategy.")
-                    anchor_bytes = None
-                    
-                target_prompts = prompts
-
-            elif prompts:
-                # === STRATEGY C: First Slide as Anchor (Fallback) ===
-                logger.info("No 'anchor_image_prompt' found. Using Slide 1 as Anchor (Fallback Strategy)...")
-                
-                anchor_prompt = prompts[0]
-                processed_anchor = await process_single_slide(
-                    anchor_prompt, 
-                    previous_generations, 
-                    override_reference_bytes=None,
-                )
-                updated_prompts.append(processed_anchor)
-                
-                if processed_anchor.generated_image_url:
-                    try:
-                        anchor_bytes = await asyncio.to_thread(download_blob_as_bytes, processed_anchor.generated_image_url)
-                        logger.info("Anchor Image (Slide 1) downloaded.")
-                    except Exception as e:
-                        logger.error(f"Failed to download Anchor Image: {e}.")
-                
-                target_prompts = prompts[1:]
-            else:
-                logger.warning("No prompts generated by Visualizer.")
-                target_prompts = []
-
-            # Parallel Processing for Target Prompts (for Strategy A/B/C)
+            target_prompts = prompts
+            
             if target_prompts:
-                semaphore = asyncio.Semaphore(settings.VISUALIZER_CONCURRENCY)
+                # Create an async chat session for sequential generation
+                seed = random.randint(0, 2**31 - 1)
+                chat_session = await create_image_chat_session_async(seed)
+                logger.info(f"[Sequential] Starting sequential generation for {len(target_prompts)} slides with context carryover...")
                 
-                async def constrained_task(prompt_item: ImagePrompt, idx: int) -> ImagePrompt:
-                    async with semaphore:
-                        return await process_single_slide(
-                            prompt_item, 
-                            previous_generations, 
-                            override_reference_bytes=anchor_bytes,
-                        )
-                
-                tasks = [constrained_task(item, i) for i, item in enumerate(target_prompts)]
-                
-                if tasks:
-                    logger.info(f"Starting parallel generation for {len(tasks)} slides using Anchor...")
-                    processed_targets = await asyncio.gather(*tasks)
-                    updated_prompts.extend(processed_targets)
+                for idx, prompt_item in enumerate(target_prompts):
+                    logger.info(f"[Sequential] Processing slide {idx + 1}/{len(target_prompts)}...")
+                    processed = await process_slide_with_chat(
+                        prompt_item,
+                        chat_session,
+                        design_context=design_context,
+                        session_id=session_id,
+                    )
+                    updated_prompts.append(processed)
         
         # Update results
         # Sort by slide number just in case
@@ -521,22 +636,71 @@ The template image for each layout will be automatically used as a reference ima
         
         content_json = json.dumps(result.model_dump(), ensure_ascii=False, indent=2)
         logger.info(f"Visualizer generated {len(result.prompts)} image prompts with artifacts")
+        result_summary = result.execution_summary
     except Exception as e:
         logger.error(f"Visualizer structured output failed: {e}")
         content_json = json.dumps({"error": str(e)}, ensure_ascii=False)
+        result_summary = f"Error: {str(e)}"
     
-    return Command(
-        update={
-            "messages": [HumanMessage(content=settings.RESPONSE_FORMAT.format(role="visualizer", content=content_json), name="visualizer")],
-            "artifacts": _update_artifact(state, f"step_{current_step['id']}_visual", content_json)
+    # Update result summary in plan
+    current_step["result_summary"] = result_summary
+
+    # Create UI-specific messages
+    # 1. Result Summary
+    result_message = AIMessage(
+        content=f"Visualizer generated {len(result.prompts)} images.",
+        additional_kwargs={
+            "ui_type": "worker_result",
+            "role": "visualizer",
+            "status": "completed",
+            "result_summary": result_summary
         },
-        goto="reviewer",
+        name="visualizer_ui"
     )
 
+    # 2. Artifact Button
+    artifact_message = AIMessage(
+        content="Images Generated",
+        additional_kwargs={
+            "ui_type": "artifact_view",
+            "artifact_id": f"step_{current_step['id']}_visual",
+            "title": "Visual Assets",
+            "icon": "Image",
+            "preview_urls": [p.generated_image_url for p in result.prompts if p.generated_image_url]
+        },
+        name="visualizer_artifact"
+    )
+
+    return Command(
+        update={
+            "messages": [
+                HumanMessage(content=settings.RESPONSE_FORMAT.format(role="visualizer", content=content_json), name="visualizer"),
+                result_message,
+                artifact_message
+            ],
+            "artifacts": _update_artifact(state, f"step_{current_step['id']}_visual", content_json),
+            "plan": state["plan"]
+        },
+        goto="supervisor",
+    )
+
+
 def data_analyst_node(state: State) -> Command[Literal["supervisor"]]:
-    """Node for data analyst agent - uses structured output."""
+    """
+    Node for the Data Analyst agent.
+    
+    Uses Code Execution for calculations and proceeds to Supervisor.
+    """
     logger.info("Data Analyst starting task")
-    current_step = state["plan"][state["current_step_index"]]
+    # Find the current in-progress step for this agent
+    try:
+        step_index, current_step = next(
+            (i, step) for i, step in enumerate(state["plan"]) 
+            if step["status"] == "in_progress" and step["role"] == "data_analyst"
+        )
+    except StopIteration:
+        logger.error("Data Analyst called but no in_progress step found.")
+        return Command(goto="supervisor", update={})
 
     context = f"Instruction: {current_step['instruction']}\n\nAvailable Artifacts: {json.dumps(state.get('artifacts', {}), default=str)}"
 
@@ -544,247 +708,257 @@ def data_analyst_node(state: State) -> Command[Literal["supervisor"]]:
     messages = apply_prompt_template("data_analyst", state)
     messages.append(HumanMessage(content=context, name="supervisor"))
 
-    # Use structured output with Pydantic schema
+    # Enable Code Execution tool (correctly bind tools separately from generation_config)
     llm = get_llm_by_type(AGENT_LLM_MAP["data_analyst"])
-    structured_llm = llm.with_structured_output(DataAnalystOutput)
+    
+    # Bind code_execution tool using correct format for LangChain Google GenAI
+    llm_with_code_exec = llm.bind(tools=[{"code_execution": {}}])
 
     try:
-        result: DataAnalystOutput = structured_llm.invoke(messages)
-        content_json = result.model_dump_json(ensure_ascii=False, indent=2)
-        logger.info(f"Data Analyst generated {len(result.blueprints)} blueprints")
+        # Prompt explicitly enforces JSON structure in the text
+        messages[-1].content += "\n\nIMPORTANT: After performing necessary calculations with code, you MUST output the final result in valid JSON format matching the DataAnalystOutput structure."
+        
+        response = llm_with_code_exec.invoke(messages)
+        content = response.content
+        
+        # Handle multimodal list content (Gemini often returns list of parts)
+        if isinstance(content, list):
+            text_parts = []
+            for part in content:
+                if isinstance(part, dict) and "text" in part:
+                    text_parts.append(part["text"])
+                elif isinstance(part, str):
+                    text_parts.append(part)
+            content = "".join(text_parts)
+        
+        # Try parsing JSON from content (it might be wrapped in markdown or have thought traces)
+        import re
+        json_match = re.search(r"\{.*\}", content, re.DOTALL)
+        if json_match:
+            try:
+                result = DataAnalystOutput.model_validate_json(json_match.group(0))
+                content_json = result.model_dump_json() # Normalize
+                logger.info(f"✅ Data Analyst generated {len(result.blueprints)} blueprints (Code Exec Enabled)")
+            except Exception as e:
+                logger.warning(f"Parsed JSON failed validation: {e}. Returning raw content.")
+                content_json = json.dumps({"raw_output": content, "error": "Validation Failed"}, ensure_ascii=False)
+        else:
+             logger.warning("No JSON found in Data Analyst output (Code Exec used). Returning raw content.")
+             content_json = json.dumps({"raw_output": content}, ensure_ascii=False)
+             result_summary = "Performed analysis via code execution."
+
     except Exception as e:
-        logger.error(f"Data Analyst structured output failed: {e}")
+        logger.error(f"Data Analyst failed: {e}")
         content_json = json.dumps({"error": str(e)}, ensure_ascii=False)
+        result_summary = f"Error: {str(e)}"
 
-    return Command(
-        update={
-            "messages": [HumanMessage(content=settings.RESPONSE_FORMAT.format(role="data_analyst", content=content_json), name="data_analyst")],
-            "artifacts": _update_artifact(state, f"step_{current_step['id']}_data", content_json)
+    # Update result summary in plan
+    current_step["result_summary"] = result_summary if 'result_summary' in locals() else "Analysis completed."
+    if 'result' in locals() and hasattr(result, 'execution_summary'):
+        current_step["result_summary"] = result.execution_summary
+
+    # Create UI-specific messages
+    # 1. Result Summary
+    result_message = AIMessage(
+        content="Data Analysis Completed.",
+        additional_kwargs={
+            "ui_type": "worker_result",
+            "role": "data_analyst",
+            "status": "completed",
+            "result_summary": result_summary
         },
-        goto="reviewer",
+        name="data_analyst_ui"
     )
 
-def reviewer_node(state: State) -> Command[Literal["supervisor", "storywriter", "visualizer", "researcher", "data_analyst"]]:
-    """
-    Generic Reviewer (Critic) Node.
+    # 2. Artifact Button
+    artifact_message = AIMessage(
+        content="Analysis Results",
+        additional_kwargs={
+            "ui_type": "artifact_view",
+            "artifact_id": f"step_{current_step['id']}_data",
+            "title": "Data Analysis Result",
+            "icon": "BarChart"
+        },
+        name="data_analyst_artifact"
+    )
     
-    Evaluates the quality of the output produced by the previous agent against the requirements.
-    Implements a **Reflexion** loop:
-    - **Approved**: Passes control back to Supervisor to proceed to the next step.
-    - **Rejected**: Returns control to the Worker (Writer/Visualizer/etc.) for retry, up to MAX_RETRIES.
-    - **Failed**: Escalates to Supervisor if max retries are exceeded.
-
-    Args:
-        state (State): Current graph state.
-
-    Returns:
-        Command: Routing command to either Supervisor (next step/fail) or Worker (retry).
-    """
-    logger.info("Reviewer evaluating output...")
-    
-    current_step = state["plan"][state["current_step_index"]]
-    current_role = current_step["role"]
-    
-    # Identify the target artifact
-    role_suffix_map = {
-        "storywriter": "story",
-        "visualizer": "visual",
-        "coder": "code",
-        "researcher": "research",
-        "data_analyst": "data"
-    }
-    suffix = role_suffix_map.get(current_role, "unknown")
-    artifact_key = f"step_{current_step['id']}_{suffix}"
-    latest_artifact = state["artifacts"].get(artifact_key)
-    
-    if not latest_artifact:
-        logger.error(f"No artifact found for review at {artifact_key}")
-        # Skip review if artifact is missing (fail safe)
-        return Command(goto="supervisor", update={"error_context": f"Missing artifact for {current_role}"})
-
-    # LLM Evaluation (Using Reasoning Model)
-    messages = [
-        SystemMessage(content="You are a strict QA Lead. Grade the work based on instructions. Output must be in JSON."),
-        HumanMessage(content=f"Instruction: {current_step['instruction']}\nOutput: {latest_artifact}")
-    ]
-    
-    # Use structured output
-    llm = get_llm_by_type("reasoning") # Use reasoning model for critique
-    structured_llm = llm.with_structured_output(ReviewOutput)
-    
-    try:
-        review: ReviewOutput = structured_llm.invoke(messages)
-    except Exception as e:
-        logger.error(f"Review structured output failed: {e}")
-        # If critique fails, default to approved to avoid blocking workflow
-        review = ReviewOutput(approved=True, score=0.5, feedback=f"Auto-approved due to critic error: {e}")
-
-    # --- Routing Logic (Reflexion) ---
-    current_retries = state.get("retry_count", 0)
-    feedback_history = state.get("feedback_history", {})
-    step_id_str = str(current_step['id'])
-    
-    if step_id_str not in feedback_history:
-        feedback_history[step_id_str] = []
-
-    # Case 1: Approved
-    if review.approved:
-        logger.info(f"Work approved (Score: {review.score})")
-        feedback_history[step_id_str].append(f"APPROVED: {review.feedback}")
-        return Command(
-            goto="supervisor",
-            update={
-                "current_quality_score": review.score,
-                "feedback_history": feedback_history,
-                # [FIX] Add message so Supervisor knows Reviewer finished
-                "messages": [HumanMessage(content=f"Step {current_step['id']} approved by Reviewer.", name="reviewer")],
-                # [NEW] Explicit State Update
-                "review_status": "approved"
-            }
-        )
-
-    # Case 2: Rejected (Retry available)
-    if current_retries < settings.MAX_RETRIES:
-        logger.info(f"Rejecting work (Score: {review.score}). Retry {current_retries + 1}/{settings.MAX_RETRIES}")
-        feedback_history[step_id_str].append(f"REJECTED: {review.feedback}")
-        return Command(
-            goto=current_role, # Route back to Worker
-            update={
-                "retry_count": current_retries + 1,
-                "messages": [HumanMessage(content=f"Review Feedback (QC Failed, Score={review.score}): {review.feedback}. Please fix and regenerate.", name="reviewer")],
-                "feedback_history": feedback_history,
-                # [NEW] Explicit State Update
-                "review_status": "rejected"
-            }
-        )
-    
-    # Case 3: Rejected (Max retries exceeded)
-    logger.warning("Max retries reached. Escalating to Supervisor.")
-    feedback_history[step_id_str].append(f"FAILED (Max Retries): {review.feedback}")
     return Command(
-        goto="supervisor",
         update={
-            "error_context": f"Failed criteria after {settings.MAX_RETRIES} retries. Last feedback: {review.feedback}",
-            "feedback_history": feedback_history
-        }
+            "messages": [
+                HumanMessage(content=settings.RESPONSE_FORMAT.format(role="data_analyst", content=content_json), name="data_analyst"),
+                result_message,
+                artifact_message
+            ],
+            "artifacts": _update_artifact(state, f"step_{current_step['id']}_data", content_json),
+            "plan": state["plan"]
+        },
+        goto="supervisor",
     )
 
-def supervisor_node(state: State) -> Command[Literal[*TEAM_MEMBERS, "planner", "__end__", "reviewer"]]:
+
+
+
+
+async def supervisor_node(state: State) -> Command[Literal[*TEAM_MEMBERS, "__end__"]]:
     """
     Supervisor Node (Orchestrator).
 
     Manages the execution flow of the graph.
     - **Task Assignment**: Routes to the appropriate worker based on the current plan step.
-    - **Progress Tracking**: Moves to the next step upon successful completion (signaled by Reviewer).
-    - **Dynamic Replanning**: triggers the Planner if the workflow stalls or encounters unrecoverable errors (Error Context).
+    - **Progress Tracking**: Moves to the next step upon completion.
     - **Completion**: Routes to END when all steps are finished.
+
+    Note: Reviewer removed - Workers now have Self-Critique built in.
+    Workers return directly to Supervisor after completing their task + self-evaluation.
 
     Args:
         state (State): Current graph state.
 
     Returns:
-        Command: Routing command to Worker, Planner, or END.
+        Command: Routing command to Worker or END.
     """
     logger.info("Supervisor evaluating state")
     
-    step_index = state.get("current_step_index", 0)
     plan = state.get("plan", [])
-    error_context = state.get("error_context")
-
-    # --- 1. Dynamic Replanning Trigger ---
-    if error_context:
-        current_replans = state.get("replanning_count", 0)
-        max_replans = settings.MAX_REPLANNING
+    
+    # 1. Find the first non-complete step (or the currently executing one)
+    # We look for 'in_progress' first. If none, we look for the first 'pending'.
+    
+    current_step_index = -1
+    current_step = None
+    
+    # Check for in-progress step
+    for i, step in enumerate(plan):
+        if step["status"] == "in_progress":
+            current_step_index = i
+            current_step = step
+            break
+            
+    # If no step is in progress, find the first pending step
+    if current_step is None:
+        for i, step in enumerate(plan):
+            if step["status"] == "pending":
+                current_step_index = i
+                current_step = step
+                break
+    
+    # If no pending or in-progress steps found, we are done
+    if current_step is None:
+        logger.info("All steps completed. Ending workflow.")
+        return Command(goto="__end__")
         
-        if current_replans >= max_replans:
-            logger.critical(f"Max replanning limit ({max_replans}) reached. Force stopping to prevent infinite loop.")
+    current_role = current_step["role"]
+    
+    # 2. Check logic:
+    # If status is 'in_progress', check if artifacts are present to mark as complete.
+    # If status is 'pending', mark as 'in_progress' and assign.
+    
+    if current_step["status"] == "in_progress":
+        # Check if completed
+        role_suffix_map = {
+            "storywriter": "story",
+            "visualizer": "visual",
+            "researcher": "research",
+            "data_analyst": "data"
+        }
+        suffix = role_suffix_map.get(current_role, "output")
+        artifact_key = f"step_{current_step['id']}_{suffix}"
+        
+        artifacts = state.get("artifacts", {})
+        step_completed = artifact_key in artifacts
+        
+        if step_completed:
+            # Mark current step as complete
+            plan[current_step_index]["status"] = "complete"
+            logger.info(f"Step {current_step_index} ({current_role}) completed. Marking as complete.")
+            
+            # Recursive call or loop to find next step? 
+            # Better to just return update and let supervisor run again (or loop locally)
+            # But specific event emission is needed 
+            
+            # Find NEXT step (local logic to avoid multiple graph cycles if allowed)
+            # But simple approach: Return update, Supervisor will run again and find next pending.
             return Command(
-                goto="__end__",
-                update={
-                    "messages": [HumanMessage(content=f"System Stopped: Unable to complete task after {max_replans} replanning attempts. Last error: {error_context}", name="supervisor")]
+                goto="supervisor", 
+                update={"plan": plan} # Save status change
+            )
+        else:
+             # Still in progress (maybe returning from tool or intermediate step)
+             # just route back to worker? Or if worker just finished it should have created artifact?
+             # If we are here, it means worker returned but artifact not found? OR simply worker not finished?
+             # Actually workers return directly to supervisor.
+             # So if we are here and artifact is missing, we must re-assign to worker (retry).
+             logger.info(f"Step {current_step_index} ({current_role}) in progress but no artifact. Re-assigning.")
+             return Command(goto=current_role)
+
+    elif current_step["status"] == "pending":
+        # New task to start
+        logger.info(f"Starting Step {current_step_index} ({current_role})")
+        
+        # Update status to in_progress
+        plan[current_step_index]["status"] = "in_progress"
+        
+        # Emit Phase Change Event
+        if current_step.get("title"):
+            await adispatch_custom_event(
+                "phase_change", 
+                {
+                    "id": str(current_step["id"]),
+                    "title": current_step["title"],
+                    "agent_name": current_role,
+                    "description": current_step.get("description", "")
                 }
             )
-
-        logger.error(f"Critical Failure/Stall detected: {error_context}. Requesting Re-planning ({current_replans + 1}/{max_replans}).")
+            
         return Command(
-            goto="planner",
-            update={
-                "messages": [HumanMessage(content=f"Replanning Request: Current plan stalled at step {step_index+1}. Reason: {error_context}", name="supervisor")],
-                "retry_count": 0,
-                "replanning_count": current_replans + 1,
-                "error_context": None 
-            }
+            goto=current_role,
+            update={"plan": plan}
         )
+        
+    return Command(goto="__end__")
 
-    # --- 2. Normal Plan Progression ---
-    if step_index >= len(plan):
-        logger.info("All steps completed. Converting artifacts to final response.")
-        return Command(goto="__end__", update={"current_step_index": step_index})
 
-    next_step = plan[step_index]
-    current_role = next_step["role"]
-    
-    # Check if we are coming from a successful Review
-    # Logic: Check explicit "review_status" state first.
-    # If not present (backward compatibility), fall back to checking strict message sender.
-    
-    review_status = state.get("review_status")
-    last_message_from_reviewer = False
-    messages = state.get("messages", [])
-    if messages and messages[-1].name == "reviewer":
-        last_message_from_reviewer = True
 
-    if review_status == "approved" or (review_status is None and last_message_from_reviewer):
-         # Moved to next step
-         new_index = step_index + 1
-         logger.info(f"Step {step_index} approved. Moving to Step {new_index}")
-         
-         if new_index >= len(plan):
-             return Command(goto="__end__", update={"current_step_index": new_index})
-             
-         next_step = plan[new_index] # Update to new next step
-         return Command(
-            goto=next_step["role"],
-            update={
-                "current_step_index": new_index,
-                "retry_count": 0,
-                # "feedback_history": {} # Keep history for audit trail
-                "review_status": "pending" # Reset status for next step
-            }
-        )
 
-    # Initial Assignment (or standard progression)
-    logger.info(f"Assigning task to {next_step['role']}")
-    return Command(
-        goto=next_step["role"],
-        update={"retry_count": 0}
-    )
 
 def planner_node(state: State) -> Command[Literal["supervisor", "__end__"]]:
     """Planner node - uses structured output for reliable JSON execution plan."""
     logger.info("Planner creating execution plan")
-    messages = apply_prompt_template("planner", state)
     
-    # Add search results if needed (keep existing logic)
-    if state.get("search_before_planning"):
-        searched_content = google_search_tool.invoke(state["messages"][-1].content)
-        messages = deepcopy(messages)
-        messages[-1].content += f"\n\n# Relative Search Results\n\n{searched_content}"
-
-    # Use structured output with Pydantic schema
+    # [NEW] Prepare context with serialized plan for <<plan>> placeholder
+    context_state = deepcopy(state)
+    context_state["plan"] = json.dumps(state.get("plan", []), ensure_ascii=False, indent=2)
+    
+    messages = apply_prompt_template("planner", context_state)
+    
+    # Use with_structured_output for automatic parsing (Gemini Controlled Generation)
     llm = get_llm_by_type("reasoning")
     structured_llm = llm.with_structured_output(PlannerOutput)
     
     try:
+        # with_structured_output returns parsed Pydantic object directly
         result: PlannerOutput = structured_llm.invoke(messages)
+        logger.info("✅ Planner output validated.")
         plan_data = [step.model_dump() for step in result.steps]
         
         logger.info(f"Plan generated with {len(plan_data)} steps (structured output).")
         return Command(
             update={
-                "messages": [HumanMessage(content=f"Plan Generated: {len(plan_data)} steps defined.", name="planner")],
+                "messages": [
+                    HumanMessage(content=f"Plan Generated: {len(plan_data)} steps defined.", name="planner"),
+                    AIMessage(
+                        content="Plan Created",
+                        additional_kwargs={
+                            "ui_type": "plan_update",
+                            "plan": plan_data,
+                            "title": "Execution Plan",
+                            "description": "The updated execution plan."
+                        },
+                        name="planner_ui"
+                    )
+                ],
                 "plan": plan_data,
-                "current_step_index": 0,
+                # "current_step_index": 0, # REMOVED
                 "artifacts": {}
             },
             goto="supervisor",
@@ -796,10 +970,26 @@ def planner_node(state: State) -> Command[Literal["supervisor", "__end__"]]:
             goto="__end__"
         )
 
-def coordinator_node(state: State) -> Command[Literal["planner", "__end__"]]:
-    """Coordinator: Gatekeeper."""
+async def coordinator_node(state: State) -> Command[Literal["planner", "supervisor", "__end__"]]:
+    """
+    Coordinator Node: Gatekeeper & UX Manager (HITL).
+    
+    Responsibilities:
+    1. **Ambiguity Resolution**: Qualify user requests before handing off to Planner.
+    2. **Feedback Handling**: Process user feedback after workflow completion.
+    3. **Progress Notification**: Emit SSE events for user experience.
+    
+    Flow:
+    - Initial request → Classify → Handoff to Planner or Chat
+    - Returning with feedback → Route to Supervisor for revision
+    """
+    from langchain_core.callbacks.manager import adispatch_custom_event
+    
     logger.info("Coordinator processing request")
+    
+    # --- Initial classification ---
     messages = apply_prompt_template("coordinator", state)
+    logger.debug(f"Coordinator Messages: {messages}")
     response = get_llm_by_type(AGENT_LLM_MAP["coordinator"]).invoke(messages)
     content = response.content
     
@@ -814,80 +1004,68 @@ def coordinator_node(state: State) -> Command[Literal["planner", "__end__"]]:
         content = "".join(text_parts)
     
     logger.debug(f"Coordinator response: {content}")
-    logger.debug(f"Coordinator Raw Content: '{content}'")
-    logger.debug(f"Tool Calls: {response.tool_calls}")
-    logger.debug(f"Additional Kwargs: {response.additional_kwargs}")
 
     if "handoff_to_planner" in content:
         logger.info("Handing off to planner detected.")
-        return Command(goto="planner")
+        
+        # Emit planning phase start event
+        await adispatch_custom_event(
+            "phase_change",
+            {
+                "id": "planning",
+                "title": "プラン作成中",
+                "agent_name": "planner",
+                "description": "タスクを分析し、実行計画を策定しています..."
+            }
+        )
+        
+        return Command(
+            goto="planner",
+            # update={"progress_phase": "planning"} # REMOVED
+        )
     
-    # Simple chat response
+    # --- 3. Simple chat response (no handoff) ---
     return Command(
         update={"messages": [HumanMessage(content=content, name="coordinator")]},
         goto="__end__"
     )
 
 
+
+
 # === Parallel Researcher Nodes ===
 
-def research_dispatcher_node(state: State) -> dict:
-    """
-    Dispatcher node for parallel research.
-    Prepares tasks for the fan-out edge.
-    If 'research_tasks' is empty (legacy plan), creates a single task from the instruction.
-    Returning dict to update state, allowing conditional edge to run next.
-    """
-    logger.info("Research Dispatcher: Preparing tasks...")
-    
-    # 1. Check for existing tasks from Planner
-    tasks = state.get("research_tasks", [])
-    
-    # 2. If empty, create legacy single task (Backward Compatibility)
-    if not tasks:
-        current_step = state["plan"][state["current_step_index"]]
-        legacy_task = ResearchTask(
-            id=0,
-            perspective="General Investigation",
-            query_hints=[], 
-            priority="medium",
-            expected_output=f"Detailed report based on: {current_step['instruction']}"
-        )
-        tasks = [legacy_task]
-        logger.info("Created legacy single task for research.")
-    
-    # 3. Update State (Clear previous results)
-    return {
-        "research_tasks": tasks,
-        "research_results": [] 
-    }
 
+# === Researcher Subgraph ===
 
-def fan_out_research(state: State) -> list[Send]:
-    """Conditional edge logic for fanning out research tasks to workers."""
-    tasks = state.get("research_tasks", [])
-    logger.info(f"Fanning out {len(tasks)} research tasks.")
-    
-    return [
-        Send("research_worker", {"task": task}) 
-        for task in tasks
-    ]
+def research_agent_node(state: dict) -> dict:
+     """Legacy agent node wrapper if needed, but here we use research_worker_node logic inside the subgraph."""
+     pass
 
-
-def research_worker_node(state: dict) -> dict:
+def research_worker_node(state: ResearchSubgraphState) -> dict:
     """
     Worker node for executing a single research task.
-    Receives only the specific 'task' payload (not full state).
+    Receives only the specific 'task' payload via Send (mapped to state in a way, but Send passes payload).
+    Wait, Send passes payload to the node. If the node is defined as (state: State), 
+    the payload typically acts as the state or merges into it?
+    
+    In LangGraph Map-Reduce:
+    Send("node_name", arg) will invoke the node with `arg` as the state-like input.
     """
+    # When invoked via Send("research_worker", {"task": task}), the input is a dict.
+    # We cast it for type checking manually.
     task: ResearchTask = state.get("task")
     if not task:
-        # Fallback or error handling
-        return {"research_results": []}
+        logger.warning("Research Worker received empty task")
+        return {"internal_research_results": []}
 
     logger.info(f"Worker executing task {task.id}: {task.perspective}")
     
     try:
-        # Construct specific instruction for the Research Agent
+        # Use direct LLM call with Native Grounding (replacing legacy research_agent)
+        from src.prompts.template import load_prompt_markdown
+        system_prompt = load_prompt_markdown("researcher")
+        
         instruction = (
             f"You are investigating: '{task.perspective}'.\n"
             f"Requirement: {task.expected_output}\n"
@@ -895,19 +1073,32 @@ def research_worker_node(state: dict) -> dict:
         if task.query_hints:
             instruction += f"Suggested Queries: {', '.join(task.query_hints)}"
             
-        # Create a fresh message history for this task to keep context clean
-        # We need to simulate a clean state for the agent
-        messages = [HumanMessage(content=instruction, name="dispatcher")]
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=instruction, name="dispatcher")
+        ]
         
-        # Invoke the ReAct Agent
-        # Note: We pass a strict recursion limit to prevent infinite loops
-        result = research_agent.invoke(
-            {"messages": messages}, 
-            {"recursion_limit": settings.RECURSION_LIMIT_RESEARCHER}
+        # LLM with Native Grounding
+        llm = get_llm_by_type("reasoning")
+        grounding_tool = {'google_search': {}}
+        llm_with_search = llm.bind(
+            tools=[grounding_tool],
+            generation_config={"response_modalities": ["TEXT"]}
         )
-        content = result["messages"][-1].content
         
-        # Note: Ideally we parse sources from tool calls, but here we take the final answer
+        response = llm_with_search.invoke(messages)
+        content = response.content
+        
+        # Handle multimodal list content
+        if isinstance(content, list):
+            text_parts = []
+            for part in content:
+                if isinstance(part, dict) and "text" in part:
+                    text_parts.append(part["text"])
+                elif isinstance(part, str):
+                    text_parts.append(part)
+            content = "".join(text_parts)
+        
         res = ResearchResult(
             task_id=task.id,
             perspective=task.perspective,
@@ -915,11 +1106,10 @@ def research_worker_node(state: dict) -> dict:
             sources=[], 
             confidence=1.0
         )
-        return {"research_results": [res]}
+        return {"internal_research_results": [res]}
         
     except Exception as e:
         logger.error(f"Worker failed task {task.id}: {e}")
-        # Return error result to allow aggregation to proceed
         err_res = ResearchResult(
             task_id=task.id,
             perspective=task.perspective,
@@ -927,49 +1117,145 @@ def research_worker_node(state: dict) -> dict:
             sources=[],
             confidence=0.0
         )
-        return {"research_results": [err_res]}
+        return {"internal_research_results": [err_res]}
 
 
-def research_aggregator_node(state: State) -> Command[Literal["reviewer"]]:
+def research_manager_node(state: ResearchSubgraphState) -> Command[Literal["research_worker", "__end__"]]:
     """
-    Aggregates all research results into a single step artifact.
+    Manager Node (Orchestrator):
+    1. Decompose: If no tasks yet, generate them using LLM.
+    2. Fan Out: Send tasks to Workers.
+    3. Aggregate: If results match task count, summarize and exit.
     """
-    logger.info("Aggregating research results...")
-    results = state.get("research_results", [])
-    
-    # Sort by task ID to maintain logical order from Planner
-    results.sort(key=lambda x: x.task_id)
-    
-    # Build Integrated Markdown Report
-    report_lines = ["# Integrated Research Report\n"]
-    
-    for res in results:
-        # Add Section Header
-        report_lines.append(f"## {res.perspective}")
-        if res.confidence < 0.5:
-             report_lines.append("> [!WARNING]\n> This section encountered issues during investigation.\n")
+    logger.info(f"Research Manager active. Decomposed: {state.get('is_decomposed', False)}")
+
+    # Find the current in-progress step for this agent
+    try:
+        step_index, current_step = next(
+            (i, step) for i, step in enumerate(state["plan"]) 
+            if step["status"] == "in_progress" and step["role"] == "researcher"
+        )
+    except StopIteration:
+        logger.error("Research Manager called but no in_progress step found.")
+        return Command(goto="__end__", update={})
+    internal_tasks = state.get("internal_research_tasks", [])
+    results = state.get("internal_research_results", [])
+
+    # === Phase 1: Decomposition ===
+    if not state.get("is_decomposed"):
+        logger.info("Manager: Decomposing research step...")
         
-        # Content
-        report_lines.append(res.report)
-        report_lines.append("\n---\n")
-    
-    full_content = "\n".join(report_lines)
-    
-    # Identify Artifact Key
-    current_step = state["plan"][state["current_step_index"]]
-    
-    return Command(
-        update={
-            "messages": [
-                HumanMessage(
-                    content=settings.RESPONSE_FORMAT.format(
-                        role="research_aggregator", 
-                        content=f"Aggregated {len(results)} reports into final research document."
-                    ), 
-                    name="research_aggregator"
+        # Use Topic Analyzer LLM
+        # We manually load the prompt for clean execution
+        from src.prompts.template import load_prompt_markdown
+        base_prompt = load_prompt_markdown("research_topic_analyzer")
+        full_content = f"{base_prompt}\n\nUser Instruction: {current_step['instruction']}"
+        
+        llm = get_llm_by_type("reasoning")
+        structured_llm = llm.with_structured_output(ResearchTaskList)
+        
+        try:
+            qa_result: ResearchTaskList = structured_llm.invoke(full_content)
+            tasks = qa_result.tasks
+            if not tasks:
+                 raise ValueError("No tasks generated")
+        except Exception as e:
+            logger.warning(f"Decomposition failed: {e}. Fallback to single task.")
+            tasks = [
+                ResearchTask(
+                   id=1, 
+                   perspective="General Investigation", 
+                   query_hints=[], 
+                   priority="high", 
+                   expected_output="Detailed report."
                 )
-            ],
-            "artifacts": _update_artifact(state, f"step_{current_step['id']}_research", full_content)
-        },
-        goto="reviewer",
-    )
+            ]
+
+        logger.info(f"Manager: Generated {len(tasks)} parallel tasks.")
+        
+        sends = [Send("research_worker", {"task": t}) for t in tasks]
+        return Command(
+             update={"internal_research_tasks": tasks, "is_decomposed": True, "internal_research_results": []},
+             goto=sends
+        )
+
+    # === Phase 2: Check & Aggregate ===
+    # Check if all tasks have results
+    if len(results) >= len(internal_tasks):
+        logger.info("Manager: All tasks completed. Aggregating.")
+        results.sort(key=lambda x: x.task_id)
+        
+        # 3. Create Aggregation Result
+        # Simple concatenation or summary?
+        # Ideally, we should summarize the findings into one cohesive report or just list them.
+        # For simplicity, we create a JSON artifact containing all reports.
+        
+        aggregated_content = {
+            "tasks": [t.model_dump() for t in internal_tasks],
+            "results": [r.model_dump() for r in results]
+        }
+        content_json = json.dumps(aggregated_content, ensure_ascii=False)
+        
+        summary_text = f"Completed {len(results)} research tasks. Perspectives: {', '.join([r.perspective for r in results])}"
+        current_step["result_summary"] = summary_text
+
+        # 4. Finish
+        logger.info(f"Research Manager finished. Aggregated {len(results)} results.")
+        
+        # Create UI-specific messages
+        # 1. Result Summary
+        result_message = AIMessage(
+            content=f"Research Completed ({len(results)} tasks).",
+            additional_kwargs={
+                "ui_type": "worker_result",
+                "role": "researcher", 
+                "status": "completed",
+                "result_summary": summary_text
+            },
+            name="researcher_ui"
+        )
+        
+        # 2. Artifact Button
+        artifact_message = AIMessage(
+            content="Research Report",
+            additional_kwargs={
+                "ui_type": "artifact_view",
+                "artifact_id": f"step_{current_step['id']}_research",
+                "title": "Research Report",
+                "icon": "BookOpen"
+            },
+            name="researcher_artifact"
+        )
+
+        return Command(
+            goto="supervisor",
+            update={
+                "artifacts": _update_artifact(state, f"step_{current_step['id']}_research", content_json),
+                "messages": [
+                    result_message,
+                    artifact_message
+                ],
+                "internal_research_tasks": [], # Reset
+                "internal_research_results": [],
+                "is_decomposed": False,
+                "plan": state["plan"]
+            }
+        )
+    
+    # If not all results are in yet, do nothing and wait for other workers (implicitly)
+    logger.info(f"Manager: Waiting for workers. {len(results)}/{len(internal_tasks)} completed.")
+    return Command(update={})
+
+
+def build_researcher_subgraph():
+    """Builds the encapsulated researcher subgraph."""
+    workflow = StateGraph(ResearchSubgraphState)
+    
+    workflow.add_node("manager", research_manager_node)
+    workflow.add_node("research_worker", research_worker_node)
+    
+    workflow.add_edge(START, "manager")
+    workflow.add_edge("research_worker", "manager")
+    
+    return workflow.compile()
+

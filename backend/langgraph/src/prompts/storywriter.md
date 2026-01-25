@@ -37,3 +37,5 @@ Return a JSON object with the following structure:
 4. **Reference Data**: Researcherの成果物がある場合は、その数値/引用を活用。
 5. **Language**: 
     - `title`, `bullet_points`, `key_message`: ユーザーのリクエスト言語（日本語）。
+
+---

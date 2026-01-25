@@ -1,78 +1,41 @@
+"""
+ツールデコレータモジュール
+
+LangChainツール関数に入出力ロギングを追加するデコレータを提供。
+"""
 import logging
 import functools
-from typing import Any, Callable, Type, TypeVar
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
-
-T = TypeVar("T")
 
 
 def log_io(func: Callable) -> Callable:
     """
-    A decorator that logs the input parameters and output of a tool function.
+    ツール関数の入力パラメータと出力をログに記録するデコレータ。
 
     Args:
-        func: The tool function to be decorated
+        func: デコレート対象のツール関数
 
     Returns:
-        The wrapped function with input/output logging
+        入出力ロギング付きのラップされた関数
     """
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        # Log input parameters
+        # 入力パラメータをログ出力
         func_name = func.__name__
         params = ", ".join(
             [*(str(arg) for arg in args), *(f"{k}={v}" for k, v in kwargs.items())]
         )
         logger.debug(f"Tool {func_name} called with parameters: {params}")
 
-        # Execute the function
+        # 関数を実行
         result = func(*args, **kwargs)
 
-        # Log the output
+        # 出力をログ出力
         logger.debug(f"Tool {func_name} returned: {result}")
 
         return result
 
     return wrapper
-
-
-class LoggedToolMixin:
-    """A mixin class that adds logging functionality to any tool."""
-
-    def _log_operation(self, method_name: str, *args: Any, **kwargs: Any) -> None:
-        """Helper method to log tool operations."""
-        tool_name = self.__class__.__name__.replace("Logged", "")
-        params = ", ".join(
-            [*(str(arg) for arg in args), *(f"{k}={v}" for k, v in kwargs.items())]
-        )
-        logger.debug(f"Tool {tool_name}.{method_name} called with parameters: {params}")
-
-    def _run(self, *args: Any, **kwargs: Any) -> Any:
-        """Override _run method to add logging."""
-        self._log_operation("_run", *args, **kwargs)
-        result = super()._run(*args, **kwargs)
-        logger.debug(
-            f"Tool {self.__class__.__name__.replace('Logged', '')} returned: {result}"
-        )
-        return result
-
-
-def create_logged_tool(base_tool_class: Type[T]) -> Type[T]:
-    """
-    Factory function to create a logged version of any tool class.
-
-    Args:
-        base_tool_class: The original tool class to be enhanced with logging
-
-    Returns:
-        A new class that inherits from both LoggedToolMixin and the base tool class
-    """
-
-    class LoggedTool(LoggedToolMixin, base_tool_class):
-        pass
-
-    # Set a more descriptive name for the class
-    LoggedTool.__name__ = f"Logged{base_tool_class.__name__}"
-    return LoggedTool

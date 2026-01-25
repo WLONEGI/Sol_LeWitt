@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<body>
+    <h1>Stream Test</h1>
+    <div id="output" style="white-space: pre-wrap; font-family: monospace;"></div>
+    <script>
+        async function startStream() {
+            const out = document.getElementById('output');
+            out.textContent = "Starting...\n";
+            
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ messages: [{ role: 'user', content: 'test' }] })
+                });
+                
+                out.textContent += `Status: ${response.status}\n`;
+                out.textContent += `Headers: ${JSON.stringify([...response.headers.entries()])}\n`;
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    const text = decoder.decode(value, { stream: true });
+                    out.textContent += `Parsed chunk: [${text}]\n`;
+                }
+                out.textContent += "\nDone.";
+            } catch (e) {
+                out.textContent += `Error: ${e}`;
+            }
+        }
+        startStream();
+    </script>
+</body>
+</html>

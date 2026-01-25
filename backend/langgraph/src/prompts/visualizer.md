@@ -179,6 +179,67 @@ Return a valid JSON object matching `VisualizerOutput` schema:
 
 ---
 
+# ⚠️ CRITICAL: Visual Style Consistency Rules
+
+**All slides in a single presentation MUST share a unified visual identity.**
+
+## Master Style Definition
+When generating `visual_style` for **Slide 1 (or the Title Slide)**, you are defining the **Master Style** for the entire presentation. This includes:
+- **Color Palette**: Primary, secondary, and accent colors
+- **Design Approach**: Minimalist, Bold, Professional, etc.
+- **Visual Elements**: Icon style (flat, 3D, outline), illustration style
+- **Mood/Aesthetic**: Modern, Traditional, Futuristic, etc.
+
+## Subsequent Slides: Inherit and Adapt
+For **Slides 2, 3, 4...**, you MUST:
+
+1. **COPY the core style elements** from Slide 1's `visual_style`:
+   - Same color palette
+   - Same design approach
+   - Same icon/illustration style
+
+2. **ONLY describe what is NEW or DIFFERENT** for this specific slide:
+   - What unique visual element does this slide need? (e.g., chart, timeline, comparison graphic)
+   - How should that element be styled to match the Master Style?
+
+### ✅ Good Example (Slide 2 after a navy/red Master Style):
+```
+"visual_style": "Maintain the Master Style: navy blue background, white text, red accents. 
+For this slide, add a minimalist timeline graphic using flat-design icons. 
+The timeline should flow left-to-right with red connecting lines."
+```
+
+### ❌ Bad Example:
+```
+"visual_style": "Bright green background with playful cartoon illustrations and 
+rainbow gradients."
+```
+(This completely ignores the Master Style established in Slide 1)
+
+## Quick Reference
+| Slide | `visual_style` Content |
+|-------|------------------------|
+| 1 | Full Master Style definition (colors, mood, icon style) |
+| 2+ | "Maintain Master Style. For this slide: [specific additions]" |
+    
+---
+
+# Template Awareness (Multimodal Input)
+
+**IMPORTANT: Check if a Slide Master Image is provided in the input.**
+
+**CASE A: Template Image Provided**
+The image generator will use the provided template image as a strict visual reference for the background and layout.
+*   **Do NOT** describe the background, color blocks, or overall layout in `visual_style`.
+*   **FOCUS `visual_style` on the CONTENT**. Describe how the illustrations, graphs, icons, and specific elements should look to **harmonize** with the provided template.
+    *   *Bad:* "Dark blue background with a white line at the bottom." (Redundant with template)
+    *   *Good:* "A minimalist, flat-design illustration of a rocket ship in white and accent red (#FF0000), using the same line weight as the template's logo. The chart should use the template's accent colors."
+
+**CASE B: NO Template Image**
+*   Describe the **FULL `visual_style`**, including background color, texture, layout, and atmosphere, to guide the generation from scratch.
+
+---
+
 # 入力データの活用
 
 ストーリーライターからの入力には以下の情報が含まれます：
@@ -198,3 +259,5 @@ Return a valid JSON object matching `VisualizerOutput` schema:
 
 - `body` がある場合 → `contents` に反映する
 - `body` がない場合（表紙、セクション区切り、結論スライドなど） → `contents: null` で良い
+
+---

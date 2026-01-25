@@ -114,7 +114,9 @@ async def analyze_pptx_template(
         if all_slides:
             # レイアウトとレンダリング画像をマッピング
             # _prepare_visualization_pptx により、レンダリング順序 = レイアウト定義順序 が保証される
-            layout_image_bytes: Dict[str, bytes] = {}
+            import base64
+            
+            layout_images_base64: Dict[str, str] = {}
             layout_images: Dict[str, str] = {}
             
             for i, layout_info in enumerate(design_context.layouts):
@@ -123,14 +125,17 @@ async def analyze_pptx_template(
                     layout_type = layout_info.layout_type
                     
                     # 同じタイプが複数ある場合は最初のものを使用
-                    if layout_type not in layout_image_bytes:
-                        layout_image_bytes[layout_type] = rendered.image_bytes
+                    if layout_type not in layout_images_base64:
+                        # Base64エンコードしてState保存用辞書に格納
+                        b64_str = base64.b64encode(rendered.image_bytes).decode('utf-8')
+                        layout_images_base64[layout_type] = b64_str
+                        
                         logger.info(
                             f"Layout '{layout_type}' ({layout_info.name}) -> "
                             f"Slide {rendered.slide_number} ({rendered.width}x{rendered.height})"
                         )
                         
-                        # GCSにアップロード
+                        # GCSにアップロード (Optional)
                         if upload_to_gcs_enabled:
                             try:
                                 # upload_to_gcs は自動でユニークなファイル名を生成する
@@ -141,19 +146,19 @@ async def analyze_pptx_template(
                             except Exception as upload_err:
                                 logger.warning(f"Failed to upload {layout_type}: {upload_err}")
             
-            design_context.layout_image_bytes = layout_image_bytes
+            design_context.layout_images_base64 = layout_images_base64
             design_context.layout_images = layout_images
             
             # デフォルト画像は title_slide または最初のレイアウト
-            if "title_slide" in layout_image_bytes:
-                design_context.default_template_image_bytes = layout_image_bytes["title_slide"]
+            if "title_slide" in layout_images_base64:
+                design_context.default_template_image_base64 = layout_images_base64["title_slide"]
                 design_context.default_template_image_url = layout_images.get("title_slide")
-            elif layout_image_bytes:
-                first_type = list(layout_image_bytes.keys())[0]
-                design_context.default_template_image_bytes = layout_image_bytes[first_type]
+            elif layout_images_base64:
+                first_type = list(layout_images_base64.keys())[0]
+                design_context.default_template_image_base64 = layout_images_base64[first_type]
                 design_context.default_template_image_url = layout_images.get(first_type)
             
-            logger.info(f"Rendered {len(layout_image_bytes)} unique layout types")
+            logger.info(f"Rendered {len(layout_images_base64)} unique layout types")
         else:
             logger.warning("No slides rendered from template")
             

@@ -6,7 +6,7 @@ from typing import Final
 
 # Retry limits
 MAX_RETRIES: Final[int] = 3
-MAX_REPLANNING: Final[int] = 3
+
 
 # Concurrency limits
 VISUALIZER_CONCURRENCY: Final[int] = 5

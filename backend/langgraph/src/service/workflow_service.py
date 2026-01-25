@@ -1,11 +1,10 @@
 import logging
 import uuid
+import json
 from typing import Any, AsyncGenerator
+# from langchain_community.adapters.openai import convert_message_to_dict
+# from langgraph.checkpoint.memory import MemorySaver
 
-from langchain_community.adapters.openai import convert_message_to_dict
-from langgraph.checkpoint.memory import MemorySaver
-
-from src.config.env import POSTGRES_DB_URI
 from src.config import TEAM_MEMBERS
 from src.config.settings import settings
 from src.graph import build_graph
@@ -59,48 +58,49 @@ class WorkflowManager:
 
         logger.info("Initializing WorkflowManager...")
 
-        if POSTGRES_DB_URI:
-            if not HAS_POSTGRES_DEPS:
-                error_msg = (
-                    "POSTGRES_DB_URI is set but postgres dependencies "
-                    "(langgraph-checkpoint-postgres, psycopg_pool) are missing. "
-                    "Cannot establish persistence."
-                )
-                logger.critical(error_msg)
-                raise ImportError(error_msg)
+        if not settings.POSTGRES_DB_URI:
+            error_msg = "settings.POSTGRES_DB_URI is not set. Persistence is required."
+            logger.critical(error_msg)
+            raise ValueError(error_msg)
 
-            logger.info("Initializing Postgres Checkpointer...")
-            try:
-                # Create connection pool
-                connection_info = POSTGRES_DB_URI.replace("postgresql+psycopg://", "postgresql://")
-                
-                # Cloud Run / Serverless optimized pool settings
-                self.pool = AsyncConnectionPool(
-                    conninfo=connection_info,  
-                    min_size=1, 
-                    max_size=10, 
-                    open=False,
-                    timeout=30.0
-                )
-                await self.pool.open()
-                
-                # Setup checkpointer
-                checkpointer = AsyncPostgresSaver(self.pool)
-                await checkpointer.setup()
-                
-                # Build graph
-                self.graph = build_graph(checkpointer=checkpointer)
-                logger.info("✅ Graph initialized with AsyncPostgresSaver. Persistence enabled.")
-                
-            except Exception as e:
-                logger.critical(f"❌ Failed to initialize Postgres persistence: {e}")
-                logger.critical("Aborting startup to prevent state loss.")
-                if self.pool:
-                    await self.pool.close()
-                raise e
-        else:
-            logger.warning("⚠️ POSTGRES_DB_URI not set. Using MemorySaver (Non-persistent). State will be lost on restart.")
-            self.graph = build_graph(checkpointer=MemorySaver())
+        if not HAS_POSTGRES_DEPS:
+            error_msg = (
+                "settings.POSTGRES_DB_URI is set but postgres dependencies "
+                "(langgraph-checkpoint-postgres, psycopg_pool) are missing. "
+                "Cannot establish persistence."
+            )
+            logger.critical(error_msg)
+            raise ImportError(error_msg)
+
+        logger.info("Initializing Postgres Checkpointer...")
+        try:
+            # Create connection pool
+            connection_info = settings.POSTGRES_DB_URI.replace("postgresql+psycopg://", "postgresql://")
+            
+            # Cloud Run / Serverless optimized pool settings
+            self.pool = AsyncConnectionPool(
+                conninfo=connection_info,  
+                min_size=1, 
+                max_size=10, 
+                open=False,
+                timeout=30.0
+            )
+            await self.pool.open()
+            
+            # Setup checkpointer
+            checkpointer = AsyncPostgresSaver(self.pool)
+            await checkpointer.setup()
+            
+            # Build graph
+            self.graph = build_graph(checkpointer=checkpointer)
+            logger.info("✅ Graph initialized with AsyncPostgresSaver. Persistence enabled.")
+            
+        except Exception as e:
+            logger.critical(f"❌ Failed to initialize Postgres persistence: {e}")
+            logger.critical("Aborting startup to prevent state loss.")
+            if self.pool:
+                await self.pool.close()
+            raise e
 
         self.initialized = True
 
@@ -132,11 +132,9 @@ async def close_graph():
 async def run_agent_workflow(
     user_input_messages: list[dict[str, Any]],
     debug: bool = False,
-    deep_thinking_mode: bool = False,
-    search_before_planning: bool = False,
     thread_id: str | None = None,
     design_context: Any = None,
-) -> AsyncGenerator[dict[str, Any], None]:
+) -> AsyncGenerator[str, None]:
     """Run the agent workflow with the given user input."""
     if not user_input_messages:
         raise ValueError("Input could not be empty")
@@ -156,26 +154,26 @@ async def run_agent_workflow(
     if design_context:
         logger.info(f"DesignContext provided: {len(design_context.layouts)} layouts")
 
-    # Workflow ID identifies this specific execution run (for logging tools/agents)
-    # Note: thread_id is for persistence, workflow_id is for trace/log uniqueness of this run.
+    # Workflow ID identifies this specific execution run
     workflow_id = str(uuid.uuid4())
 
     streaming_llm_agents = [*TEAM_MEMBERS, "planner", "coordinator"]
 
-    # Thread-safe local variables for coordinator logic
-    coordinator_cache: list[str] = []
-    is_handoff_case: bool = False
-    
     # Configure persistence
     config = {"configurable": {"thread_id": thread_id}}
 
     input_state = {
-        "TEAM_MEMBERS": TEAM_MEMBERS,
         "messages": user_input_messages,
-        "deep_thinking_mode": deep_thinking_mode,
-        "search_before_planning": search_before_planning,
         "design_context": design_context,
     }
+
+    # Helper to yield JSON string
+    def _json_event(type_: str, content: Any = None, metadata: dict = {}) -> str:
+        return json.dumps({
+            "type": type_,
+            "content": content,
+            "metadata": metadata
+        }, ensure_ascii=False)
 
     async for event in graph.astream_events(
         input_state,
@@ -186,6 +184,8 @@ async def run_agent_workflow(
         data = event.get("data")
         name = event.get("name")
         metadata = event.get("metadata")
+        
+        # Determine strict node name (e.g. "planner", "researcher")
         node = (
             ""
             if (metadata.get("checkpoint_ns") is None)
@@ -198,43 +198,82 @@ async def run_agent_workflow(
         )
         run_id = "" if (event.get("run_id") is None) else str(event["run_id"])
 
+        # 1. Agent Start/End Events
         if kind == "on_chain_start" and name in streaming_llm_agents:
             if name == "planner":
-                yield {
-                    "event": "start_of_workflow",
-                    "data": {
-                        "workflow_id": workflow_id, 
-                        "thread_id": thread_id,
-                        "input": user_input_messages
-                    },
-                }
-            yield_payload = {
-                "event": "start_of_agent",
-                "data": {
-                    "agent_name": name,
-                    "agent_id": f"{workflow_id}_{name}_{langgraph_step}",
-                },
-            }
+                # Special event for workflow start
+                yield _json_event("workflow_start", metadata={
+                    "workflow_id": workflow_id,
+                    "thread_id": thread_id
+                })
+            
+            yield _json_event("agent_start", metadata={
+                "agent_name": name,
+                "agent_id": f"{workflow_id}_{name}_{langgraph_step}"
+            })
+
         elif kind == "on_chain_end" and name in streaming_llm_agents:
-            yield_payload = {
-                "event": "end_of_agent",
-                "data": {
-                    "agent_name": name,
-                    "agent_id": f"{workflow_id}_{name}_{langgraph_step}",
-                },
-            }
-        elif kind == "on_chat_model_start" and node in streaming_llm_agents:
-            yield_payload = {
-                "event": "start_of_llm",
-                "data": {"agent_name": node},
-            }
-        elif kind == "on_chat_model_end" and node in streaming_llm_agents:
-            yield_payload = {
-                "event": "end_of_llm",
-                "data": {"agent_name": node},
-            }
+             # Check for Artifact Generation first
+            output = data.get("output")
+            artifact_update = None
+            
+            # Extract 'artifacts' from Command or dict
+            if isinstance(output, dict): # Standard dict state update
+                 artifact_update = output.get("artifacts")
+            elif hasattr(output, "update"): # Command object
+                 artifact_update = output.update.get("artifacts") if isinstance(output.update, dict) else None
+
+            if artifact_update:
+                for key, content in artifact_update.items():
+                    # Determine Artifact Type based on key convention
+                    art_type = "report" # default
+                    if "_story" in key: art_type = "outline"
+                    elif "_visual" in key: art_type = "image" # contains prompts and debug info
+                    elif "_research" in key: art_type = "report"
+                    elif "_data" in key: art_type = "report"
+                    elif "_plan" in key: art_type = "plan"
+                    
+                    artifact_id = f"{workflow_id}_{key}"
+                    
+                    yield _json_event("artifact", content={
+                        "id": artifact_id,
+                        "type": art_type,
+                        "title": f"Artifact: {key}",
+                        "content": content,
+                        "version": 1
+                    }, metadata={"agent_name": name})
+
+            # [NEW] Check for Messages update to extract metadata (sources)
+            # This allows passing grounding metadata from nodes (like researcher) to the frontend
+            messages_update = None
+            if isinstance(output, dict):
+                messages_update = output.get("messages")
+            elif hasattr(output, "update") and isinstance(output.update, dict):
+                 messages_update = output.update.get("messages")
+            
+            if messages_update:
+                # messages_update could be a list or single message
+                if not isinstance(messages_update, list):
+                    messages_update = [messages_update]
+                
+                for msg in messages_update:
+                     # Check additional_kwargs for sources
+                     if hasattr(msg, "additional_kwargs"):
+                         sources = msg.additional_kwargs.get("sources")
+                         if sources:
+                             yield _json_event("sources", content=sources, metadata={"agent_name": name})
+
+            yield _json_event("agent_end", metadata={
+                "agent_name": name,
+                "agent_id": f"{workflow_id}_{name}_{langgraph_step}"
+            })
+
+        # 2. LLM Streaming (Message & Reasoning)
         elif kind == "on_chat_model_stream" and node in streaming_llm_agents:
-            content = data["chunk"].content
+            chunk = data["chunk"]
+            content = chunk.content
+            
+            # Normalize content
             if isinstance(content, list):
                 text_parts = []
                 for part in content:
@@ -243,123 +282,40 @@ async def run_agent_workflow(
                     elif hasattr(part, "text"):
                         text_parts.append(part.text)
                 content = "".join(text_parts)
-
-            if content is None or content == "":
-                yield_payload = {
-                    "event": "message",
-                    "id": data["chunk"].id,
-                    "data": (
-                        data["chunk"].additional_kwargs["reasoning_content"]
-                        if not content and data["chunk"].additional_kwargs.get("reasoning_content")
-                        else (content or "")
-                    ),
-                }
-            else:
-                if node == "coordinator":
-                    if len(coordinator_cache) < settings.MAX_COORD_CACHE_SIZE:
-                        coordinator_cache.append(content)
-                        cached_content = "".join(coordinator_cache)
-                        if cached_content.startswith("handoff"):
-                            is_handoff_case = True
-                            continue
-                        if len(coordinator_cache) < settings.MAX_COORD_CACHE_SIZE:
-                            continue
-                        yield_payload = {
-                            "event": "message",
-                            "id": data["chunk"].id,
-                            "data": cached_content,
-                        }
-                    elif not is_handoff_case:
-                        yield_payload = {
-                            "event": "message",
-                            "id": data["chunk"].id,
-                            "data": content,
-                        }
-                else:
-                    yield_payload = {
-                        "event": "message",
-                        "id": data["chunk"].id,
-                        "data": content,
-                    }
-        elif kind == "on_tool_start" and node in TEAM_MEMBERS:
-            yield_payload = {
-                "event": "tool_call",
-                "data": {
-                    "tool_call_id": f"{workflow_id}_{node}_{name}_{run_id}",
-                    "tool_name": name,
-                    "tool_input": data.get("input"),
-                },
-            }
-        elif kind == "on_tool_end" and node in TEAM_MEMBERS:
-            yield_payload = {
-                "event": "tool_call_result",
-                "data": {
-                    "tool_call_id": f"{workflow_id}_{node}_{name}_{run_id}",
-                    "tool_name": name,
-                    "tool_result": data["output"].content if data.get("output") else "",
-                },
-            }
-        
-        elif kind == "on_chain_end" and name in streaming_llm_agents:
-            # 1. Emit end_of_agent first
-            yield {
-                "event": "end_of_agent",
-                "data": {
-                    "agent_name": name,
-                    "agent_id": f"{workflow_id}_{name}_{langgraph_step}",
-                },
-            }
-
-            # 2. Check for Artifact Generation
-            # outputs from nodes are typically Command objects or dicts with 'update'
-            output = data.get("output")
-            artifact_update = None
             
-            # Extract 'artifacts' from Command or dict
-            if hasattr(output, "update"): # Command object
-                artifact_update = output.update.get("artifacts") if isinstance(output.update, dict) else None
-            elif isinstance(output, dict) and "artifacts" in output: # Standard dict state update
-                artifact_update = output["artifacts"]
-            elif isinstance(output, dict) and "update" in output: # Command as dict
-                artifact_update = output["update"].get("artifacts") if isinstance(output["update"], dict) else None
+             # A. Reasoning Content (Flash Thinking)
+            reasoning = chunk.additional_kwargs.get("reasoning_content")
+            if reasoning:
+                 yield _json_event("reasoning_delta", content=reasoning, metadata={
+                     "agent_name": node,
+                     "id": run_id
+                 })
 
-            if artifact_update:
-                for key, content in artifact_update.items():
-                    # Determine Artifact Type based on key convention (step_{id}_{type})
-                    # Keys: step_1_research, step_2_story, step_3_visual, etc.
-                    art_type = "report" # default
-                    if "_story" in key: art_type = "outline" # or slides
-                    elif "_visual" in key: art_type = "image"
-                    elif "_research" in key: art_type = "report"
-                    elif "_data" in key: art_type = "report"
-                    
-                    # Create a deterministic ID for the artifact
-                    artifact_id = f"{workflow_id}_{key}"
-                    
-                    # Yield Artifact Event
-                    yield {
-                        "event": "artifact",
-                        "data": {
-                            "id": artifact_id,
-                            "type": art_type,
-                            "title": f"Artifact: {key}", # Frontend can rename
-                            "content": content, # JSON string or raw content
-                            "version": 1
-                        }
-                    }
+            # B. Standard Content
+            if content:
+                yield _json_event("message_delta", content=content, metadata={
+                    "agent_name": node,
+                    "id": run_id
+                })
 
-        else:
-            continue
-        yield yield_payload
+        # 3. Tool Events
+        elif kind == "on_tool_start" and node in TEAM_MEMBERS:
+             yield _json_event("tool_call", content={
+                 "tool_name": name,
+                 "input": data.get("input")
+             }, metadata={"agent_name": node, "run_id": run_id})
 
-    if is_handoff_case:
-        yield {
-            "event": "end_of_workflow",
-            "data": {
-                "workflow_id": workflow_id,
-                "messages": [
-                    convert_message_to_dict(msg)
-                    for msg in data["output"].get("messages", [])
-                ],
-            },
-        }
+        elif kind == "on_tool_end" and node in TEAM_MEMBERS:
+            yield _json_event("tool_result", content={
+                "tool_name": name,
+                "result": data["output"].content if data.get("output") else ""
+            }, metadata={"agent_name": node, "run_id": run_id})
+
+        # 4. Custom Events (Phase Change & Progress) [NEW]
+        elif kind == "on_custom_event":
+            # Check event name to distinguish types
+            if name == "phase_change":
+                 yield _json_event("phase_change", content=data, metadata={"agent_name": node, "run_id": run_id})
+            else:
+                 yield _json_event("progress", content=data, metadata={"agent_name": node, "run_id": run_id})
+

@@ -3,6 +3,9 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
+
+
+
 # === Planner Output ===
 class TaskStep(BaseModel):
     """実行計画の1ステップ"""
@@ -13,10 +16,19 @@ class TaskStep(BaseModel):
     instruction: str = Field(
         description="エージェントへの詳細な指示（トーン、対象読者、具体的な要件を含む）"
     )
+    title: str = Field(description="このステップの短いタイトル（例：競合調査、構成案作成）")
     description: str = Field(description="このステップの概要説明")
     design_direction: Optional[str] = Field(
         default=None,
         description="Visualizerへのデザイン指示（トーン、スタイル、モチーフなど）。Storywriterの場合はNoneでよい。"
+    )
+    status: Literal["pending", "in_progress", "complete"] = Field(
+        default="pending",
+        description="ステップの実行ステータス"
+    )
+    result_summary: Optional[str] = Field(
+        default=None,
+        description="実行結果の要約"
     )
 
 
@@ -24,11 +36,6 @@ class TaskStep(BaseModel):
 class PlannerOutput(BaseModel):
     """Plannerノードの出力"""
     steps: List[TaskStep] = Field(description="実行計画のステップリスト")
-    # [NEW] 並列調査タスク（オプション）
-    research_tasks: Optional[List['ResearchTask']] = Field(
-        default=None,
-        description="並列実行する調査タスクのリスト（role='researcher'のステップがある場合に使用）"
-    )
 
 
 
@@ -51,6 +58,7 @@ class SlideContent(BaseModel):
 
 class StorywriterOutput(BaseModel):
     """Storywriterノードの出力"""
+    execution_summary: str = Field(description="実行結果の要約（例：『◯◯に関するスライド構成を5枚作成しました』）")
     slides: List[SlideContent] = Field(description="スライドコンテンツのリスト")
 
 
@@ -177,14 +185,7 @@ class GenerationConfig(BaseModel):
 class VisualizerOutput(BaseModel):
     """Visualizerノードの出力（v2: Markdown Slide Format 対応版）"""
     
-    anchor_image_prompt: Optional[str] = Field(
-        default=None,
-        description="スライド全体のデザインスタイルを定義するアンカー画像用のプロンプト（テキストを含まない、背景やスタイルのみの画像）"
-    )
-    anchor_image_url: Optional[str] = Field(
-        default=None,
-        description="生成された（または既存の）Style Anchor画像のURL。Deep Edit時の再利用に使用。"
-    )
+    execution_summary: str = Field(description="実行結果の要約（例：『全スライドの画像生成プロンプトを作成しました』）")
     prompts: List[ImagePrompt] = Field(description="各スライド用の画像生成プロンプト")
     generation_config: GenerationConfig = Field(
         default_factory=lambda: GenerationConfig(
@@ -228,7 +229,7 @@ class QueryPlannerOutput(BaseModel):
 # === Data Analyst Output ===
 class DataPoint(BaseModel):
     label: str = Field(description="ラベル（例: 2020年, iPhone）")
-    value: float | str = Field(description="値（数値またはテキスト）")
+    value: str = Field(description="値（数値またはテキスト）")
 
 
 class VisualBlueprint(BaseModel):
@@ -242,6 +243,7 @@ class VisualBlueprint(BaseModel):
 
 class DataAnalystOutput(BaseModel):
     """Data Analystノードの出力"""
+    execution_summary: str = Field(description="実行結果の要約（例：『売上データの分析を行い、棒グラフの設計図を作成しました』）")
     blueprints: List[VisualBlueprint] = Field(description="生成された視覚的設計図のリスト")
 
 
@@ -272,3 +274,8 @@ class ResearchResult(BaseModel):
     report: str = Field(description="Markdown形式のレポート（引用付き）")
     sources: List[str] = Field(description="参照URL一覧")
     confidence: float = Field(description="信頼度スコア (0.0-1.0)")
+
+
+class ResearchTaskList(BaseModel):
+    """リサーチタスクリスト（動的分解の結果）"""
+    tasks: List[ResearchTask] = Field(description="分解された調査タスクのリスト")

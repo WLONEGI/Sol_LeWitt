@@ -15,7 +15,9 @@ from .outputs import (
     GenerationConfig,
     ResearchTask,
     ResearchResult,
+    ResearchTaskList,
 )
+
 
 from .design import (
     DesignContext,
@@ -32,6 +34,7 @@ from .design import (
 __all__ = [
     # Outputs
     "TaskStep",
+
     "PlannerOutput",
     "SlideContent",
     "StorywriterOutput",
@@ -46,6 +49,7 @@ __all__ = [
     "GenerationConfig",
     "ResearchTask",
     "ResearchResult",
+    "ResearchTaskList",
     # Design Context
     "DesignContext",
     "ColorScheme",

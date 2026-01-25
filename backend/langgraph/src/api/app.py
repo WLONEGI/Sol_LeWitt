@@ -57,6 +57,22 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.error(f"Validation Error: {exc.errors()}")
+    try:
+        body = await request.body()
+        logger.error(f"Body: {body.decode('utf-8')}")
+    except Exception:
+        pass
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
+
 # Graph is now managed by service
 # graph = build_graph()
 
@@ -73,25 +89,27 @@ class ChatMessage(BaseModel):
     role: str = Field(
         ..., description="The role of the message sender (user or assistant)"
     )
-    content: str | list[ContentItem] = Field(
-        ...,
+    content: str | list[ContentItem] | None = Field(
+        None,
         description="The content of the message, either a string or a list of content items",
+    )
+    parts: list[dict[str, Any]] | None = Field(
+        None, description="Detailed message parts (Vercel AI SDK format)"
     )
 
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(..., description="The conversation history")
     debug: bool = Field(False, description="Whether to enable debug logging")
-    deep_thinking_mode: bool = Field(
-        False, description="Whether to enable deep thinking mode"
-    )
-    search_before_planning: bool = Field(
-        False, description="Whether to search before planning"
-    )
+
     thread_id: str | None = Field(None, description="The thread ID for persistence")
     pptx_template_base64: str | None = Field(
         None, 
         description="Base64-encoded PPTX template file for design context extraction"
+    )
+    data: dict[str, Any] | None = Field(
+        None,
+        description="Additional data payload (e.g. from Vercel AI SDK 'data' field)"
     )
 
 
@@ -155,53 +173,191 @@ async def chat_endpoint(request: ChatRequest, req: Request):
             message_dict = {"role": msg.role}
 
             # Handle both string content and list of content items
-            if isinstance(msg.content, str):
-                message_dict["content"] = msg.content
-            else:
-                # For content as a list, convert to the format expected by the workflow
+            # Handle content, parts, or mixed
+            if msg.content:
+                if isinstance(msg.content, str):
+                    message_dict["content"] = msg.content
+                else:
+                    # For content as a list, convert to the format expected by the workflow
+                    content_items = []
+                    for item in msg.content:
+                        if item.type == "text" and item.text:
+                            content_items.append({"type": "text", "text": item.text})
+                        elif item.type == "image" and item.image_url:
+                            content_items.append(
+                                {"type": "image", "image_url": item.image_url}
+                            )
+                    message_dict["content"] = content_items
+            elif msg.parts:
+                # Handle 'parts' from Vercel AI SDK
                 content_items = []
-                for item in msg.content:
-                    if item.type == "text" and item.text:
-                        content_items.append({"type": "text", "text": item.text})
-                    elif item.type == "image" and item.image_url:
-                        content_items.append(
-                            {"type": "image", "image_url": item.image_url}
-                        )
-
+                for part in msg.parts:
+                    if part.get("type") == "text":
+                        content_items.append({"type": "text", "text": part.get("text")})
+                    elif part.get("type") == "image":
+                         # SDK image part usually has 'image' field as base64 or url
+                         # Need to check exact format. Assuming url or generic mapping for now.
+                         img_url = part.get("image_url") or part.get("image")
+                         if img_url:
+                             content_items.append({"type": "image", "image_url": img_url})
                 message_dict["content"] = content_items
+            else:
+                # Fallback empty
+                message_dict["content"] = ""
 
             messages.append(message_dict)
 
         # [NEW] PPTXテンプレートからDesignContextを抽出（事前処理）
-        design_context = await _extract_design_context(request.pptx_template_base64)
+        # request.dataもチェックする (Vercel SDKがdataフィールドに入れる場合があるため)
+        pptx_b64 = request.pptx_template_base64
+        if not pptx_b64 and request.data:
+            pptx_b64 = request.data.get("pptx_template_base64")
 
-        async def event_generator():
+        design_context = await _extract_design_context(pptx_b64)
+
+        async def stream_generator():
+            """
+            UI Message Stream Protocol (AI SDK v6) 対応のストリームジェネレーター
+            
+            形式: data: {JSON}\n\n (標準SSE形式)
+            """
+            from src.utils.sse_formatter import UIMessageStreamFormatter
+            
+            # フォーマッター初期化
+            formatter = UIMessageStreamFormatter()
+            
             try:
-                async for event in run_agent_workflow(
+                # メッセージ開始
+                yield formatter.start_message()
+                
+                # [NEW] Pre-analysis "Thinking" - Analyzing template
+                if pptx_b64:
+                    yield formatter.custom_data(
+                        "status", 
+                        {"message": "Analyzing template...", "phase": "preprocessing"},
+                        transient=True
+                    )
+
+                async for event_json in run_agent_workflow(
                     messages,
                     request.debug,
-                    request.deep_thinking_mode,
-                    request.search_before_planning,
                     request.thread_id,
-                    design_context=design_context,  # [NEW] 追加
+                    design_context=design_context,
                 ):
-                    # Check if client is still connected
                     if await req.is_disconnected():
                         logger.info("Client disconnected, stopping workflow")
                         break
-                    yield {
-                        "event": event["event"],
-                        "data": json.dumps(event["data"], ensure_ascii=False),
-                    }
+
+                    try:
+                        event = json.loads(event_json)
+                        evt_type = event.get("type")
+                        content = event.get("content")
+                        metadata = event.get("metadata", {})
+                        
+                        logger.info(f"Stream processing event: {evt_type}")
+
+                        if evt_type == "message_delta":
+                            # テキストデルタ → text-delta
+                            yield formatter.text_delta(content)
+                        
+                        elif evt_type == "reasoning_delta":
+                            # 推論プロセス → reasoning-delta
+                            yield formatter.reasoning_delta(content)
+                            
+                        elif evt_type == "artifact":
+                            # アーティファクト → data-artifact
+                            yield formatter.custom_data("artifact", content)
+                        
+                        elif evt_type == "workflow_start":
+                            # ワークフロー開始 → data-workflow
+                            yield formatter.custom_data("workflow", {
+                                "status": "started",
+                                **metadata
+                            })
+                             
+                        elif evt_type == "agent_start":
+                            # エージェント開始 → data-agent
+                            yield formatter.custom_data("agent", {
+                                "status": "started",
+                                **metadata
+                            })
+                        
+                        elif evt_type == "agent_end":
+                            # エージェント終了 → data-agent
+                            yield formatter.custom_data("agent", {
+                                "status": "completed",
+                                **metadata
+                            })
+                             
+                        elif evt_type == "progress":
+                            # 進捗状況 → data-progress
+                            logger.info(f"Yielding progress event: {content}")
+                            yield formatter.custom_data("progress", {
+                                "content": content,
+                                **metadata
+                            })
+
+                        elif evt_type == "tool_call":
+                            # ツール呼び出し → tool-call (SDK標準)
+                            tool_call_id = metadata.get("run_id", f"call-{id(content)}")
+                            yield formatter.tool_call(
+                                tool_call_id=tool_call_id,
+                                tool_name=content.get("tool_name", "unknown"),
+                                args=content.get("input", {})
+                            )
+                        
+                        elif evt_type == "tool_result":
+                            # ツール結果 → tool-result (SDK標準)
+                            tool_call_id = metadata.get("run_id", f"call-{id(content)}")
+                            yield formatter.tool_result(
+                                tool_call_id=tool_call_id,
+                                tool_name=content.get("tool_name", "unknown"),
+                                result=content.get("result", "")
+                            )
+
+                        elif evt_type == "sources":
+                            # ソース/引用 → source-url
+                            if isinstance(content, list):
+                                for i, source in enumerate(content):
+                                    if isinstance(source, str):
+                                        yield formatter.source_url(
+                                            source_id=f"src-{i}",
+                                            url=source
+                                        )
+                                    elif isinstance(source, dict):
+                                        yield formatter.source_url(
+                                            source_id=source.get("id", f"src-{i}"),
+                                            url=source.get("url", ""),
+                                            title=source.get("title")
+                                        )
+
+                        else:
+                            logger.info(f"Unhandled event type: {evt_type}")
+
+                    except json.JSONDecodeError:
+                        logger.error(f"Failed to parse event JSON: {event_json}")
+                        continue
+                
+                # 正常終了
+                yield formatter.finish()
+                        
             except asyncio.CancelledError:
                 logger.info("Stream processing cancelled")
                 raise
+            except Exception as e:
+                # ストリーム内でエラーを通知（UI Message Stream形式）
+                yield formatter.error(str(e), code="STREAM_ERROR")
+                logger.error(f"Stream error: {e}")
 
-        return EventSourceResponse(
-            event_generator(),
+        from fastapi.responses import StreamingResponse
+        from src.utils.sse_formatter import create_sse_headers
+        
+        return StreamingResponse(
+            stream_generator(),
             media_type="text/event-stream",
-            sep="\n",
+            headers=create_sse_headers()
         )
+
     except ValueError as e:
         logger.error(f"Invalid request data: {e}")
         raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
@@ -291,38 +447,131 @@ async def analyze_template_endpoint(file: UploadFile = File(...)):
 @app.get("/api/history")
 async def get_history(uid: str | None = None):
     """
-    Get conversation history for the sidebar.
-    
-    Args:
-        uid: User ID (Firebase UID) to filter history. 
-             Currently, without Auth middleware, this is trusted from client.
+    Get conversation history from the checkpoints table.
     
     Returns:
         List of session summaries.
     """
-    # TODO: Implement actual DB query to 'checkpoints' table or similar.
-    # Since we are using AsyncPostgresSaver, we need a way to list threads.
-    # For now, returning a mock list to unblock Frontend development.
-    
-    mock_history = [
-        {
-            "id": "thread_demo_1",
-            "title": "日本の経済成長プレゼン",
-            "timestamp": "2024-01-20T10:00:00Z",
-            "summary": "AI generated slide deck about Japan's economy."
-        },
-        {
-            "id": "thread_demo_2",
-            "title": "US vs China Tech War",
-            "timestamp": "2024-01-19T15:30:00Z",
-            "summary": "Comparison of technology sectors."
-        }
-    ]
-    return mock_history
+    try:
+        from src.service.workflow_service import _manager
+        
+        if not _manager.pool:
+            # Fallback if pool is not initialized (e.g. dev mode without DB)
+            return []
+
+        # Query to get distinct thread_ids and their latest checkpoint timestamp
+        # LangGraph Postgres Checkpointer uses table 'checkpoints'
+        # Columns: thread_id, checkpoint_id, checkpoint, metadata, parent_checkpoint_id
+        
+        # We want to list unique threads.
+        # Ideally, we should have a separate 'threads' table, but for now we query checkpoints.
+        # We group by thread_id and order by max(checkpoint_id) (which implies time).
+        
+        async with _manager.pool.connection() as conn:
+             async with conn.cursor() as cur:
+                # Optimized query to get unique threads and their last activity
+                # Note: This might be slow on huge datasets without index on thread_id
+                await cur.execute("""
+                    SELECT 
+                        thread_id,
+                        MAX(checkpoint_id) as last_checkpoint
+                    FROM checkpoints 
+                    GROUP BY thread_id
+                    ORDER BY last_checkpoint DESC
+                    LIMIT 20; 
+                """)
+                # TODO: Retrieve 'summary' or 'title' from metadata if available.
+                # For now, we just return the thread_id.
+                
+                rows = await cur.fetchall()
+                
+                history = []
+                for row in rows:
+                    thread_id = row[0]
+                    # We could fetch extra metadata here if needed
+                    history.append({
+                        "id": thread_id,
+                        "title": f"Session {thread_id[:8]}...", # Fallback title
+                        "timestamp": "2024-01-01T00:00:00Z", # Placeholder or parse checkpoint_id if it's a ULID?
+                        "summary": "No summary available"
+                    })
+                
+                return history
+
+    except Exception as e:
+        logger.error(f"Failed to fetch history: {e}")
+        return []
+
+
+@app.get("/api/threads/{thread_id}/messages")
+async def get_thread_messages(thread_id: str):
+    """
+    Retrieve message history for a specific thread.
+    """
+    try:
+        from src.service.workflow_service import _manager
+        graph = _manager.get_graph()
+        
+        config = {"configurable": {"thread_id": thread_id}}
+        state = await graph.aget_state(config)
+        
+        if not state.values:
+            return []
+            
+        messages = state.values.get("messages", [])
+        
+        # Convert LangChain messages to our API format
+        formatted_messages = []
+        for msg in messages:
+            # Handle different message types (HumanMessage, AIMessage, etc.)
+            role = "user"
+            if msg.type == "ai":
+                role = "assistant"
+            elif msg.type == "human":
+                role = "user"
+            elif msg.type == "system":
+                role = "system"
+            elif msg.type == "tool":
+                continue # Skip tool outputs for chat view? Or show them? 
+                         # Usually we hide tool outputs in main chat unless needed.
+            
+            # Extract content
+            content = msg.content
+            if isinstance(content, list):
+                 # simplify for now
+                 text_parts = [c["text"] for c in content if "text" in c]
+                 content = "".join(text_parts)
+            
+            # Extract metadata (e.g. sources, ui_type)
+            additional_kwargs = msg.additional_kwargs or {}
+            sources = additional_kwargs.get("sources", [])
+            ui_type = additional_kwargs.get("ui_type") 
+            
+            # [NEW] Extract reasoning if available (for collapsible thought)
+            # Some providers put it in additional_kwargs, others might differ.
+            reasoning = additional_kwargs.get("reasoning_content")
+
+            formatted_messages.append({
+                "role": role,
+                "content": content,
+                "sources": sources,
+                "name": msg.name,
+                "id": msg.id if hasattr(msg, "id") else None,
+                # [NEW] Custom fields for rich history
+                "ui_type": ui_type,
+                "metadata": additional_kwargs, # Pass full metadata for Plan/Artifact data
+                "reasoning": reasoning 
+            })
+            
+        return formatted_messages
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch thread messages: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 class InpaintRequest(BaseModel):
-    rect: dict[str, int] = Field(..., description="Selection rectangle {x, y, w, h}")
+    rect: dict[str, float] = Field(..., description="Selection rectangle {x, y, w, h}")
     prompt: str = Field(..., description="Modification instruction")
 
 

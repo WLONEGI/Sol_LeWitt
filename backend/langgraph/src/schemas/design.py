@@ -86,22 +86,27 @@ class DesignContext(BaseModel):
         description="レイアウトタイプ → テンプレート画像URL のマッピング"
     )
     
-    # レイアウトタイプ別の画像バイトデータ（内部使用）
-    layout_image_bytes: Dict[str, bytes] = Field(
+    # レイアウトタイプ別の画像バイトデータ（内部使用 - State保存用にBase64化）
+    # JSONシリアライズ可能な形式でStateに保存するため Base64 str を使用
+    layout_images_base64: Dict[str, str] = Field(
         default_factory=dict,
-        exclude=True,  # JSONシリアライズから除外
-        description="レイアウトタイプ → 画像バイトデータ（内部使用）"
+        description="レイアウトタイプ → テンプレート画像(Base64 encoded PNG)"
     )
     
-    # デフォルトのテンプレート画像（レイアウトが見つからない場合のフォールバック）
+    # 互換性維持のためのマッピング (GCS URL) - GCS保存しない場合は空になる
+    layout_images: Dict[str, str] = Field(
+        default_factory=dict,
+        description="レイアウトタイプ → テンプレート画像URL (GCS)"
+    )
+    
+    # デフォルトのテンプレート画像
+    default_template_image_base64: Optional[str] = Field(
+        default=None, 
+        description="デフォルトのテンプレートスライド画像(Base64 encoded PNG)"
+    )
     default_template_image_url: Optional[str] = Field(
         default=None, 
         description="デフォルトのテンプレートスライド画像のURL"
-    )
-    default_template_image_bytes: Optional[bytes] = Field(
-        default=None, 
-        exclude=True,
-        description="デフォルトのテンプレートスライド画像のバイトデータ"
     )
     
     # メタデータ
@@ -109,11 +114,11 @@ class DesignContext(BaseModel):
     slide_master_count: int
     layout_count: int
     
-    # Pydantic V2 設定: bytes型を許可
+    # Pydantic V2 設定
     model_config = {"arbitrary_types_allowed": True}
     
     def get_template_image_for_layout(self, layout_type: str) -> Optional[bytes]:
-        """指定されたレイアウトタイプに対応するテンプレート画像を取得
+        """指定されたレイアウトタイプに対応するテンプレート画像(Bytes)を取得
         
         Args:
             layout_type: 取得したいレイアウトタイプ
@@ -121,20 +126,33 @@ class DesignContext(BaseModel):
         Returns:
             テンプレート画像のバイトデータ、見つからない場合はデフォルト画像
         """
+        import base64
+        
+        target_b64 = None
+        
         # 1. 完全一致で検索
-        if layout_type in self.layout_image_bytes:
-            return self.layout_image_bytes[layout_type]
+        if layout_type in self.layout_images_base64:
+            target_b64 = self.layout_images_base64[layout_type]
         
         # 2. フォールバックマッピング
-        fallback_map: Dict[str, str] = {
-            "section_header": "title_slide",
-            "two_content": "comparison",
-            "content_with_caption": "title_and_content",
-            "picture_with_caption": "title_and_content",
-        }
-        fallback_type = fallback_map.get(layout_type)
-        if fallback_type and fallback_type in self.layout_image_bytes:
-            return self.layout_image_bytes[fallback_type]
+        else:
+            fallback_map: Dict[str, str] = {
+                "section_header": "title_slide",
+                "two_content": "comparison",
+                "content_with_caption": "title_and_content",
+                "picture_with_caption": "title_and_content",
+            }
+            fallback_type = fallback_map.get(layout_type)
+            if fallback_type and fallback_type in self.layout_images_base64:
+                target_b64 = self.layout_images_base64[fallback_type]
         
         # 3. デフォルト画像
-        return self.default_template_image_bytes
+        if not target_b64:
+            target_b64 = self.default_template_image_base64
+            
+        if target_b64:
+            try:
+                return base64.b64decode(target_b64)
+            except Exception:
+                return None
+        return None

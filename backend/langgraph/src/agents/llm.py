@@ -1,35 +1,30 @@
+"""
+LLMファクトリモジュール
+
+設定に基づいて適切なLangChain LLMインスタンスを生成する。
+OpenAI, DeepSeek, Google Gemini (AI Studio / Vertex AI) に対応。
+"""
 from functools import lru_cache
-from typing import Optional, Union, Dict, Any
+from typing import Union
 import logging
 import os
 
 from langchain_openai import ChatOpenAI
 from langchain_deepseek import ChatDeepSeek
 from langchain_google_genai import ChatGoogleGenerativeAI
-# google-cloud-aiplatform / langchain-google-vertexai REMOVED
 
-from src.config.env import (
-    BASIC_MODEL,
-    BASIC_BASE_URL,
-    BASIC_API_KEY,
-    REASONING_MODEL,
-    REASONING_BASE_URL,
-    REASONING_API_KEY,
-    VL_MODEL,
-    VL_BASE_URL,
-    VL_API_KEY,
-    VERTEX_PROJECT_ID,
-    VERTEX_LOCATION,
-    HIGH_REASONING_MODEL,
-    HIGH_REASONING_BASE_URL,
-    HIGH_REASONING_API_KEY,
-)
+from src.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+
 def create_openai_llm(
-    model: str, base_url: str | None = None, api_key: str | None = None, temperature: float = 0.0
+    model: str,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    temperature: float = 0.0
 ) -> ChatOpenAI:
+    """OpenAI互換のLLMインスタンスを生成する。"""
     return ChatOpenAI(
         model=model,
         base_url=base_url,
@@ -37,9 +32,14 @@ def create_openai_llm(
         temperature=temperature,
     )
 
+
 def create_deepseek_llm(
-    model: str, base_url: str | None = None, api_key: str | None = None, temperature: float = 0.0
+    model: str,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    temperature: float = 0.0
 ) -> ChatDeepSeek:
+    """DeepSeekのLLMインスタンスを生成する。"""
     return ChatDeepSeek(
         model=model,
         base_url=base_url,
@@ -47,106 +47,125 @@ def create_deepseek_llm(
         temperature=temperature,
     )
 
+
 def create_gemini_llm(
-    model: str, 
-    api_key: str | None = None, 
+    model: str,
+    api_key: str | None = None,
     project: str | None = None,
     location: str | None = None,
     temperature: float = 0.0
 ) -> ChatGoogleGenerativeAI:
     """
-    Create a ChatGoogleGenerativeAI instance.
-    Supports both AI Studio (API Key) and Vertex AI (ADC/Project).
-    The new langchain-google-genai with google-genai SDK handles both.
+    ChatGoogleGenerativeAI インスタンスを生成する。
+
+    AI Studio (API Key) と Vertex AI (ADC/Project) の両方に対応。
+    google-genai SDK が内部で認証を処理する。
+
+    Args:
+        model: モデル名
+        api_key: Google AI Studio の API キー（Vertex AI 使用時は None）
+        project: Vertex AI プロジェクトID
+        location: Vertex AI ロケーション
+        temperature: 生成温度
+
+    Returns:
+        ChatGoogleGenerativeAI インスタンス
     """
-    
-    # If using Vertex AI (Project provided or no API Key), ensure Env vars are set
-    # as google-genai client often looks for them.
+    # Vertex AI 設定（環境変数経由で google-genai に渡す）
+    # NOTE: langchain-google-genai は環境変数を参照するため、ここで設定する
     if project:
         os.environ["GOOGLE_CLOUD_PROJECT"] = project
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
     if location:
         os.environ["GOOGLE_CLOUD_LOCATION"] = location
-    
-    # If API key is provided, it will be used (AI Studio).
-    # If not, it will fall back to ADC (Vertex AI).
-    
-    kwargs = {
+
+    kwargs: dict = {
         "model": model,
         "temperature": temperature,
     }
+
+    # API Key モード（AI Studio）の場合のみ google_api_key を設定
+    # Vertex AI モードでは環境変数経由で認証されるため不要
     if api_key:
         kwargs["google_api_key"] = api_key
-    elif location:
-        # Explicitly pass location for Vertex AI to prevent defaulting to the runtime region
-        kwargs["location"] = location
-    
-    return ChatGoogleGenerativeAI(**kwargs)
 
+    return ChatGoogleGenerativeAI(**kwargs)
 
 
 @lru_cache(maxsize=10)
 def get_llm_by_type(llm_type: str) -> Union[ChatOpenAI, ChatDeepSeek, ChatGoogleGenerativeAI]:
     """
-    Factory function to get an LLM instance based on the type defined in config.
+    設定に基づいてLLMインスタンスを取得するファクトリ関数。
+
+    キャッシュにより同一タイプのLLMは再利用される。
+
+    Args:
+        llm_type: LLMタイプ ("reasoning", "vision", "high_reasoning", "basic")
+
+    Returns:
+        LLMインスタンス
+
+    Raises:
+        ValueError: 指定されたタイプのモデルが設定されていない場合
     """
+    # 設定から対応するモデル情報を取得
     if llm_type == "reasoning":
-        model = REASONING_MODEL
-        base_url = REASONING_BASE_URL
-        api_key = REASONING_API_KEY
+        model = settings.REASONING_MODEL
+        base_url = settings.REASONING_BASE_URL
+        api_key = settings.REASONING_API_KEY
     elif llm_type == "vision":
-        model = VL_MODEL
-        base_url = VL_BASE_URL
-        api_key = VL_API_KEY
+        model = settings.VL_MODEL
+        base_url = settings.VL_BASE_URL
+        api_key = settings.VL_API_KEY
     elif llm_type == "high_reasoning":
-        model = HIGH_REASONING_MODEL
-        base_url = HIGH_REASONING_BASE_URL
-        api_key = HIGH_REASONING_API_KEY
+        model = settings.HIGH_REASONING_MODEL
+        base_url = settings.HIGH_REASONING_BASE_URL
+        api_key = settings.HIGH_REASONING_API_KEY
     else:  # basic / default
-        model = BASIC_MODEL
-        base_url = BASIC_BASE_URL
-        api_key = BASIC_API_KEY
+        model = settings.BASIC_MODEL
+        base_url = settings.BASIC_BASE_URL
+        api_key = settings.BASIC_API_KEY
 
     if not model:
         raise ValueError(f"No model configured for type '{llm_type}'")
 
     model_lower = model.lower()
 
+    # モデル名に基づいてプロバイダを判定
     if "gpt" in model_lower:
         return create_openai_llm(model, base_url, api_key)
-    elif "deepseek" in model_lower:
+
+    if "deepseek" in model_lower:
         return create_deepseek_llm(model, base_url, api_key)
-    
+
     if "gemini" in model_lower:
-        # Unified Gemini Logic using ONLY Google Gen AI SDK
-        logger.info(f"DEBUG: Checking Auth for {llm_type}. ProjectID: {'SET' if VERTEX_PROJECT_ID else 'None'}, APIKey: {'SET' if api_key else 'None'}")
-        
-        # PRIORITIZE Vertex AI if Project ID is available (User Request)
-        if VERTEX_PROJECT_ID:
-            # STRICT RULE: Do NOT use ChatVertexAI. Use ChatGoogleGenerativeAI with Vertex AI Auth.
+        logger.info(
+            f"DEBUG: Checking Auth for {llm_type}. "
+            f"ProjectID: {'SET' if settings.VERTEX_PROJECT_ID else 'None'}, "
+            f"APIKey: {'SET' if api_key else 'None'}"
+        )
+
+        # Vertex AI を優先（Project ID が設定されている場合）
+        if settings.VERTEX_PROJECT_ID:
             logger.info(f"Using Vertex AI via ChatGoogleGenerativeAI for {llm_type} (model: {model})")
-            
-            # For Vertex AI with google-genai SDK, we typically set env vars or rely on ADC.
-            # ChatGoogleGenerativeAI uses google-genai SDK internally now (v2+).
-            # We explicitly pass None for api_key to ensure it uses ADC/Project.
             return create_gemini_llm(
                 model=model,
-                api_key=None,  # Force ADC / Vertex Mode
-                project=VERTEX_PROJECT_ID,
-                location=VERTEX_LOCATION or "asia-northeast1",
+                api_key=None,  # ADC / Vertex Mode
+                project=settings.VERTEX_PROJECT_ID,
+                location=settings.VERTEX_LOCATION or "asia-northeast1",
                 temperature=0.0
             )
-        # Fallback to API Key (AI Studio)
-        elif api_key:
+
+        # API Key フォールバック（AI Studio）
+        if api_key:
             logger.info(f"Using Google GenAI (API Key) for {llm_type} (model: {model})")
             return create_gemini_llm(model=model, api_key=api_key)
-            
-    else:
-        # Default fallback to OpenAI-compatible
-        return create_openai_llm(model, base_url, api_key)
 
-# Pre-initialize common instances
+    # デフォルト: OpenAI互換
+    return create_openai_llm(model, base_url, api_key)
+
+
+# よく使われるLLMインスタンスを事前初期化
 reasoning_llm = get_llm_by_type("reasoning")
 basic_llm = get_llm_by_type("basic")
 vl_llm = get_llm_by_type("vision")
-
