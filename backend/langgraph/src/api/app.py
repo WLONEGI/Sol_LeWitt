@@ -86,15 +86,13 @@ class ContentItem(BaseModel):
 
 
 class ChatMessage(BaseModel):
+    """Message format following Vercel AI SDK CoreMessage standard."""
     role: str = Field(
         ..., description="The role of the message sender (user or assistant)"
     )
-    content: str | list[ContentItem] | None = Field(
-        None,
-        description="The content of the message, either a string or a list of content items",
-    )
-    parts: list[dict[str, Any]] | None = Field(
-        None, description="Detailed message parts (Vercel AI SDK format)"
+    content: str | list[ContentItem] = Field(
+        ...,
+        description="The content of the message: either a string or a list of content items (SDK polymorphic format)",
     )
 
 
@@ -172,38 +170,20 @@ async def chat_endpoint(request: ChatRequest, req: Request):
         for msg in request.messages:
             message_dict = {"role": msg.role}
 
-            # Handle both string content and list of content items
-            # Handle content, parts, or mixed
-            if msg.content:
-                if isinstance(msg.content, str):
-                    message_dict["content"] = msg.content
-                else:
-                    # For content as a list, convert to the format expected by the workflow
-                    content_items = []
-                    for item in msg.content:
-                        if item.type == "text" and item.text:
-                            content_items.append({"type": "text", "text": item.text})
-                        elif item.type == "image" and item.image_url:
-                            content_items.append(
-                                {"type": "image", "image_url": item.image_url}
-                            )
-                    message_dict["content"] = content_items
-            elif msg.parts:
-                # Handle 'parts' from Vercel AI SDK
-                content_items = []
-                for part in msg.parts:
-                    if part.get("type") == "text":
-                        content_items.append({"type": "text", "text": part.get("text")})
-                    elif part.get("type") == "image":
-                         # SDK image part usually has 'image' field as base64 or url
-                         # Need to check exact format. Assuming url or generic mapping for now.
-                         img_url = part.get("image_url") or part.get("image")
-                         if img_url:
-                             content_items.append({"type": "image", "image_url": img_url})
-                message_dict["content"] = content_items
+            # Handle content (string or list of content items - SDK polymorphic format)
+            if isinstance(msg.content, str):
+                message_dict["content"] = msg.content
             else:
-                # Fallback empty
-                message_dict["content"] = ""
+                # Content is a list of ContentItem
+                content_items = []
+                for item in msg.content:
+                    if item.type == "text" and item.text:
+                        content_items.append({"type": "text", "text": item.text})
+                    elif item.type == "image" and item.image_url:
+                        content_items.append(
+                            {"type": "image", "image_url": item.image_url}
+                        )
+                message_dict["content"] = content_items if content_items else ""
 
             messages.append(message_dict)
 
