@@ -8,6 +8,7 @@ export async function POST(req: NextRequest) {
         const backendUrl = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
         const body = await req.json();
 
+        console.log(`[Proxy] Requesting ${backendUrl}/api/chat/stream`);
         const response = await fetch(`${backendUrl}/api/chat/stream`, {
             method: 'POST',
             headers: {
@@ -16,7 +17,7 @@ export async function POST(req: NextRequest) {
             body: JSON.stringify(body),
         });
 
-        console.log(`Proxy to ${backendUrl} status: ${response.status}`);
+        console.log(`[Proxy] Response status: ${response.status}`);
 
         if (!response.ok) {
             return NextResponse.json(
@@ -25,15 +26,13 @@ export async function POST(req: NextRequest) {
             );
         }
 
-        // Forward the stream directly with appropriate headers
-        // UI Message Stream Protocol (AI SDK v6)
+        // Forward the stream directly with Data Stream Protocol headers
         return new Response(response.body, {
             headers: {
-                'Content-Type': 'text/event-stream',
+                'Content-Type': 'text/plain; charset=utf-8',
                 'Cache-Control': 'no-cache, no-transform',
                 'Connection': 'keep-alive',
-                'X-Content-Type-Options': 'nosniff',
-                'x-vercel-ai-ui-message-stream': 'v1',
+                'X-Vercel-AI-Data-Stream': 'v1',
             },
         });
 

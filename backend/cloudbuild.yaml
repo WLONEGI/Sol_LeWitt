@@ -1,0 +1,39 @@
+steps:
+  # 1. Dockerイメージのビルド
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-t", "gcr.io/$PROJECT_ID/ai-slide-backend", "."]
+
+  # 2. Dockerイメージのプッシュ
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["push", "gcr.io/$PROJECT_ID/ai-slide-backend"]
+
+  # 3. Cloud Runへのデプロイ
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args:
+      - "run"
+      - "deploy"
+      - "ai-slide-backend"
+      - "--image"
+      - "gcr.io/$PROJECT_ID/ai-slide-backend"
+      - "--region"
+      - "asia-northeast1"
+      - "--platform"
+      - "managed"
+      - "--allow-unauthenticated"
+      - "--memory"
+      - "2Gi"
+      - "--cpu"
+      - "2"
+      - "--service-account"
+      - "langgraph-sa@aerobic-stream-483505-a0.iam.gserviceaccount.com"
+      - "--add-cloudsql-instances"
+      - "aerobic-stream-483505-a0:asia-northeast1:langgraph-pg-core"
+      - "--set-env-vars"
+      - "GCS_BUCKET_NAME=ai-slide-artifacts-aerobic-stream-483505-a0,GCP_PROJECT_ID=$PROJECT_ID,VERTEX_PROJECT_ID=$PROJECT_ID,VERTEX_LOCATION=global,BASIC_MODEL=gemini-3-flash-preview,REASONING_MODEL=gemini-3-flash-preview,HIGH_REASONING_MODEL=gemini-3-pro-preview,VL_MODEL=gemini-3-pro-image-preview,LANGCHAIN_TRACING_V2=true,LANGCHAIN_ENDPOINT=https://api.smith.langchain.com,LANGCHAIN_PROJECT=pr-slight-might-72"
+
+      - "--set-secrets"
+      - "POSTGRES_DB_URI=POSTGRES_DB_URI:latest,GOOGLE_CSE_ID=GOOGLE_CSE_ID:latest,JINA_API_KEY=JINA_API_KEY:latest,LANGCHAIN_API_KEY=LANGCHAIN_API_KEY:latest"
+
+images:
+  - "gcr.io/$PROJECT_ID/ai-slide-backend"

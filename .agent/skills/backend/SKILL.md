@@ -28,9 +28,16 @@ description: Procedures for starting and verifying the Python FastAPI backend lo
     uv sync
     ```
 
-4.  サーバーを起動します。
+4.  **Database Connection (Cloud SQL Proxy)**:
+    ローカル開発では、GCP上のCloud SQLに接続するためにProxyが必要です。
+    別のターミナルで以下を実行してください（インスタンス接続名は環境に合わせて変更）：
+    ```bash
+    ./cloud-sql-proxy aerobic-stream-483505-a0:asia-northeast1:langgraph-pg-core
+    ```
+
+5.  サーバーを起動します。
     ```bash
     # 仮想環境内であれば uv run は省略可能ですが、付けておくと確実です
     uv run uvicorn src.api.app:app --reload --port 8000
     ```
-5.  [http://localhost:8000/health](http://localhost:8000/health) にアクセスし、`{"status": "ok"}` が返ることを確認します。
+6.  [http://localhost:8000/health](http://localhost:8000/health) にアクセスし、`{"status": "ok"}` が返ることを確認します。

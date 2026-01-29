@@ -88,7 +88,7 @@ graph TD
 
 ### 4.1 LLMファクトリパターン
 
-`src/agents/llm.py` で定義されるファクトリパターンにより、モデルタイプに応じたLLMインスタンスを取得します。
+`src/infrastructure/llm/llm.py` で定義されるファクトリパターンにより、モデルタイプに応じたLLMインスタンスを取得します。
 
 ```python
 # LLMタイプ → モデル取得
@@ -108,18 +108,17 @@ llm = get_llm_by_type("vision")     # gemini-3-pro-image-preview
 
 ### 4.3 認証フロー
 
-1. **Vertex AI 優先**: `VERTEX_PROJECT_ID` が設定されている場合、Application Default Credentials (ADC) を使用
-2. **AI Studio フォールバック**: API キーが設定されている場合、Google AI Studio 経由でアクセス
+1. **Vertex AI (必須)**: `VERTEX_PROJECT_ID` が設定されている場合、Application Default Credentials (ADC) を使用してアクセスします。
 
 ```python
 # Vertex AI モード
-if settings.VERTEX_PROJECT_ID:
-    return create_gemini_llm(
-        model=model,
-        api_key=None,  # ADC使用
-        project=settings.VERTEX_PROJECT_ID,
-        location=settings.VERTEX_LOCATION or "asia-northeast1"
-    )
+logger.info(f"Using Vertex AI via ChatVertexAI for {llm_type} (model: {model})")
+return create_gemini_llm(
+    model=model,
+    project=settings.VERTEX_PROJECT_ID,
+    location=settings.VERTEX_LOCATION or "asia-northeast1",
+    temperature=0.0
+)
 ```
 
 ### 4.4 エージェント別LLMマッピング
@@ -156,12 +155,12 @@ result: StorywriterOutput = structured_llm.invoke(messages)
 
 | スキーマ | 用途 | 定義場所 |
 | :--- | :--- | :--- |
-| `PlannerOutput` | 実行計画 | `src/schemas/outputs.py` |
-| `StorywriterOutput` | スライドコンテンツ | `src/schemas/outputs.py` |
-| `VisualizerOutput` | 画像生成プロンプト | `src/schemas/outputs.py` |
-| `DataAnalystOutput` | データ分析結果 | `src/schemas/outputs.py` |
-| `ResearchTaskList` | 調査タスク分解 | `src/schemas/outputs.py` |
-| `DesignContext` | テンプレートデザイン情報 | `src/schemas/design.py` |
+| `PlannerOutput` | 実行計画 | `src/shared/schemas/outputs.py` |
+| `StorywriterOutput` | スライドコンテンツ | `src/shared/schemas/outputs.py` |
+| `VisualizerOutput` | 画像生成プロンプト | `src/shared/schemas/outputs.py` |
+| `DataAnalystOutput` | データ分析結果 | `src/shared/schemas/outputs.py` |
+| `ResearchTaskList` | 調査タスク分解 | `src/shared/schemas/outputs.py` |
+| `DesignContext` | テンプレートデザイン情報 | `src/shared/schemas/design.py` |
 
 ---
 
@@ -268,7 +267,7 @@ class ThoughtSignature(BaseModel):
 
 **ヘッダー:**
 ```
-Content-Type: text/event-stream
+Content-Type: text/plain
 x-vercel-ai-ui-message-stream: v1
 ```
 
@@ -303,39 +302,31 @@ sequenceDiagram
 ## 9. ディレクトリ構造（Backend）
 
 ```
-backend/langgraph/
+backend/
 ├── src/
-│   ├── agents/           # エージェント定義・LLMファクトリ
-│   │   ├── llm.py        # LLMファクトリ (get_llm_by_type)
-│   │   └── agents.py     # エージェント設定
-│   ├── api/              # FastAPI エンドポイント
-│   │   └── app.py        # メインAPI定義
-│   ├── config/           # 環境変数・設定
-│   │   ├── settings.py   # Pydantic Settings
-│   │   ├── agents.py     # エージェント別LLMマッピング
-│   │   └── constants.py  # 定数定義
-│   ├── graph/            # LangGraph グラフ構築・ノード実装
-│   │   ├── builder.py    # グラフの定義
-│   │   ├── nodes.py      # ノードの実装
-│   │   └── graph_types.py # State定義
-│   ├── prompts/          # プロンプトテンプレート
-│   │   ├── template.py   # テンプレートローダー
-│   │   ├── coordinator.md
-│   │   ├── planner.md
-│   │   ├── storywriter.md
-│   │   ├── visualizer.md
-│   │   └── researcher.md
-│   ├── schemas/          # Pydantic データモデル
-│   │   ├── outputs.py    # 出力スキーマ
-│   │   └── design.py     # デザインコンテキスト
-│   ├── service/          # ワークフロー実行サービス
-│   │   └── workflow_service.py
-│   ├── tools/            # LangChain ツール
-│   └── utils/            # ユーティリティ
-│       ├── image_generation.py  # 画像生成
-│       ├── sse_formatter.py     # SSEフォーマッター
-│       ├── storage.py           # GCS操作
-│       └── template_analyzer.py # PPTXテンプレート解析
+│   ├── app/             # API Layer
+│   │   ├── app.py       # FastAPI initialization
+│   │   └── routers/     # API routes
+│   ├── core/            # Application Logic
+│   │   └── workflow/    # LangGraph definition
+│   │       ├── builder.py
+│   │       ├── nodes/   # Node implementations
+│   │       └── state.py # Graph state definition
+│   ├── domain/          # Business Modules (Domain Logic)
+│   │   ├── researcher/
+│   │   ├── designer/
+│   │   ├── writer/
+│   │   └── renderer/    # PPTX rendering
+│   ├── infrastructure/  # Infrastructure Layer (External Clients)
+│   │   ├── database/    # DB connections/checkpointers
+│   │   ├── storage/     # GCS client
+│   │   └── llm/         # LLM provider configs
+│   ├── shared/          # Shared Components
+│   │   ├── schemas/     # Pydantic models
+│   │   ├── config/      # Settings & Env
+│   │   └── utils/       # Shared helpers (SSE, etc.)
+│   └── resources/       # Non-code assets
+│       └── prompts/     # Prompt templates
 ├── Dockerfile            # Cloud Run 用 Dockerfile
 ├── main.py               # CLI エントリーポイント
 └── server.py             # API サーバー起動スクリプト
@@ -348,7 +339,7 @@ backend/langgraph/
 | カテゴリ | 技術 |
 | :--- | :--- |
 | フレームワーク | FastAPI, LangGraph |
-| LLM | Gemini (langchain-google-genai, google-genai SDK) |
+| LLM | Gemini (langchain-google-vertexai, google-genai SDK) |
 | 永続化 | PostgreSQL (langgraph-checkpoint-postgres) |
 | ストレージ | Google Cloud Storage |
 | コンテナ | Docker, Cloud Run |

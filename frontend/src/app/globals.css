@@ -7,46 +7,52 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  /* Deep Space Theme - Light Mode (keeping it clean but aligned) */
-  --background: 210 40% 98%;
-  --foreground: 222 47% 11%;
+  /* Minimalist Theme - Light Mode */
+  --background: 210 20% 95%;
+  /* Very Light Gray */
+  /* Very Light Gray */
+  --foreground: 210 10% 10%;
+  /* Nearly black gray */
 
   --card: 0 0% 100%;
-  --card-foreground: 222 47% 11%;
+  --card-foreground: 210 10% 10%;
 
   --popover: 0 0% 100%;
-  --popover-foreground: 222 47% 11%;
+  --popover-foreground: 210 10% 10%;
 
-  --primary: 262 80% 50%;
-  /* Electric Violet */
+  --primary: 210 10% 10%;
+  /* Dark for contrast */
   --primary-foreground: 210 40% 98%;
 
   --secondary: 210 40% 96.1%;
-  --secondary-foreground: 222 47% 11%;
+  --secondary-foreground: 210 10% 10%;
 
   --muted: 210 40% 96.1%;
   --muted-foreground: 215.4 16.3% 46.9%;
 
   --accent: 210 40% 96.1%;
-  --accent-foreground: 222 47% 11%;
+  --accent-foreground: 210 10% 10%;
 
   --destructive: 0 84.2% 60.2%;
   --destructive-foreground: 210 40% 98%;
 
   --border: 214.3 31.8% 91.4%;
   --input: 214.3 31.8% 91.4%;
-  --ring: 262 80% 50%;
+  --ring: 210 10% 10%;
+  /* Dark ring */
 
-  --radius: 0.75rem;
+  --radius: 0.5rem;
+  /* Slightly sharper corners */
 
-  --sidebar: 0 0% 98%;
+  --sidebar: 210 20% 96%;
+  /* Light Gray Sidebar */
   --sidebar-foreground: 240 5.3% 26.1%;
   --sidebar-primary: 240 5.9% 10%;
   --sidebar-primary-foreground: 0 0% 98%;
   --sidebar-accent: 240 4.8% 95.9%;
   --sidebar-accent-foreground: 240 5.9% 10%;
   --sidebar-border: 220 13% 91%;
-  --sidebar-ring: 262 80% 50%;
+  --sidebar-ring: 215 27.9% 16.9%;
 }
 
 .dark {
@@ -123,26 +129,13 @@
   --color-sidebar-border: hsl(var(--sidebar-border));
   --color-sidebar-ring: hsl(var(--sidebar-ring));
 
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
-  --font-display: var(--font-outfit), var(--font-sans);
+  --font-sans: var(--font-dm-sans), var(--font-noto-sans-jp), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-libre-baskerville), var(--font-noto-serif-jp), ui-serif, Georgia, serif;
+  --font-display: var(--font-dm-sans), var(--font-noto-sans-jp), ui-sans-serif;
   --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, monospace;
-
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
+  --font-typewriter: var(--font-courier-prime), monospace;
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-
-  @keyframes aurora {
-    0% {
-      background-position: 50% 50%, 50% 50%;
-    }
-
-    100% {
-      background-position: 350% 50%, 350% 50%;
-    }
-  }
-
-  --animate-aurora: aurora 60s linear infinite;
 }
 
 @layer base {
@@ -154,46 +147,13 @@
     @apply bg-background text-foreground font-sans antialiased selection:bg-primary/20 selection:text-primary-foreground;
   }
 
-  /* Custom Scrollbar for Webkit */
-  ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-  }
-
-  ::-webkit-scrollbar-track {
-    @apply bg-transparent;
-  }
-
-  ::-webkit-scrollbar-thumb {
-    @apply bg-muted-foreground/20 rounded-full hover:bg-muted-foreground/40 transition-colors;
-  }
+  /* Custom Scrollbar - Reverting to native behavior for auto-hide/minimalist feel on Mac */
+  /* If specific styling is needed later, we can add a transparent-by-default approach */
+  /* ::-webkit-scrollbar { width: 6px; height: 6px; } ... removed */
 }
 
-@layer components {
-
-  /* Glassmorphism Utilities */
-  .glass-panel {
-    @apply bg-background/60 backdrop-blur-xl border border-white/10 shadow-lg;
-  }
-
-  .glass-card {
-    @apply bg-card/40 backdrop-blur-md border border-white/5 hover:bg-card/60 transition-colors duration-300;
-  }
-
-  .glass-button {
-    @apply bg-primary/20 hover:bg-primary/30 text-primary-foreground backdrop-blur-md border border-primary/20 transition-all duration-300;
-  }
-
-  /* Gradient text */
-  .text-gradient {
-    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary to-blue-500 animate-pulse;
-  }
-
-  /* Aurora Background */
-  .bg-aurora {
-    background-image:
-      radial-gradient(at 0% 0%, hsla(253, 16%, 7%, 1) 0, transparent 50%),
-      radial-gradient(at 50% 0%, hsla(225, 39%, 30%, 1) 0, transparent 50%),
-      radial-gradient(at 100% 0%, hsla(339, 49%, 30%, 1) 0, transparent 50%);
-  }
+@utility font-typewriter {
+  font-family: var(--font-typewriter);
 }
+
+@layer components {}

@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Check, X, Loader2 } from "lucide-react"
-import { useArtifactStore } from "@/store/artifact"
+import { useArtifactStore } from "../store/artifact"
 import { cn } from "@/lib/utils"
 
 interface SlideViewerProps {
@@ -113,7 +113,7 @@ export function SlideViewer({ content, imageId }: SlideViewerProps) {
                 // Update the artifact with the new image
                 // Assuming content structure: { ..., url: new_url } or just new_url string
                 const newContent = typeof content === 'string' ? data.new_image_url : { ...content, url: data.new_image_url }
-                updateArtifactContent(newContent)
+                updateArtifactContent(imageId, newContent)
                 handleClear()
             } else {
                 // Stub behavior or error

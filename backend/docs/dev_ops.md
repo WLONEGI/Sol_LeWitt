@@ -31,7 +31,7 @@ uv sync
 ```bash
 # 環境変数の設定
 cp .env.example .env
-# .env を編集してAPIキーを設定
+# .env を編集してVertex AI Project ID設定
 
 # 開発サーバー起動 (Hot Reload有効)
 uv run server.py
@@ -45,8 +45,7 @@ make serve
 
 アプリケーションの動作には以下の環境変数が必要です。
 
-### LLM API Keys
-*   `GOOGLE_API_KEY`: Google GenAI (Gemini) 用
+### LLM Configuration
 *   `BASIC_MODEL`: 基本モデル名 (例: `gemini-1.5-flash`)
 *   `REASONING_MODEL`: 推論モデル名 (例: `gemini-1.5-pro`)
 *   `VL_MODEL`: Vision-Languageモデル名

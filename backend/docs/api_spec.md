@@ -36,7 +36,7 @@ Vercel AI SDK v6 UI Message Stream Protocol に準拠しています。
 
 #### Response
 
-*   **Content-Type**: `text/event-stream`
+*   **Content-Type**: `text/plain`
 *   **Headers**: `x-vercel-ai-ui-message-stream: v1`
 
 ストリームは Vercel AI SDK UI Message Stream Protocol に基づき、以下のイベントを送信します。

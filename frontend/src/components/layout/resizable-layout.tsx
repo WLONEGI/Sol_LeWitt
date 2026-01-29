@@ -5,7 +5,7 @@ import {
     Group,
     Separator,
 } from "react-resizable-panels"
-import { useArtifactStore } from "@/store/artifact"
+import { useArtifactStore } from "@/features/preview/store/artifact"
 import { cn } from "@/lib/utils"
 import { useEffect, useState } from "react"
 

@@ -1,8 +1,8 @@
 "use client"
 
-import { useArtifactStore } from "@/store/artifact"
+import { useArtifactStore } from "./store/artifact"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Markdown } from "@/components/markdown"
+import { Markdown } from "@/components/ui/markdown"
 import { LogViewer } from "@/features/preview/viewers/log-viewer"
 import { SlideViewer } from "@/features/preview/viewers/slide-viewer"
 import { Button } from "@/components/ui/button"

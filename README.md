@@ -203,7 +203,32 @@ graph TD
 
 ---
 
-## 7. UXコンセプト（追加）
+### 6.4 各ノードの役割
+... (省略) ...
+
+---
+
+## 7. Project Structure
+
+本プロジェクトは、フロントエンド（Next.js）とバックエンド（FastAPI / LangGraph）のモノレポ構成です。
+
+```
+.
+├── backend/              # バックエンド (Python / FastAPI / LangGraph)
+│   ├── langgraph/        # エージェント・オーケストレーション
+│   └── docs/             # データベース設計・APIドキュメント
+├── frontend/             # フロントエンド (Next.js / TypeScript)
+│   ├── src/
+│   │   ├── app/          # App Router (Routes & Layouts)
+│   │   ├── components/   # 共通UIコンポーネント
+│   │   └── features/     # 機能単位のカプセル化 (Chat, Preview)
+│   └── test/             # PlaywrightによるE2Eテスト
+└── checklist/            # プロトコル・API検証用スクリプト
+```
+
+---
+
+## 8. UXコンセプト（追加）
 
 ### 7.1 UXコンセプト：Dual-Pane "Co-Creation" Workspace
 従来の「指示して待つ」だけの関係から、**「AIと共に作り込む」体験へ昇華させる。** 全生成の試行錯誤（ガチャ）を減らし、気に入ったベースデザインを維持しながら細部を詰める**「Precision Edit」**と、待ち時間を体験に変える**「Emotional Loading」**を中核に捉える。
