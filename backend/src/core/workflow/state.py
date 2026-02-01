@@ -2,10 +2,7 @@ from typing import Literal, TypedDict, Any, List, Annotated
 import operator
 from langgraph.graph import MessagesState
 
-
-from src.shared.schemas.design import DesignContext
 from src.shared.schemas.outputs import ResearchTask, ResearchResult
-
 
 
 class TaskStep(TypedDict):
@@ -24,15 +21,6 @@ class State(MessagesState):
     # Runtime Variables
     plan: list[TaskStep]
     artifacts: dict[str, Any]  # Store outputs from workers (text, charts, etc.)
-    
-    # PPTXテンプレートデザインコンテキスト
-    design_context: DesignContext | None
-
-
-
-
-
-
 
 
 class ResearchSubgraphState(State):
@@ -41,4 +29,3 @@ class ResearchSubgraphState(State):
     # [New] Stores intermediate parallel results before aggregation
     internal_research_results: Annotated[list[ResearchResult], operator.add]
     is_decomposed: bool
-

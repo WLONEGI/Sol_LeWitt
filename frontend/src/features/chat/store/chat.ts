@@ -29,9 +29,14 @@ export const useChatStore = create<ChatState>()(
                 fetchHistory: async () => {
                     try {
                         const res = await fetch('/api/history');
-                        if (!res.ok) throw new Error('Failed to fetch history');
+                        if (!res.ok) {
+                            console.warn('History fetch failed, but continuing with empty state');
+                            return;
+                        }
                         const data = await res.json();
-                        set({ threads: data });
+                        if (Array.isArray(data)) {
+                            set({ threads: data });
+                        }
                     } catch (error) {
                         console.error('History fetch error:', error);
                     }

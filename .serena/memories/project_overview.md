@@ -1,21 +1,18 @@
-# Project Overview
-
-**Project Name**: AI Slide Generator (Visual Blueprinting phase)
+# Project Overview: AI Slide with Nano Banana
 
 ## Purpose
-Automated generation of presentation slides (PDF) from text, logos, and design templates using Generative AI (Nano Banana Pro for visuals, Gemini 2.5/3.0 for logic).
-
-## Architecture
-- **Monorepo Structure**:
-  - `backend/`: Python (FastAPI, LangChain, LangGraph, Vertex AI). Focus on "Visual Blueprinting" and "Deep Edit".
-  - `frontend/`: TypeScript (Next.js 15, React 18). Dual-pane interface (Chat + Preview).
-
-## Key Features
-- **Input**: Text, Logo, PPTX.
-- **Output**: Full-image PDF slides.
-- **Workflow**: Plan-Driven (Coordinator -> Planner -> Researcher -> Data Analyst -> Visualizer).
-- **UX**: Dual-Pane Workspace, Chat-driven interaction.
+An AI-powered slide generation system that produces high-quality, full-page slide images from text input, logos, and design reference PPTX files. It leverages multi-agent collaboration via LangGraph to research, plan, write, and visualize slides.
 
 ## Tech Stack
-- **Backend**: Python 3.12+, FastAPI, LangGraph, Google Vertex AI (Gemini), PostgreSQL (Cloud SQL).
-- **Frontend**: Next.js 15, React 18, TailwindCSS, Radix UI, Zustand, Playwright.
+- **Frontend**: Next.js 16 (App Router), TypeScript, Tailwind CSS 4, Radix UI, Framer Motion, Vercel AI SDK (Data Stream Protocol v1), Zustand.
+- **Backend**: Python 3.12+, FastAPI, LangGraph, LangChain, Google GenAI SDK (Gemini).
+- **AI Models**: 
+  - Reasoning/Logic: `gemini-3-flash-preview`
+  - Vision/Imaging: `gemini-3-pro-image-preview` (Nano Banana Pro)
+  - High Reasoning: `gemini-3-pro-preview`
+- **Infrastructure**: Vertex AI, GCP Cloud SQL (PostgreSQL) with `cloud-sql-proxy`.
+
+## Core Architecture
+- **Multi-Agent (LangGraph)**: Coordinator -> Planner -> Supervisor -> Workers (Researcher, Data Analyst, Storywriter, Visualizer, Coder).
+- **Dual-Pane UI**: Interactive Chat on the left, Live Preview on the right.
+- **Data Stream Protocol**: Uses Vercel AI SDK's SSE protocol for real-time updates of text, reasoning, and UI steps.

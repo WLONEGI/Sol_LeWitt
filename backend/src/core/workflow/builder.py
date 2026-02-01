@@ -37,5 +37,8 @@ def build_graph(checkpointer=None):
     builder.add_node("data_analyst", data_analyst_node)
     # reviewer_node removed - Workers now have Self-Critique
 
-    return builder.compile(checkpointer=checkpointer)
+    return builder.compile(
+        checkpointer=checkpointer,
+        interrupt_after=["planner"]
+    )
 

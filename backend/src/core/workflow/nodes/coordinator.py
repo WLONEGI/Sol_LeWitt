@@ -4,7 +4,6 @@ from typing import Literal
 from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
-from langchain_core.callbacks.manager import adispatch_custom_event
 from pydantic import BaseModel, Field
 
 from src.infrastructure.llm.llm import get_llm_by_type
@@ -33,18 +32,15 @@ async def coordinator_node(state: State, config: RunnableConfig) -> Command[Lite
     logger.info("Coordinator processing request")
     
     messages = apply_prompt_template("coordinator", state)
-    messages = apply_prompt_template("coordinator", state)
     logger.debug(f"Coordinator Messages: {messages}")
     
-    # 1. Decision Step (Blocking but fast)
+    # 1. Decision Step (Call-time binding)
     llm = get_llm_by_type(AGENT_LLM_MAP["coordinator"])
-    structured_llm = llm.with_structured_output(CoordinatorDecision)
     
     try:
-        # We don't propagate config here to avoid streaming the partial JSON of the decision
-        # We want this to complete fast and silently.
-        # Actually, if we pass config, it sends events. If the frontend can handle "intermediate" events, it's fine.
-        # But typically we hide the decision process.
+        # Use with_structured_output explicitly since gemini-3/2.0-flash with current lib 
+        # doesn't reliably parse response_format in ainvoke.
+        structured_llm = llm.with_structured_output(CoordinatorDecision)
         decision_output: CoordinatorDecision = await structured_llm.ainvoke(messages)
         logger.debug(f"[DEBUG] Coordinator decision response: {decision_output.decision} (Reasoning: {decision_output.reasoning})")
     except Exception as e:
@@ -62,42 +58,48 @@ async def coordinator_node(state: State, config: RunnableConfig) -> Command[Lite
         thread_id = config.get("configurable", {}).get("thread_id")
         await _generate_and_save_title(state, thread_id)
         
-
-        
-        # Generate a polite handoff message (Streamed)
-        # We add a hint to the model to generate the confirmation
+        # Generate a polite handoff message (Standard Streaming)
         handoff_prompt = messages + [
             HumanMessage(content=f"Decision: Handoff to Planner.\nReasoning: {decision_output.reasoning}\n\nTask: Generate a polite, encouraging, Japanese confirmation message to the user stating that we are starting the planning process based on the request. Do NOT describe technical details like 'nodes'.")
         ]
         
-        response = await llm.ainvoke(handoff_prompt, config=config)
+        # We use astream to ensure individual tokens are emitted as on_chat_model_stream.
+        response_content = ""
+        async for chunk in llm.astream(handoff_prompt, config=config):
+            if chunk.content:
+                if isinstance(chunk.content, str):
+                    response_content += chunk.content
+                elif isinstance(chunk.content, list):
+                    for part in chunk.content:
+                        if isinstance(part, dict) and "text" in part:
+                            response_content += part["text"]
+                        elif isinstance(part, str):
+                            response_content += part
         
         return Command(
-            update={"messages": [response]},
+            update={"messages": [AIMessage(content=response_content, name="coordinator")]},
             goto="planner",
         )
     
     else: # reply_to_user
-        logger.info("[DEBUG] Replying to user branch entered. Starting LLM stream.")
-        # Just generate the natural response (Streamed)
-        # Use astream to ensure token-level events are emitted for astream_events v2
+        logger.info("Replying to user branch entered. Using standard streaming.")
+        # Just generate the natural response (Standard Streaming)
         response_content = ""
-        try:
-            async for chunk in llm.astream(messages, config=config):
-                content = chunk.content
-                response_content += content
-                await adispatch_custom_event("message_delta", content, config=config)
-        except Exception as stream_e:
-            logger.error(f"[DEBUG] Error during Coordinator streaming: {stream_e}", exc_info=True)
-            raise stream_e
+        async for chunk in llm.astream(messages, config=config):
+            if chunk.content:
+                if isinstance(chunk.content, str):
+                    response_content += chunk.content
+                elif isinstance(chunk.content, list):
+                    for part in chunk.content:
+                        if isinstance(part, dict) and "text" in part:
+                            response_content += part["text"]
+                        elif isinstance(part, str):
+                            response_content += part
 
         if not response_content:
-            logger.warning("[DEBUG] Coordinator generated empty response. Using fallback.")
+            logger.warning("Coordinator generated empty response. Using fallback.")
             response_content = "申し訳ありません、応答を生成できませんでした。"
-            await adispatch_custom_event("message_delta", response_content, config=config)
 
-        logger.info(f"[DEBUG] Coordinator streaming complete. Total content length: {len(response_content)}")
-            
         return Command(
             update={"messages": [AIMessage(content=response_content, name="coordinator")]},
             goto="__end__"
@@ -107,16 +109,19 @@ async def _generate_and_save_title(state: State, thread_id: str):
     """Generates a title using Flash model and saves to DB."""
     try:
         from src.shared.config.settings import settings
-        import psycopg
+        # Import internally to avoid circular dependency with service -> build_graph -> coordinator
+        from src.core.workflow.service import _manager
         
         if not thread_id: return
 
-        conn_str = settings.connection_string
-        if not conn_str: return
+        # Check if pool is available
+        if not _manager.pool:
+            logger.warning("DB Pool not initialized, skipping title generation.")
+            return
 
-        # 0. Check if title already exists (Idempotency)
-        async with await psycopg.AsyncConnection.connect(conn_str, autocommit=True) as ac:
-            async with ac.cursor() as cur:
+        # 0. Check if title already exists (Idempotency) - Reuse pool
+        async with _manager.pool.connection() as conn:
+            async with conn.cursor() as cur:
                 await cur.execute("SELECT title FROM threads WHERE thread_id = %s", (thread_id,))
                 row = await cur.fetchone()
                 if row and row[0]:
@@ -124,8 +129,6 @@ async def _generate_and_save_title(state: State, thread_id: str):
                     return
 
         # 1. Generate Title
-        # Use a lightweight model for this metadata task
-        # Use user-configured BASIC_MODEL or fallback
         model_name = settings.BASIC_MODEL or "gemini-1.5-flash"
         llm = get_llm_by_type(model_name) 
         
@@ -146,9 +149,9 @@ async def _generate_and_save_title(state: State, thread_id: str):
         response = await llm.ainvoke(prompt)
         title = response.content.strip()
         
-        # 2. Save to DB (Reconnect or reuse connection? Reconnecting for simplicity/safety in async context)
-        async with await psycopg.AsyncConnection.connect(conn_str, autocommit=True) as ac:
-            async with ac.cursor() as cur:
+        # 2. Save to DB - Reuse pool
+        async with _manager.pool.connection() as conn:
+            async with conn.cursor() as cur:
                 await cur.execute(
                     """
                     INSERT INTO threads (thread_id, title, summary) 
@@ -159,8 +162,6 @@ async def _generate_and_save_title(state: State, thread_id: str):
                     (thread_id, title, "")
                 )
         
-        # 3. Emit Event
-        await adispatch_custom_event("title_generated", {"title": title, "thread_id": thread_id})
         logger.info(f"Title generated and saved: {title}")
         
     except Exception as e:

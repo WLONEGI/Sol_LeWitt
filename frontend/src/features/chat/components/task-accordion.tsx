@@ -35,17 +35,17 @@ function TaskStepItem({ step, isLast }: { step: ProcessStep, isLast: boolean }) 
     }, [step.status])
 
     const getStatusIcon = () => {
-        if (step.status === 'running') return <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
-        if (step.status === 'completed') return <Check className="h-4 w-4 text-white" />
-        if (step.status === 'failed') return <AlertCircle className="h-4 w-4 text-white" />
-        return <div className="h-2 w-2 rounded-full bg-gray-300" />
+        if (step.status === 'running') return <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" />
+        if (step.status === 'completed') return <Check className="h-3.5 w-3.5 text-green-600" strokeWidth={3} />
+        if (step.status === 'failed') return <AlertCircle className="h-3.5 w-3.5 text-red-600" />
+        return <div className="h-1.5 w-1.5 rounded-full bg-gray-300" />
     }
 
     const getStatusContainerClass = () => {
-        if (step.status === 'running') return "bg-white border-2 border-blue-100"
-        if (step.status === 'completed') return "bg-gray-200 border-2 border-gray-100" // Completed Node: bg-gray-200 + white check (as requested)
-        if (step.status === 'failed') return "bg-red-500 border-2 border-red-400"
-        return "bg-gray-100 border-2 border-gray-50"
+        if (step.status === 'running') return "bg-blue-50 border-blue-200"
+        if (step.status === 'completed') return "bg-green-50 border-green-200"
+        if (step.status === 'failed') return "bg-red-50 border-red-200"
+        return "bg-gray-100 border-gray-200"
     }
 
     return (
@@ -55,7 +55,7 @@ function TaskStepItem({ step, isLast }: { step: ProcessStep, isLast: boolean }) 
                 {/* Status Indicator (The Node on the Spine) */}
                 <div className="relative z-10 flex flex-col items-center mt-1">
                     <div className={cn(
-                        "flex items-center justify-center w-6 h-6 rounded-full transition-colors duration-300",
+                        "flex items-center justify-center w-6 h-6 rounded-full border transition-colors duration-300 shadow-sm",
                         getStatusContainerClass()
                     )}>
                         {getStatusIcon()}

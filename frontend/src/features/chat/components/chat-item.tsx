@@ -7,6 +7,7 @@ import { motion } from "framer-motion";
 import { SlideDeckPreview } from "./slide-deck-preview"; // Assuming relative path
 import { useArtifactStore } from "../../preview/store/artifact";
 import { TypewriterText } from "@/components/ui/typewriter-text";
+import { ToolInvocationBlock } from "./tool-invocation";
 
 interface ChatItemProps {
     role: 'user' | 'assistant' | 'system';
@@ -24,7 +25,8 @@ interface ChatItemProps {
         id: string;
         slides?: any[];
         status?: string;
-    }
+    };
+    toolInvocations?: any[];
 }
 
 interface Source {
@@ -64,7 +66,7 @@ function SourceCitation({ sources }: SourceCitationProps) {
     )
 }
 
-export function ChatItem({ role, content, avatar, name, className, sources, isStreaming = false, artifact }: ChatItemProps) {
+export function ChatItem({ role, content, avatar, name, className, sources, isStreaming = false, artifact, toolInvocations }: ChatItemProps) {
     const isUser = role === 'user';
 
     // Check if this chat item is meant to display a slide deck
@@ -121,6 +123,10 @@ export function ChatItem({ role, content, avatar, name, className, sources, isSt
                             !isUser && "font-sans",
                             "prose-p:text-gray-800 prose-headings:text-gray-900 prose-strong:text-gray-900 prose-li:text-gray-800 prose-code:text-blue-600 prose-code:bg-blue-50 prose-code:px-1 prose-code:rounded prose-code:before:content-none prose-code:after:content-none"
                         )}>{content}</Markdown>
+                    )}
+
+                    {toolInvocations && toolInvocations.length > 0 && (
+                        <ToolInvocationBlock toolInvocations={toolInvocations} />
                     )}
 
                     {sources && sources.length > 0 && (

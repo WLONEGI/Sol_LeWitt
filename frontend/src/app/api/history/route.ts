@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 
 export async function GET() {
     try {
-        const backendUrl = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
+        const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
         const response = await fetch(`${backendUrl}/api/history`, {
             headers: {
                 'Content-Type': 'application/json',
@@ -11,16 +11,15 @@ export async function GET() {
         });
 
         if (!response.ok) {
-            return NextResponse.json(
-                { error: `Backend error: ${response.statusText}` },
-                { status: response.status }
-            );
+            console.error(`History API proxy: Backend error (${backendUrl}): ${response.statusText}`);
+            return NextResponse.json([], { status: 200 }); // Return empty array instead of 500 to keep UI stable
         }
 
         const data = await response.json();
         return NextResponse.json(data);
     } catch (error) {
-        console.error('History API proxy error:', error);
-        return NextResponse.json([], { status: 500 });
+        const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
+        console.error(`History API proxy error (Target: ${backendUrl}):`, error);
+        return NextResponse.json([], { status: 200 }); // Graceful fallback
     }
 }

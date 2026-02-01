@@ -20,6 +20,7 @@ export interface ProcessStep {
     logs: ProcessLog[];
     agentName?: string;
     description?: string;
+    previewUrl?: string;
     subTasks?: ProcessSubTask[];
 }
 

@@ -18,13 +18,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Literal["supervisor"]]:
+async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Literal["supervisor"]]:
     """
     Node for the Data Analyst agent.
     
     Uses Code Execution for calculations and proceeds to Supervisor.
     """
     logger.info("Data Analyst starting task")
+
     try:
         step_index, current_step = next(
             (i, step) for i, step in enumerate(state["plan"]) 
@@ -52,29 +53,55 @@ def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Literal["s
     try:
         messages[-1].content += "\n\nIMPORTANT: After performing necessary calculations with code, you MUST output the final result in valid JSON format matching the DataAnalystOutput structure."
         
-        response = llm_with_code_exec.invoke(messages, config=config)
-        content = response.content
+        # [STREAMING CHANGE] Use astream to ensure events are emitted
+        accumulated_content = ""
+        tool_calls_buffer = []
+        
+        async for chunk in llm_with_code_exec.astream(messages, config=config):
+            if hasattr(chunk, 'content') and chunk.content:
+                content_part = chunk.content
+                if isinstance(content_part, list):
+                    for part in content_part:
+                        if isinstance(part, dict) and "text" in part:
+                            accumulated_content += part["text"]
+                        elif isinstance(part, str):
+                            accumulated_content += part
+                else:
+                    accumulated_content += str(content_part)
+            
+            # Collect tool calls from chunks
+            if hasattr(chunk, 'tool_calls') and chunk.tool_calls:
+                tool_calls_buffer.extend(chunk.tool_calls)
+            if hasattr(chunk, 'tool_call_chunks') and chunk.tool_call_chunks:
+                for tc_chunk in chunk.tool_call_chunks:
+                    if tc_chunk.get("name") and tc_chunk.get("args"):
+                        tool_calls_buffer.append({
+                            "name": tc_chunk["name"],
+                            "args": tc_chunk["args"]
+                        })
+        
+        content = accumulated_content
         
         # 0. Handle Empty Response (Safety/Recitation Block)
-        if not content and not response.tool_calls:
+        if not content and not tool_calls_buffer:
             logger.warning("Data Analyst returned an empty response. Likely blocked by safety settings or recursion limit.")
             result_summary = "AIの回答が安全フィルター等の理由で制限されました。指示内容を調整して再試行してください。"
             content_json = json.dumps({"error": "Empty Response", "raw_output": ""}, ensure_ascii=False)
             raise ValueError("Model returned empty output.")
 
         # DEBUG LOGS (Keep for now)
-        print(f"DEBUG_DATA_ANALYST: tool_calls={response.tool_calls}")
+        print(f"DEBUG_DATA_ANALYST: tool_calls={tool_calls_buffer}")
         
         content_json = ""
         result_summary = ""
 
         # 1. Handle Tool Calls (Code Execution)
-        if response.tool_calls:
-            logger.info(f"Data Analyst triggered tool calls: {len(response.tool_calls)}")
+        if tool_calls_buffer:
+            logger.info(f"Data Analyst triggered tool calls: {len(tool_calls_buffer)}")
             tool_outputs = []
             
-            for tool_call in response.tool_calls:
-                if tool_call["name"] == "python_repl":
+            for tool_call in tool_calls_buffer:
+                if tool_call.get("name") == "python_repl":
                     # Execute code
                     try:
                         # Pass config!
@@ -95,7 +122,7 @@ def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Literal["s
                 "execution_summary": result_summary,
                 "analysis_report": f"Code Output:\n```\n{full_output}\n```",
                 "blueprints": [],
-                "visualization_code": str(response.tool_calls[0]["args"].get("query", ""))
+                "visualization_code": str(tool_calls_buffer[0].get("args", {}).get("query", ""))
             }, ensure_ascii=False)
             
         # 2. Handle Text Content (Fallback or standard JSON)

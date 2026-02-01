@@ -8,6 +8,7 @@ from langgraph.graph import StateGraph, START
 from langchain_core.runnables import RunnableConfig
 
 from src.infrastructure.llm.llm import get_llm_by_type
+from src.shared.config.settings import settings
 from src.resources.prompts.template import load_prompt_markdown
 from src.shared.schemas import (
     ResearchTask,
@@ -42,20 +43,8 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
     
     try:
         from src.resources.prompts.template import load_prompt_markdown
-        from langchain_core.callbacks.manager import adispatch_custom_event
         
         system_prompt = load_prompt_markdown("researcher")
-        
-        # Dispatch start event
-        await adispatch_custom_event(
-            "research-worker-start",
-            {
-                "task_id": task_id,
-                "perspective": task.perspective,
-                "instruction": task.expected_output
-            },
-            config=config # Pass config to propagate run_id
-        )
         
         instruction = (
             f"You are investigating: '{task.perspective}'.\n"
@@ -69,12 +58,11 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
             HumanMessage(content=instruction, name="dispatcher")
         ]
         
-        # Use Basic Model as requested
-        llm = get_llm_by_type("basic")
-        grounding_tool = {'google_search': {}}
-        llm_with_search = llm.bind(
-            tools=[grounding_tool],
-            generation_config={"response_modalities": ["TEXT"]}
+        # Use Grounded LLM (Google Search enabled)
+        from src.infrastructure.llm.llm import create_grounded_llm
+        llm_with_search = create_grounded_llm(
+            model=settings.BASIC_MODEL,
+            temperature=0.0
         )
         
         accumulated_content = ""
@@ -95,25 +83,7 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
                 
                 accumulated_content += content
                 
-                # Dispatch delta
-                await adispatch_custom_event(
-                    "research-worker-delta",
-                    {
-                        "task_id": task_id,
-                        "delta": content
-                    },
-                    config=config
-                )
 
-        # Dispatch end event
-        await adispatch_custom_event(
-            "research-worker-end",
-            {
-                "task_id": task_id,
-            },
-            config=config
-        )
-        
         res = ResearchResult(
             task_id=task.id,
             perspective=task.perspective,
@@ -135,7 +105,7 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
         return {"internal_research_results": [err_res]}
 
 
-def research_manager_node(state: ResearchSubgraphState) -> Command[Literal["research_worker", "__end__"]]:
+async def research_manager_node(state: ResearchSubgraphState) -> Command[Literal["research_worker", "__end__"]]:
     """
     Manager Node (Orchestrator).
     """
@@ -156,13 +126,21 @@ def research_manager_node(state: ResearchSubgraphState) -> Command[Literal["rese
         logger.info("Manager: Decomposing research step...")
         
         base_prompt = load_prompt_markdown("research_topic_analyzer")
-        full_content = f"{base_prompt}\n\nUser Instruction: {current_step['instruction']}"
+        instruction_content = f"User Instruction: {current_step['instruction']}"
         
         llm = get_llm_by_type("reasoning")
-        structured_llm = llm.with_structured_output(ResearchTaskList)
         
         try:
-            qa_result: ResearchTaskList = structured_llm.invoke(full_content)
+            # Use with_structured_output explicitly for Pydantic parsing reliability
+            structured_llm = llm.with_structured_output(ResearchTaskList)
+            
+            # Prepare messages for the LLM
+            messages = [
+                SystemMessage(content=base_prompt),
+                HumanMessage(content=instruction_content)
+            ]
+            
+            qa_result: ResearchTaskList = await structured_llm.ainvoke(messages)
             tasks = qa_result.tasks
             if not tasks:
                  raise ValueError("No tasks generated")

@@ -4,7 +4,6 @@ from typing import Literal
 from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import AIMessage
-from langchain_core.callbacks.manager import adispatch_custom_event
 
 from src.infrastructure.llm.llm import get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
@@ -51,10 +50,18 @@ async def _generate_supervisor_report(state: State, config: RunnableConfig) -> s
         # Use basic model for status reports to save cost/latency
         llm = get_llm_by_type("basic")
         
-        # [STREAMING CHANGE] Use astream to ensure events are emitted
+        # Use astream to ensure events are emitted
         response_content = ""
         async for chunk in llm.astream(messages, config=config):
-            response_content += chunk.content
+            if chunk.content:
+                if isinstance(chunk.content, list):
+                    for part in chunk.content:
+                        if isinstance(part, dict) and "text" in part:
+                            response_content += part["text"]
+                        elif isinstance(part, str):
+                            response_content += part
+                else:
+                    response_content += str(chunk.content)
             
         return response_content
     except Exception as e:
@@ -129,8 +136,6 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command[Liter
         
         plan[current_step_index]["status"] = "in_progress"
         
-
-        
         # Generate report for next step
         report = await _generate_supervisor_report(state, config)
             
@@ -143,3 +148,4 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command[Liter
         )
         
     return Command(goto="__end__")
+

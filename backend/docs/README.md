@@ -1,25 +1,25 @@
-# Backend Documentation
+# Spell Backend Documentation
 
-Spell Backend のドキュメントインデックスです。
+Spell バックエンドの技術ドキュメントへようこそ。本システムは、LangGraph を用いた高度なエージェント・ワークフロー・エンジンです。
 
-## Documentation List
+## 📚 ドキュメント構成
 
-| Document | Description |
-| :--- | :--- |
-| **[Architecture](./architecture.md)** | システム全体のアーキテクチャ、エージェントの役割、データフローの概要。 |
-| **[API Specification](./api_spec.md)** | REST API エンドポイント、リクエスト/レスポンス形式、SSEイベント仕様。 |
-| **[LangGraph Workflow](./langgraph_workflow.md)** | LangGraph の詳細設計、State定義、ノードロジック、永続化の仕組み。 |
-| **[Database Schema](./database_schema.md)** | PostgreSQL のテーブルスキーマと永続化設定。 |
-| **[DevOps Guide](./dev_ops.md)** | ローカル開発環境のセットアップ、環境変数、Dockerビルド、デプロイ手順。 |
+### 🏗️ Architecture
+- **[01. システム概要](./architecture/01_overview.md)**: 全体像とデザイン原則。
+- **[02. ワークフロー・エンジン](./architecture/02_workflow_engine.md)**: ノードの詳細と状態管理。
+- **[03. ストリーミング・プロトコル](./architecture/03_streaming_protocol.md)**: SSE と Vercel AI SDK の統合。
 
-## Quick Start
+### 🔌 API & Data
+- **[API エンドポイント](./api/endpoints.md)**: REST API 仕様。
+- **[DB & ストレージ](./data/database_schema.md)**: データの永続化と成果物管理。
 
-```bash
-# ドキュメントディレクトリで作業中
-cd backend
+### 🚀 Guides
+- **[セットアップ & 開発](./guides/setup_and_development.md)**: ローカル環境構築。
+- **[デプロイ & 運用](./guides/deployment_and_ops.md)**: Cloud Run へのデプロイ。
 
-# 開発サーバー起動
-uv run server.py
-```
+---
 
-詳細は [DevOps Guide](./dev_ops.md) を参照してください。
+## 🔍 クイックスタート
+1. `uv sync` で環境構築。
+2. `.env` に GCP プロジェクト情報を設定。
+3. `uv run server.py` でサーバー起動。

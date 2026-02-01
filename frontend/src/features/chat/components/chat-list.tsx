@@ -1,4 +1,5 @@
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning"
 import { ChatItem } from "./chat-item"
 import { TaskAccordion } from "./task-accordion"
 import { PlanAccordion } from "./plan-accordion"
@@ -14,11 +15,9 @@ interface ChatListProps {
     timeline: TimelineEvent[];
     isLoading?: boolean;
     className?: string;
-    // streamingSources kept for compatibility if needed, though now handled via timeline logic presumably
-    streamingSources?: { title: string; url: string }[];
 }
 
-export function ChatList({ timeline, isLoading, className, streamingSources }: ChatListProps) {
+export function ChatList({ timeline, isLoading, className }: ChatListProps) {
     const bottomRef = useRef<HTMLDivElement>(null);
 
     // Auto-scroll on new items
@@ -35,25 +34,22 @@ export function ChatList({ timeline, isLoading, className, streamingSources }: C
                     // 1. User/Assistant Message
                     if (item.type === 'message') {
                         const msg = item.message;
-                        const effectiveSources = msg.sources || (isLast && msg.role === 'assistant' ? streamingSources : undefined);
+                        const effectiveSources = msg.sources;
+
+                        // Extract reasoning from parts (Standard Protocol) or fallback to custom property
+                        const reasoningPart = msg.parts?.find(p => p.type === 'reasoning');
+                        const reasoningText = reasoningPart && 'text' in reasoningPart
+                            ? (reasoningPart as any).text
+                            : (msg as any).reasoning;
 
                         return (
                             <div key={item.id} className="flex flex-col gap-2">
-                                {msg.reasoning && (
+                                {reasoningText && (
                                     <div className="ml-14 mb-2">
-                                        <details className="group open:bg-gray-50 rounded-lg transition-colors duration-200 border border-transparent open:border-gray-100">
-                                            <summary className="flex items-center gap-2 cursor-pointer p-2 text-xs font-medium text-gray-500 select-none hover:text-gray-900 transition-colors list-none">
-                                                <div className="flex items-center justify-center w-5 h-5 rounded hover:bg-gray-100 transition-colors">
-                                                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="transition-transform group-open:rotate-90"><path d="m9 18 6-6-6-6" /></svg>
-                                                </div>
-                                                <span>Thinking Process</span>
-                                            </summary>
-                                            <div className="px-4 pb-3 pt-1">
-                                                <div className="pl-3 border-l-2 border-gray-200 text-sm text-gray-600 font-mono bg-white/50 p-3 rounded-r-md">
-                                                    {msg.reasoning}
-                                                </div>
-                                            </div>
-                                        </details>
+                                        <Reasoning>
+                                            <ReasoningTrigger />
+                                            <ReasoningContent>{reasoningText}</ReasoningContent>
+                                        </Reasoning>
                                     </div>
                                 )}
                                 <ChatItem
@@ -62,6 +58,7 @@ export function ChatList({ timeline, isLoading, className, streamingSources }: C
                                     name={msg.name}
                                     avatar={msg.avatar}
                                     sources={effectiveSources}
+                                    toolInvocations={msg.toolInvocations}
                                     isStreaming={isLast && msg.role === 'assistant' && isLoading}
                                 />
                             </div>

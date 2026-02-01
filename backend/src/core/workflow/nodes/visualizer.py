@@ -5,6 +5,7 @@ import asyncio
 from typing import Literal, Any
 
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from src.shared.config.settings import settings
@@ -69,8 +70,7 @@ async def process_single_slide(
     prompt_item: ImagePrompt, 
     previous_generations: list[dict] | None = None, 
     override_reference_bytes: bytes | None = None,
-    design_context: Any = None,  # DesignContext | None
-    session_id: str | None = None,  # セッションIDでGCSフォルダ分け
+    session_id: str | None = None,
 ) -> ImagePrompt:
     """
     Helper function to process a single slide: generation or edit.
@@ -81,7 +81,6 @@ async def process_single_slide(
         logger.info(f"Processing slide {prompt_item.slide_number} (layout: {layout_type})...")
         
         # === Compile Structured Prompt (v2) ===
-        # 優先度: structured_prompt > image_generation_prompt
         if prompt_item.structured_prompt is not None:
             final_prompt = compile_structured_prompt(
                 prompt_item.structured_prompt,
@@ -105,24 +104,7 @@ async def process_single_slide(
             logger.info(f"Using explicit override reference for slide {prompt_item.slide_number}")
             reference_image_bytes = override_reference_bytes
         
-        # 2. [OPTIMIZED] Use DesignContext layout-based template image (URL preferred)
-        elif design_context:
-            # A. Try URL download first (Lightweight State)
-            layout_url = design_context.layout_images.get(layout_type)
-            if layout_url:
-                logger.info(f"Downloading template image for layout '{layout_type}' from {layout_url}...")
-                reference_image_bytes = await asyncio.to_thread(download_blob_as_bytes, layout_url)
-            
-            # B. Fallback to internal Base64 (Legacy/Standalone)
-            if not reference_image_bytes:
-                layout_ref = design_context.get_template_image_for_layout(layout_type)
-                if layout_ref:
-                    reference_image_bytes = layout_ref
-                    logger.info(f"Using baked-in template image (Base64) for layout '{layout_type}'")
-                elif not layout_url:
-                    logger.warning(f"No template image found for layout '{layout_type}' (URL or Base64)")
-        
-        # 3. Check for matching previous generation (Deep Edit)
+        # 2. Check for matching previous generation (Deep Edit)
         elif previous_generations:
             for prev in previous_generations:
                 if prev.get("slide_number") != prompt_item.slide_number:
@@ -191,18 +173,6 @@ async def process_single_slide(
         
         logger.info(f"Image generated and stored at: {public_url}")
 
-        # [NEW] Dispatch Progress Event (Streaming)
-        from langgraph.types import adispatch_custom_event
-        await adispatch_custom_event(
-            "visualizer_progress",
-            {
-                "slide_number": prompt_item.slide_number,
-                "image_url": public_url,
-                "title": prompt_item.structured_prompt.main_title if prompt_item.structured_prompt else f"Slide {prompt_item.slide_number}"
-            },
-            config={"tags": ["visualizer_progress"]} # Optional tagging
-        )
-
         return prompt_item
 
     except Exception as image_error:
@@ -213,7 +183,6 @@ async def process_single_slide(
 async def process_slide_with_chat(
     prompt_item: ImagePrompt,
     chat_session,
-    design_context: Any = None,
     session_id: str | None = None,
 ) -> ImagePrompt:
     """
@@ -236,31 +205,13 @@ async def process_slide_with_chat(
         else:
             raise ValueError(f"Slide {prompt_item.slide_number} has neither structured_prompt nor image_generation_prompt")
         
-        # === Reference Image (Template) ===
-        reference_image_bytes = None
-        # === Reference Image (Template) ===
-        reference_image_bytes = None
-        if design_context:
-            # A. Try URL download first (Lightweight State)
-            layout_url = design_context.layout_images.get(layout_type)
-            if layout_url:
-                logger.info(f"[Chat] Downloading template image for layout '{layout_type}' from {layout_url}...")
-                reference_image_bytes = await asyncio.to_thread(download_blob_as_bytes, layout_url)
-            
-            # B. Fallback to internal Base64 (Legacy/Standalone)
-            if not reference_image_bytes:
-                layout_ref = design_context.get_template_image_for_layout(layout_type)
-                if layout_ref:
-                    reference_image_bytes = layout_ref
-                    logger.info(f"[Chat] Using baked-in template image (Base64) for layout '{layout_type}'")
-        
         logger.info(f"[Chat] Generating image {prompt_item.slide_number} via chat session...")
         
         # 1. Generate Image via Async Chat Session
         image_bytes = await send_message_for_image_async(
             chat_session,
             final_prompt,
-            reference_image=reference_image_bytes
+            reference_image=None
         )
         
         # 2. Upload to GCS (Blocking -> Thread)
@@ -277,7 +228,7 @@ async def process_slide_with_chat(
         prompt_item.generated_image_url = public_url
         
         prompt_item.thought_signature = ThoughtSignature(
-            seed=0,  # Chatモードではシードは不使用
+            seed=0,
             base_prompt=final_prompt,
             refined_prompt=None,
             model_version=AGENT_LLM_MAP["visualizer"],
@@ -287,18 +238,6 @@ async def process_slide_with_chat(
         
         logger.info(f"[Chat] Image generated and stored at: {public_url}")
 
-        # [NEW] Dispatch Progress Event (Streaming)
-        from langgraph.types import adispatch_custom_event
-        await adispatch_custom_event(
-            "visualizer_progress",
-            {
-                "slide_number": prompt_item.slide_number,
-                "image_url": public_url,
-                "title": prompt_item.structured_prompt.main_title if prompt_item.structured_prompt else f"Slide {prompt_item.slide_number}"
-            },
-             config={"tags": ["visualizer_progress"]} 
-        )
-
         return prompt_item
         
     except Exception as image_error:
@@ -306,7 +245,7 @@ async def process_slide_with_chat(
         return prompt_item
 
 
-async def visualizer_node(state: State) -> Command[Literal["supervisor"]]:
+async def visualizer_node(state: State, config: RunnableConfig) -> Command[Literal["supervisor"]]:
     """
     Node for the Visualizer agent. Responsible for generating slide images.
     """
@@ -320,27 +259,11 @@ async def visualizer_node(state: State) -> Command[Literal["supervisor"]]:
         logger.error("Visualizer called but no in_progress step found.")
         return Command(goto="supervisor", update={})
     
-    design_context = state.get("design_context")
     context = f"Instruction: {current_step['instruction']}\n\nAvailable Artifacts: {json.dumps(state.get('artifacts', {}), default=str)}"
 
     design_dir = current_step.get('design_direction')
     if design_dir:
         context += f"\n\n[Design Direction from Planner]:\n{design_dir}\n"
-
-    if design_context:
-        available_layouts = ", ".join([l.layout_type for l in design_context.layouts])
-        color_context = f"""
-## Template Design Context
-- Primary colors: {design_context.color_scheme.accent1}, {design_context.color_scheme.accent2}
-- Background: {design_context.color_scheme.dk1}
-- Text: {design_context.color_scheme.lt1}
-- Font style: {design_context.font_scheme.major_latin} (headings)
-- Available layout types: {available_layouts}
-
-## IMPORTANT: Layout Type Selection
-For each slide, you MUST specify the appropriate `layout_type`.
-"""
-        context = context + color_context
 
     previous_generations: list[dict] = []
     for key, json_str in state.get("artifacts", {}).items():
@@ -358,91 +281,48 @@ For each slide, you MUST specify the appropriate `layout_type`.
     messages = apply_prompt_template("visualizer", state)
     
     supervisor_content = [{"type": "text", "text": context}]
-    
-    if design_context:
-        target_layout = "title_slide"
-        if "title_and_content" in design_context.layout_images or "title_and_content" in design_context.layout_images_base64:
-            target_layout = "title_and_content"
-        elif design_context.layout_images:
-            target_layout = list(design_context.layout_images.keys())[0]
-        elif design_context.layout_images_base64:
-            target_layout = list(design_context.layout_images_base64.keys())[0]
-
-        image_url = design_context.layout_images.get(target_layout)
-        image_b64 = design_context.layout_images_base64.get(target_layout)
-
-        if image_url:
-            logger.info(f"Injecting template image (URL) for '{target_layout}' into Visualizer context.")
-            supervisor_content.append({
-                "type": "image_url",
-                "image_url": {"url": image_url}
-            })
-        elif image_b64:
-            logger.info(f"Injecting template image (Base64) for '{target_layout}' into Visualizer context.")
-            supervisor_content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{image_b64}"}
-            })
 
     messages.append(HumanMessage(content=supervisor_content, name="supervisor"))
     
     llm = get_llm_by_type(AGENT_LLM_MAP["visualizer"])
-    structured_llm = llm.with_structured_output(VisualizerOutput)
     
     try:
-        result: VisualizerOutput = structured_llm.invoke(messages)
-        logger.info("✅ Visualizer output validated.")
+        # Use with_structured_output explicitly for Pydantic parsing reliability
+        structured_llm = llm.with_structured_output(VisualizerOutput)
+        visualizer_output: VisualizerOutput = await structured_llm.ainvoke(messages)
+        
+        logger.debug(f"Visualizer Output: {visualizer_output}")
 
-        prompts = result.prompts
+        prompts = visualizer_output.prompts
         updated_prompts: list[ImagePrompt] = []
         
         import uuid
-        session_id = str(uuid.uuid4())
-        logger.info(f"Generated session_id for GCS storage: {session_id}")
+        # Use thread_id from config for GCS session_id to ensure persistence
+        session_id = config.get("configurable", {}).get("thread_id") or str(uuid.uuid4())
+        logger.info(f"Using session_id for GCS storage: {session_id}")
 
-        if design_context and (design_context.layout_images_base64 or design_context.layout_images):
-            logger.info("Using per-layout template images (Strategy T)")
+        # Use sequential chat-based generation (no template images)
+        target_prompts = prompts
+        if target_prompts:
+            seed = random.randint(0, 2**31 - 1)
+            chat_session = await create_image_chat_session_async(seed)
+            logger.info(f"[Sequential] Starting sequential generation for {len(target_prompts)} slides with context carryover...")
             
-            semaphore = asyncio.Semaphore(settings.VISUALIZER_CONCURRENCY)
-            
-            async def constrained_task_template(prompt_item: ImagePrompt) -> ImagePrompt:
-                async with semaphore:
-                    return await process_single_slide(
-                        prompt_item, 
-                        previous_generations,
-                        override_reference_bytes=None,
-                        design_context=design_context,
-                        session_id=session_id
-                    )
-            
-            tasks = [constrained_task_template(item) for item in prompts]
-            if tasks:
-                logger.info(f"Starting parallel generation for {len(tasks)} slides with per-layout templates...")
-                updated_prompts = list(await asyncio.gather(*tasks))
-        
-        else:
-            target_prompts = prompts
-            if target_prompts:
-                seed = random.randint(0, 2**31 - 1)
-                chat_session = await create_image_chat_session_async(seed)
-                logger.info(f"[Sequential] Starting sequential generation for {len(target_prompts)} slides with context carryover...")
-                
-                for idx, prompt_item in enumerate(target_prompts):
-                    logger.info(f"[Sequential] Processing slide {idx + 1}/{len(target_prompts)}...")
-                    processed = await process_slide_with_chat(
-                        prompt_item,
-                        chat_session,
-                        design_context=design_context,
-                        session_id=session_id,
-                    )
-                    updated_prompts.append(processed)
+            for idx, prompt_item in enumerate(target_prompts):
+                logger.info(f"[Sequential] Processing slide {idx + 1}/{len(target_prompts)}...")
+                processed = await process_slide_with_chat(
+                    prompt_item,
+                    chat_session,
+                    session_id=session_id,
+                )
+                updated_prompts.append(processed)
         
         updated_prompts.sort(key=lambda x: x.slide_number)
-        result.prompts = updated_prompts
+        visualizer_output.prompts = updated_prompts
         
-        content_json = json.dumps(result.model_dump(), ensure_ascii=False, indent=2)
-        logger.info(f"Visualizer generated {len(result.prompts)} image prompts with artifacts")
-        result_summary = result.execution_summary
+        content_json = json.dumps(visualizer_output.model_dump(), ensure_ascii=False, indent=2)
+        logger.info(f"Visualizer generated {len(visualizer_output.prompts)} image prompts with artifacts")
+        result_summary = visualizer_output.execution_summary
 
         # Update result summary in plan
         state["plan"][step_index]["result_summary"] = result_summary
@@ -456,7 +336,7 @@ For each slide, you MUST specify the appropriate `layout_type`.
             artifact_key_suffix="visual",
             artifact_title="Visual Assets",
             artifact_icon="Image",
-            artifact_preview_urls=[p.generated_image_url for p in result.prompts if p.generated_image_url]
+            artifact_preview_urls=[p.generated_image_url for p in visualizer_output.prompts if p.generated_image_url]
         )
 
     except Exception as e:

@@ -5,8 +5,10 @@ import { useChatStore } from "../store/chat"
 import { Button } from "@/components/ui/button"
 import { Plus, MessageSquare, PanelLeftClose } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { useRouter } from "next/navigation"
 
 export function ChatSidebar() {
+    const router = useRouter()
     const {
         threads,
         currentThreadId,
@@ -43,7 +45,10 @@ export function ChatSidebar() {
                 <Button
                     variant="outline"
                     className="w-full justify-start gap-2 h-10 rounded-lg bg-white text-foreground border border-gray-200 hover:bg-gray-50 transition-all font-normal"
-                    onClick={createSession}
+                    onClick={() => {
+                        createSession();
+                        router.push('/');
+                    }}
                 >
                     <Plus className="h-4 w-4" />
                     New Chat
@@ -62,7 +67,10 @@ export function ChatSidebar() {
                                     ? "bg-gray-200/60 text-foreground font-semibold"
                                     : "bg-transparent text-gray-500 hover:bg-gray-100/50 hover:text-gray-700"
                             )}
-                            onClick={() => setCurrentThreadId(thread.id)}
+                            onClick={() => {
+                                setCurrentThreadId(thread.id);
+                                router.push(`/chat/${thread.id}`);
+                            }}
                         >
                             <MessageSquare className={cn("h-4 w-4 shrink-0", currentThreadId === thread.id ? "opacity-100" : "opacity-70")} />
                             <span className="truncate text-sm">{thread.title || "New Chat"}</span>

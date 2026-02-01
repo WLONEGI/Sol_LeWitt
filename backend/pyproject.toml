@@ -10,47 +10,40 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
-    "langchain-community>=0.3.19",
-    "langchain-experimental>=0.3.4",
-    "langgraph>=0.3.5",
+    "langchain>=1.2.7",
+    "langchain-experimental>=0.4.1",
+    "langgraph>=1.0.7",
     "readabilipy>=0.3.0",
-    "python-dotenv>=1.0.1",
-    "socksio>=1.0.0",
-    "markdownify>=1.1.0",
-    "fastapi>=0.110.0",
-    "uvicorn>=0.27.1",
-    "python-multipart>=0.0.9",
-    "sse-starlette>=1.6.5",
-    "pandas>=2.2.3",
-    "numpy>=2.2.3",
-    "yfinance>=0.2.54",
-    "langchain-google-vertexai>=2.0.10",
-    "langchain-google-community>=2.0.10",
-    "langgraph-checkpoint-postgres>=3.0.2",
-    "psycopg[binary,pool]>=3.2.0",
-    "google-cloud-storage>=2.19.0",
-    "pydantic-settings>=2.7.0",
-    # PPTXテンプレート機能
-    "python-pptx>=1.0.0",
-    "lxml>=5.0.0",
+    "python-dotenv>=1.2.1",
+    "markdownify>=1.2.2",
+    "fastapi>=0.128.0",
+    "uvicorn>=0.40.0",
+    "python-multipart>=0.0.22",
+    "sse-starlette>=1.6.5,<2.0.0",
+    "langchain-google-vertexai>=3.2.2",
+    "langchain-google-genai>=4.2.0",
+    "langgraph-checkpoint-postgres>=3.0.4",
+    "psycopg[binary,pool]>=3.3.2",
+    "google-cloud-storage>=3.8.0",
+    "pydantic-settings>=2.12.0",
     "pdf2image>=1.17.0",
-    "Pillow>=10.0.0",
-    "google-genai>=0.3.0",
+    "Pillow>=12.1.0",
+    "langserve[all]>=0.3.3",
 ]
 
 
 [project.optional-dependencies]
 dev = [
-    "black>=24.2.0",
+    "black>=26.1.0",
 ]
 test = [
-    "pytest>=7.4.0",
-    "pytest-cov>=4.1.0",
-    "pytest-asyncio>=0.23.0"
+    "pytest>=8.0.0,<9.0.0",
+    "pytest-cov>=7.0.0",
+    "pytest-asyncio>=1.3.0"
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["test"]
 python_files = ["test_*.py"]
 addopts = "-v --cov=src --cov-report=term-missing"
 filterwarnings = [

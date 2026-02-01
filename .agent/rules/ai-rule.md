@@ -19,23 +19,8 @@ Geminiモデルの選定において、AIの自己判断によるモデル変更
 
 ## 2. Tech Stack & Libraries
 
-Vertex AIへの接続には、以下のライブラリ指定を遵守してください。
-
-- **Library:** `langchain-google-vertexai`
-- **Constraint:** `langchain-google-genai` (API Keyベース) ではなく、Vertex AI (Google Cloud IAMベース) のライブラリを使用すること。
-
-### Implementation Example (Python)
-```python
-from langchain_google_vertexai import VertexAI
-
-# Initialize with the specific model config
-llm = VertexAI(
-    model_name="gemini-3-flash-preview", # Must match the defined Rule
-    location="us-central1" # or your specific region
-)
-3. Database Connectivity Workflow
-データベース（Cloud SQL等）への接続を行う際は、必ずプロキシを経由する必要があります。
-
+Vertex AIへの接続には、以下を遵守してください。
+- **Constraint:** API Keyベースではなく、Vertex AIを使用すること。Vertex AIへの接続にはChatGoogleGenerativeAIを使うこと。勝手に変更しないこと。
 Requirement: cloud-sql-proxy の起動が必須です。
 
 Workflow:
