@@ -54,11 +54,17 @@ export function SlideDeckPreview({ artifactId, slides, title = "Generated Slides
                     >
                         {/* Thumbnail */}
                         <div className="relative aspect-video h-16 w-28 shrink-0 rounded-md overflow-hidden bg-muted/20 border border-white/5 shadow-sm">
-                            <img
-                                src={slide.image_url}
-                                alt={`Slide ${slide.slide_number}`}
-                                className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-110"
-                            />
+                            {slide.image_url ? (
+                                <img
+                                    src={slide.image_url}
+                                    alt={`Slide ${slide.slide_number}`}
+                                    className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-110"
+                                />
+                            ) : (
+                                <div className="h-full w-full flex items-center justify-center text-[10px] text-muted-foreground">
+                                    Generating...
+                                </div>
+                            )}
                             {/* Overlay Icon */}
                             <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
                                 <Maximize2 className="w-4 h-4 text-white" />

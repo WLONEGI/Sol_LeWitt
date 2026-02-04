@@ -4,7 +4,7 @@ test('renders execution plan from data stream', async ({ page }) => {
     // Mock the chat API to return a stream with a plan update
     await page.route('/api/chat', async route => {
         const planData = {
-            type: 'data-plan',
+            type: 'plan_update',
             data: {
                 title: "Mock Execution Plan",
                 description: "Testing plan rendering",

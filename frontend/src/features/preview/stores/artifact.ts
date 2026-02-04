@@ -18,6 +18,7 @@ interface ArtifactState {
     setActiveContextId: (id: string | null) => void;
     setPreviewOpen: (open: boolean) => void;
     setArtifacts: (artifacts: Record<string, Artifact>) => void;
+    upsertArtifact: (artifact: Artifact) => void;
     updateArtifactContent: (id: string, content: any) => void;
 }
 
@@ -30,6 +31,17 @@ export const useArtifactStore = create<ArtifactState>((set) => ({
     setActiveContextId: (id) => set({ activeContextId: id }),
     setPreviewOpen: (open) => set({ isPreviewOpen: open }),
     setArtifacts: (artifacts) => set({ artifacts }),
+    upsertArtifact: (artifact) => set((state) => {
+        const existing = state.artifacts[artifact.id];
+        const mergedContent =
+            existing && typeof existing.content === 'object' && typeof artifact.content === 'object'
+                ? { ...existing.content, ...artifact.content }
+                : (artifact.content ?? existing?.content);
+        const merged = { ...existing, ...artifact, content: mergedContent };
+        const artifacts = { ...state.artifacts, [artifact.id]: merged };
+        const currentArtifact = state.currentArtifact?.id === artifact.id ? merged : state.currentArtifact;
+        return { artifacts, currentArtifact };
+    }),
     updateArtifactContent: (id, content) => set((state) => {
         const artifacts = { ...state.artifacts };
         if (artifacts[id]) {

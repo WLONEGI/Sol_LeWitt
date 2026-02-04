@@ -1,7 +1,8 @@
 import logging
 from typing import Literal
 
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import AIMessage
+from langchain_core.callbacks.manager import adispatch_custom_event
 from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
@@ -13,90 +14,95 @@ from src.core.workflow.state import State
 
 logger = logging.getLogger(__name__)
 
-class HandoffToPlanner(BaseModel):
-    """
-    Call this tool when the user's request is ready for production (topic is clear).
-    This will trigger the handoff to the planning team.
-    """
-    reasoning: str = Field(
+class CoordinatorOutput(BaseModel):
+    """Structured output for coordinator in a single LLM call."""
+    response: str = Field(
         ...,
-        description="Reasoning for why the request is ready for production (e.g., 'Topic is clear', 'User confirmed intent')."
+        description="User-facing response in Japanese. Must be polite and actionable."
+    )
+    goto: Literal["planner", "__end__"] = Field(
+        ...,
+        description="Next node. Use 'planner' when the request is production-ready; otherwise '__end__'."
+    )
+    title: str | None = Field(
+        None,
+        description="Short title (<=20 chars) only when goto is 'planner'. Use null otherwise."
     )
 
 async def coordinator_node(state: State, config: RunnableConfig) -> Command[Literal["planner", "supervisor", "__end__"]]:
     """
     Coordinator Node: Gatekeeper & UX Manager (Unified).
-    Uses tool calling to decide execution flow while simultaneously streaming the response to the user.
+    Uses structured output to decide execution flow while streaming JSON to the frontend.
     """
     logger.info("Coordinator processing request (Unified Mode)")
     
     messages = apply_prompt_template("coordinator", state)
     logger.debug(f"Coordinator Messages: {messages}")
     
-    # 1. Setup LLM with Tool
-    # We bind the HandoffToPlanner tool. 
-    # The model is instructed (via prompt) to call this tool if appropriate, 
-    # AND to generate a polite text response in the same turn.
+    # 1. Setup LLM with structured output
     llm = get_llm_by_type(AGENT_LLM_MAP["coordinator"], streaming=True)
-    llm_with_tools = llm.bind_tools([HandoffToPlanner])
+    structured_llm = llm.with_structured_output(CoordinatorOutput)
     
     # 2. Add run_name for better visibility
     stream_config = config.copy()
     stream_config["run_name"] = "coordinator" # Unified run name
     
     # 3. Stream Integration
-    # We want to stream the text chunks to the frontend as they arrive (handled by callbacks), 
-    # while capturing the final output to utilize any tool calls.
-    # Using `ainvoke` with streaming=True allows the underlying callbacks to fire for tokens,
-    # and returns the final AIMessage with tool_calls.
+    # We stream JSON chunks to the frontend (buffered on BFF), and parse the final structured output here.
+    # Using `ainvoke` with streaming=True allows the underlying callbacks to fire for tokens.
     
-    logger.info("Coordinator: Invoking model (streaming events should flow to frontend)...")
-    response_message = await llm_with_tools.ainvoke(messages, config=stream_config)
-    
-    logger.debug(f"Coordinator Response: content='{response_message.content}', tool_calls={response_message.tool_calls}")
-    
+    logger.info("Coordinator: Invoking model (structured output)...")
+    result: CoordinatorOutput = await structured_llm.ainvoke(messages, config=stream_config)
+
+    logger.debug(
+        "Coordinator Structured Response: goto='%s', title='%s', response_len=%s",
+        result.goto,
+        result.title,
+        len(result.response or "")
+    )
+
     # 4. Decision Logic
-    goto_destination = "__end__"
-    
-    if response_message.tool_calls:
-        # Check if the desired tool was called
-        for tc in response_message.tool_calls:
-            if tc["name"] == "HandoffToPlanner":
-                logger.info(f"Handoff tool called. Reasoning: {tc['args'].get('reasoning')}")
-                goto_destination = "planner"
-                
-                # Async Title Generation (Preserved logic)
-                thread_id = config.get("configurable", {}).get("thread_id")
-                # We await this to ensure title is ready before next steps if needed
-                title = await _generate_and_save_title(state, thread_id)
-                if title:
-                    await adispatch_custom_event(
-                        "title_generated",
-                        {"title": title},
-                        config=config
-                    )
-                break
+    goto_destination = "planner" if result.goto == "planner" else "__end__"
+
+    if goto_destination == "planner":
+        thread_id = config.get("configurable", {}).get("thread_id")
+        title = result.title or _derive_fallback_title(state)  # CHANGED: deterministic fallback
+        saved_title = await _save_title(thread_id, title)
+        if saved_title:
+            await adispatch_custom_event(
+                "title_generated",
+                {"title": saved_title},
+                config=config
+            )
     
     # 5. Return Command
     # We return the message so it's added to history.
     return Command(
-        update={"messages": [response_message]},
+        update={"messages": [AIMessage(content=result.response)]},
         goto=goto_destination
     )
 
-async def _generate_and_save_title(state: State, thread_id: str) -> str | None:
-    """Generates a title using Flash model and saves to DB. Returns the title if generated/found."""
+def _derive_fallback_title(state: State) -> str:
+    """Derive a short deterministic title from recent user input."""
+    messages = state.get("messages", [])
+    for msg in reversed(messages):
+        if getattr(msg, "type", None) == "human" and isinstance(msg.content, str) and msg.content.strip():
+            return msg.content.strip()[:20]
+    return "プレゼン資料"
+
+async def _save_title(thread_id: str | None, title: str | None) -> str | None:
+    """Saves a title to DB if not already present. Returns the saved or existing title."""
     try:
-        from src.shared.config.settings import settings
         # Import internally to avoid circular dependency with service -> build_graph -> coordinator
         from src.core.workflow.service import _manager
         
-        if not thread_id: return
+        if not thread_id or not title:
+            return None
 
         # Check if pool is available
         if not _manager.pool:
             logger.warning("DB Pool not initialized, skipping title generation.")
-            return
+            return None
 
         # 0. Check if title already exists (Idempotency) - Reuse pool
         async with _manager.pool.connection() as conn:
@@ -107,28 +113,7 @@ async def _generate_and_save_title(state: State, thread_id: str) -> str | None:
                     logger.info(f"Title already exists for thread {thread_id}, skipping generation.")
                     return row[0]
 
-        # 1. Generate Title
-        model_name = settings.BASIC_MODEL or "gemini-1.5-flash"
-        llm = get_llm_by_type(model_name) 
-        
-        messages = state.get("messages", [])
-        if not messages: return None
-
-        # Simple context extraction
-        context = "\n".join([f"{m.type}: {m.content}" for m in messages if isinstance(m.content, str)])
-        
-        prompt = f"""
-        以下の会話の文脈に基づいて、スライド生成タスクの短いタイトル（20文字以内）を生成してください。
-        タイトルのみを出力してください。鉤括弧や装飾は不要です。
-        
-        Conversation:
-        {context}
-        """
-        
-        response = await llm.ainvoke(prompt)
-        title = response.content.strip()
-        
-        # 2. Save to DB - Reuse pool
+        # 1. Save to DB - Reuse pool
         async with _manager.pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -141,10 +126,9 @@ async def _generate_and_save_title(state: State, thread_id: str) -> str | None:
                     (thread_id, title, "")
                 )
         
-        logger.info(f"Title generated and saved: {title}")
+        logger.info(f"Title saved: {title}")
         return title
         
     except Exception as e:
-        logger.warning(f"Failed to generate session title: {e}")
+        logger.warning(f"Failed to save session title: {e}")
         return None
-

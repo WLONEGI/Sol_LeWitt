@@ -3,7 +3,6 @@ import json
 from copy import deepcopy
 from typing import Literal
 
-from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
@@ -12,7 +11,7 @@ from src.infrastructure.llm.llm import get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
 from src.shared.schemas import PlannerOutput
 from src.core.workflow.state import State
-from .common import run_structured_output
+from .common import run_structured_output, extract_first_json, split_content_parts
 
 logger = logging.getLogger(__name__)
 
@@ -35,31 +34,33 @@ async def planner_node(state: State, config: RunnableConfig) -> Command[Literal[
         stream_config = config.copy()
         stream_config["run_name"] = "planner"
         
-        planner_output: PlannerOutput = await run_structured_output(
-            llm=llm,
-            schema=PlannerOutput,
-            messages=messages,
-            config=stream_config,
-            repair_hint="Schema: PlannerOutput. No extra text."
-        )
+        # Stream tokens via on_chat_model_stream; keep final JSON in-buffer
+        full_text = ""
+        async for chunk in llm.astream(messages, config=stream_config):
+            if not getattr(chunk, "content", None):
+                continue
+            thinking_text, text = split_content_parts(chunk.content)
+            if text:
+                full_text += text
+
+        try:
+            json_text = extract_first_json(full_text) or full_text
+            planner_output = PlannerOutput.model_validate_json(json_text)
+        except Exception as parse_error:
+            logger.warning(f"Planner streaming JSON parse failed: {parse_error}. Falling back to repair.")
+            planner_output = await run_structured_output(
+                llm=llm,
+                schema=PlannerOutput,
+                messages=messages,
+                config=stream_config,
+                repair_hint="Schema: PlannerOutput. No extra text."
+            )
         
         logger.debug(f"[DEBUG] Planner Output: {planner_output}")
         plan_data = [step.model_dump() for step in planner_output.steps]
         
         logger.info(f"Plan generated successfully with {len(plan_data)} steps.")
         
-        # Emit custom event for UI updates since we disabled streaming
-        await adispatch_custom_event(
-            "plan_updated",
-            {
-                "plan": plan_data, 
-                "ui_type": "plan_update", 
-                "title": "Execution Plan", 
-                "description": "The updated execution plan."
-            },
-            config=config
-        )
-
         return Command(
             update={
                 "messages": [

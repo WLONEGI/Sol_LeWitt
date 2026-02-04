@@ -7,6 +7,7 @@ from .outputs import (
     ImagePrompt,
     StructuredImagePrompt,  # v2: Markdown Slide Format
     VisualizerOutput,
+    VisualizerPlan,
     DataAnalystOutput,
     ThoughtSignature,
     GenerationConfig,
@@ -14,18 +15,6 @@ from .outputs import (
     ResearchResult,
     ResearchTaskList,
 )
-
-
-from .design import (
-    DesignContext,
-    ColorScheme,
-    FontScheme,
-    SlideLayoutInfo,
-    LayoutPlaceholder,
-    BackgroundInfo,
-    LayoutType,
-)
-
 
 
 __all__ = [
@@ -38,18 +27,11 @@ __all__ = [
     "ImagePrompt",
     "StructuredImagePrompt",
     "VisualizerOutput",
+    "VisualizerPlan",
     "DataAnalystOutput",
     "ThoughtSignature",
     "GenerationConfig",
     "ResearchTask",
     "ResearchResult",
-    # Design Context
-    "DesignContext",
-    "ColorScheme",
-    "FontScheme",
-    "SlideLayoutInfo",
-    "LayoutPlaceholder",
-    "BackgroundInfo",
-    "LayoutType",
+    # Design Context (removed)
 ]
-

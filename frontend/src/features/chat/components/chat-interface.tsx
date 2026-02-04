@@ -5,14 +5,14 @@ import { type UIMessage } from 'ai'
 import { ChatList } from "./chat-list"
 import { ChatInput } from "./chat-input"
 import { useChatStore } from "@/features/chat/stores/chat"
+import { useArtifactStore } from "@/features/preview/stores/artifact"
 import { useResearchStore } from "@/features/preview/stores/research"
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { shallow } from "zustand/shallow"
+import { useShallow } from 'zustand/react/shallow'
 import { v4 as uuidv4 } from 'uuid'
 
 
 import { useChatTimeline } from "../hooks/use-chat-timeline"
-import { AgentStatusIndicator } from "./agent-status-indicator"
 import { FixedPlanOverlay } from "./fixed-plan-overlay"
 import { PanelLeftOpen } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -21,13 +21,18 @@ import { useRouter } from "next/navigation"
 // Custom data events from backend
 interface CustomDataEvent {
     type: string
+    data?: any
     [key: string]: unknown
 }
 
 const MAX_DATA_EVENTS = 200
 const DATA_EVENTS_TO_STORE = new Set([
-    'data-plan',
+    'data-plan_update',
     'data-outline',
+    'data-visual-plan',
+    'data-visual-prompt',
+    'data-visual-image',
+    'data-visual-pdf',
 ])
 
 export function ChatInterface({ threadId }: { threadId?: string | null }) {
@@ -36,22 +41,24 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
     const [pendingFile, setPendingFile] = useState<File | null>(null)
     const [pendingFileBase64, setPendingFileBase64] = useState<string | null>(null)
 
-    const { registerTask, appendContent, setCitations, completeTask } = useResearchStore(
-        (state) => ({
+    const { registerTask, appendContent, completeTask } = useResearchStore(
+        useShallow((state) => ({
             registerTask: state.registerTask,
             appendContent: state.appendContent,
-            setCitations: state.setCitations,
             completeTask: state.completeTask,
-        }),
-        shallow
+        }))
     )
     const { currentThreadId, setCurrentThreadId, updateThreadTitle } = useChatStore(
-        (state) => ({
+        useShallow((state) => ({
             currentThreadId: state.currentThreadId,
             setCurrentThreadId: state.setCurrentThreadId,
             updateThreadTitle: state.updateThreadTitle,
-        }),
-        shallow
+        }))
+    )
+    const { upsertArtifact } = useArtifactStore(
+        useShallow((state) => ({
+            upsertArtifact: state.upsertArtifact,
+        }))
     )
 
     const [generatedId] = useState(() => uuidv4())
@@ -81,6 +88,74 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         }
     }, [flushData])
 
+    const upsertSlideDeck = useCallback((payload: any) => {
+        if (!payload) return
+        const artifactId = typeof payload.artifact_id === 'string'
+            ? payload.artifact_id
+            : `visual_deck_${stableId}`
+
+        const state = useArtifactStore.getState()
+        const existing = state.artifacts[artifactId]
+        const existingSlides = Array.isArray(existing?.content?.slides) ? existing?.content?.slides : []
+
+        const mergeSlide = (slide_number: number, patch: any) => {
+            const index = existingSlides.findIndex((s: any) => s.slide_number === slide_number)
+            if (index >= 0) {
+                const updated = { ...existingSlides[index], ...patch }
+                return [...existingSlides.slice(0, index), updated, ...existingSlides.slice(index + 1)]
+            }
+            return [...existingSlides, { slide_number, ...patch }]
+        }
+
+        let nextSlides = existingSlides
+        if (payload.slide_number) {
+            let structuredPrompt = payload.structured_prompt
+            if (typeof structuredPrompt === 'string') {
+                try {
+                    structuredPrompt = JSON.parse(structuredPrompt)
+                } catch {
+                    // keep as string if parsing fails
+                }
+            }
+            const slidePatch: Record<string, any> = {
+                slide_number: payload.slide_number,
+                title: payload.title,
+                image_url: payload.image_url,
+                prompt_text: payload.prompt_text,
+                structured_prompt: structuredPrompt,
+                rationale: payload.rationale,
+                layout_type: payload.layout_type,
+                status: payload.status,
+                selected_inputs: payload.selected_inputs,
+            }
+            Object.keys(slidePatch).forEach((key) => {
+                if (slidePatch[key] === undefined || slidePatch[key] === null) {
+                    delete slidePatch[key]
+                }
+            })
+            nextSlides = mergeSlide(payload.slide_number, slidePatch)
+        }
+
+        const nextContent = {
+            ...(existing?.content ?? {}),
+            slides: nextSlides,
+            pdf_url: payload.pdf_url ?? existing?.content?.pdf_url,
+            plan: payload.plan ?? existing?.content?.plan,
+        }
+
+        const deckTitle = payload.deck_title || payload.title || existing?.title || "Generated Slides"
+        const status = payload.status || existing?.status || "streaming"
+
+        upsertArtifact({
+            id: artifactId,
+            type: "slide_deck",
+            title: deckTitle,
+            content: nextContent,
+            version: (existing?.version ?? 0) + 1,
+            status,
+        })
+    }, [stableId, upsertArtifact])
+
     const {
         messages,
         setMessages,
@@ -94,21 +169,38 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
             const data = newData as CustomDataEvent
             enqueueData(data)
 
-            if (data?.type === 'data-title-update' && data.title && stableId) {
-                updateThreadTitle(stableId, data.title as string)
+            if (data?.type === 'data-title-update' && stableId) {
+                const directTitle = typeof (data as any)?.title === 'string' ? (data as any).title : null
+                const nestedTitle = typeof (data as any)?.data?.title === 'string' ? (data as any).data.title : null
+                const title = directTitle || nestedTitle
+                if (title) {
+                    updateThreadTitle(stableId, title)
+                }
             }
 
             if (data?.type === 'data-research-start' && data.data) {
-                registerTask(data.data.task_id, data.data.perspective)
+                const d = data.data as { task_id: string; perspective: string }
+                registerTask(d.task_id, d.perspective)
             }
             if (data?.type === 'data-research-token' && data.data) {
-                appendContent(data.data.task_id, data.data.token)
-            }
-            if (data?.type === 'data-citation' && data.data) {
-                setCitations(data.data.task_id, data.data.sources)
+                const d = data.data as { task_id: string; token: string }
+                appendContent(d.task_id, d.token)
             }
             if (data?.type === 'data-research-complete' && data.data) {
-                completeTask(data.data.task_id)
+                const d = data.data as { task_id: string }
+                completeTask(d.task_id)
+            }
+            if (data?.type === 'data-visual-plan') {
+                upsertSlideDeck(data.data)
+            }
+            if (data?.type === 'data-visual-prompt') {
+                upsertSlideDeck(data.data)
+            }
+            if (data?.type === 'data-visual-image') {
+                upsertSlideDeck(data.data)
+            }
+            if (data?.type === 'data-visual-pdf') {
+                upsertSlideDeck({ ...(data.data as Record<string, any>), status: 'completed' })
             }
         },
         onError: (error: Error) => {
@@ -116,7 +208,7 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         }
     })
 
-    const { timeline, latestOutline, latestPlan } = useChatTimeline(messages, data, stableId)
+    const { timeline, latestOutline, latestPlan, latestSlideDeck } = useChatTimeline(messages, data, stableId)
 
     useEffect(() => {
         let isCancelled = false
@@ -205,7 +297,9 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                     <ChatList
                         timeline={timeline}
                         latestOutline={latestOutline}
+                        latestSlideDeck={latestSlideDeck}
                         isLoading={isLoading}
+                        status={status}
                         className="h-full"
                     />
                 </div>

@@ -2,10 +2,12 @@ import logging
 import json
 import random
 import asyncio
+import re
 from typing import Literal, Any
 
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.callbacks.manager import adispatch_custom_event
 from langgraph.types import Command
 
 from src.shared.config.settings import settings
@@ -14,6 +16,7 @@ from src.infrastructure.llm.llm import get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
 from src.shared.schemas import (
     VisualizerOutput,
+    VisualizerPlan,
     ImagePrompt,
     StructuredImagePrompt,
     ThoughtSignature
@@ -22,11 +25,45 @@ from src.core.workflow.state import State
 
 # Updated Imports for Services
 from src.domain.designer.generator import generate_image, create_image_chat_session_async, send_message_for_image_async
+from src.domain.designer.pdf import assemble_pdf_from_images
 from src.infrastructure.storage.gcs import upload_to_gcs, download_blob_as_bytes
 
 from .common import create_worker_response, run_structured_output
 
 logger = logging.getLogger(__name__)
+
+def _safe_json_loads(value: Any) -> Any | None:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return None
+    if isinstance(value, dict):
+        return value
+    return None
+
+def _sanitize_filename(title: str) -> str:
+    # Remove filesystem-unfriendly chars, keep unicode
+    safe = re.sub(r"[\\\\/:*?\"<>|]", "_", title).strip()
+    safe = re.sub(r"\s+", " ", safe)
+    return safe or "Untitled"
+
+async def _get_thread_title(thread_id: str | None) -> str | None:
+    if not thread_id:
+        return None
+    try:
+        from src.core.workflow.service import _manager
+        if not _manager.pool:
+            return None
+        async with _manager.pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT title FROM threads WHERE thread_id = %s", (thread_id,))
+                row = await cur.fetchone()
+                if row and row[0]:
+                    return row[0]
+    except Exception as e:
+        logger.warning(f"Failed to fetch thread title: {e}")
+    return None
 
 def compile_structured_prompt(
     structured: StructuredImagePrompt,
@@ -70,8 +107,10 @@ async def process_single_slide(
     prompt_item: ImagePrompt, 
     previous_generations: list[dict] | None = None, 
     override_reference_bytes: bytes | None = None,
+    override_reference_url: str | None = None,
+    seed_override: int | None = None,
     session_id: str | None = None,
-) -> ImagePrompt:
+) -> tuple[ImagePrompt, bytes | None]:
     """
     Helper function to process a single slide: generation or edit.
     """
@@ -92,7 +131,9 @@ async def process_single_slide(
             logger.info(f"Using legacy prompt for slide {prompt_item.slide_number}")
         else:
             raise ValueError(f"Slide {prompt_item.slide_number} has neither structured_prompt nor image_generation_prompt")
-        
+
+        prompt_item.compiled_prompt = final_prompt
+
         # === Reference Image Selection ===
         seed = None
         reference_image_bytes = None
@@ -103,6 +144,7 @@ async def process_single_slide(
         if override_reference_bytes:
             logger.info(f"Using explicit override reference for slide {prompt_item.slide_number}")
             reference_image_bytes = override_reference_bytes
+            reference_url = override_reference_url
         
         # 2. Check for matching previous generation (Deep Edit)
         elif previous_generations:
@@ -132,6 +174,8 @@ async def process_single_slide(
                 
                 break
         
+        if seed_override is not None:
+            seed = seed_override
         if seed is None:
             seed = random.randint(0, 2**31 - 1)
 
@@ -173,11 +217,11 @@ async def process_single_slide(
         
         logger.info(f"Image generated and stored at: {public_url}")
 
-        return prompt_item
+        return prompt_item, image_bytes
 
     except Exception as image_error:
         logger.error(f"Failed to generate/upload image for prompt {prompt_item.slide_number}: {image_error}")
-        return prompt_item
+        return prompt_item, None
 
 
 async def process_slide_with_chat(
@@ -258,108 +302,309 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
     except StopIteration:
         logger.error("Visualizer called but no in_progress step found.")
         return Command(goto="supervisor", update={})
-    
-    context = f"Instruction: {current_step['instruction']}\n\nAvailable Artifacts: {json.dumps(state.get('artifacts', {}), default=str)}"
 
-    design_dir = current_step.get('design_direction')
-    if design_dir:
-        context += f"\n\n[Design Direction from Planner]:\n{design_dir}\n"
+    artifacts = state.get("artifacts", {}) or {}
+    design_dir = current_step.get("design_direction")
+
+    def _get_latest_artifact_by_suffix(suffix: str) -> dict | None:
+        candidates: list[tuple[int, str]] = []
+        for key in artifacts.keys():
+            if key.endswith(suffix):
+                match = re.search(r"step_(\d+)_", key)
+                step_id = int(match.group(1)) if match else -1
+                candidates.append((step_id, key))
+        if not candidates:
+            return None
+        _, key = sorted(candidates, key=lambda x: x[0])[-1]
+        return _safe_json_loads(artifacts.get(key))
+
+    story_data = _get_latest_artifact_by_suffix("_story") or {}
+    story_slides = story_data.get("slides", [])
+    data_analyst_data = _get_latest_artifact_by_suffix("_data")
+
+    if not story_slides:
+        logger.error("Visualizer requires Storywriter output but none was found.")
+        result_summary = "Error: Storywriter output not found."
+        state["plan"][step_index]["result_summary"] = result_summary
+        return create_worker_response(
+            role="visualizer",
+            content_json=json.dumps({"error": "Storywriter output not found."}, ensure_ascii=False),
+            result_summary=result_summary,
+            current_step_id=current_step["id"],
+            state=state,
+            artifact_key_suffix="visual",
+            artifact_title="Visual Assets",
+            artifact_icon="AlertTriangle",
+            artifact_preview_urls=[],
+            is_error=True
+        )
 
     previous_generations: list[dict] = []
-    for key, json_str in state.get("artifacts", {}).items():
+    for key, json_str in artifacts.items():
         if key.endswith("_visual"):
-            try:
-                data = json.loads(json_str)
-                if "prompts" in data:
-                    previous_generations.extend(data["prompts"])
-            except Exception:
-                pass
-    
-    if previous_generations:
-        context += f"\n\n# PREVIOUS GENERATIONS (EDIT MODE)\nUser wants to modify these. Maintain consistency with seed/style if specified:\n{json.dumps(previous_generations, ensure_ascii=False, indent=2)}"
-    
-    messages = apply_prompt_template("visualizer", state)
-    
-    supervisor_content = [{"type": "text", "text": context}]
+            data = _safe_json_loads(json_str)
+            if isinstance(data, dict) and "prompts" in data:
+                previous_generations.extend(data["prompts"])
 
-    messages.append(HumanMessage(content=supervisor_content, name="supervisor"))
-    
+    # Plan context (LLM decides order/inputs)
+    plan_context = {
+        "instruction": current_step.get("instruction"),
+        "design_direction": design_dir,
+        "storywriter_slides": story_slides,
+        "data_analyst": data_analyst_data,
+        "previous_generations": previous_generations or None
+    }
+
     llm = get_llm_by_type(AGENT_LLM_MAP["visualizer"])
-    
-    try:
-        # Add run_name for better visibility in stream events
-        stream_config = config.copy()
-        stream_config["run_name"] = "visualizer"
-        
-        visualizer_output: VisualizerOutput = await run_structured_output(
-            llm=llm,
-            schema=VisualizerOutput,
-            messages=messages,
-            config=stream_config,
-            repair_hint="Schema: VisualizerOutput. No extra text."
-        )
-        
-        logger.debug(f"Visualizer Output: {visualizer_output}")
 
-        prompts = visualizer_output.prompts
+    try:
+        stream_config = config.copy()
+        stream_config["run_name"] = "visualizer_plan"
+
+        plan_messages = apply_prompt_template("visualizer_plan", state)
+        plan_messages.append(
+            HumanMessage(
+                content=json.dumps(plan_context, ensure_ascii=False, indent=2),
+                name="supervisor"
+            )
+        )
+
+        visualizer_plan: VisualizerPlan = await run_structured_output(
+            llm=llm,
+            schema=VisualizerPlan,
+            messages=plan_messages,
+            config=stream_config,
+            repair_hint="Schema: VisualizerPlan. No extra text."
+        )
+
+        logger.debug(f"Visualizer Plan: {visualizer_plan}")
+
+        # Notify plan
+        artifact_id = f"step_{current_step['id']}_visual"
+        thread_id = config.get("configurable", {}).get("thread_id")
+        deck_title = await _get_thread_title(thread_id) or "Untitled"
+        await adispatch_custom_event(
+            "data-visual-plan",
+            {
+                "artifact_id": artifact_id,
+                "deck_title": deck_title,
+                "plan": visualizer_plan.model_dump()
+            },
+            config=config
+        )
+
+        # Validate generation order
+        outline_order = [s.get("slide_number") for s in story_slides if "slide_number" in s]
+        outline_order = [n for n in outline_order if isinstance(n, int)]
+        generation_order = [n for n in visualizer_plan.generation_order if n in outline_order]
+        for n in outline_order:
+            if n not in generation_order:
+                generation_order.append(n)
+
+        plan_map = {s.slide_number: s for s in visualizer_plan.slides}
+
         updated_prompts: list[ImagePrompt] = []
-        
+        master_style: str | None = None
+        last_generated_image_bytes: bytes | None = None
+        last_generated_image_url: str | None = None
+        pdf_images: dict[int, bytes] = {}
+
         import uuid
-        # Use thread_id from config for GCS session_id to ensure persistence
         session_id = config.get("configurable", {}).get("thread_id") or str(uuid.uuid4())
         logger.info(f"Using session_id for GCS storage: {session_id}")
 
-        # Use sequential chat-based generation (no template images)
-        target_prompts = prompts
-        if target_prompts:
-            seed = random.randint(0, 2**31 - 1)
-            chat_session = await create_image_chat_session_async(seed)
-            logger.info(f"[Sequential] Starting sequential generation for {len(target_prompts)} slides with context carryover...")
-            
-            for idx, prompt_item in enumerate(target_prompts):
-                logger.info(f"[Sequential] Processing slide {idx + 1}/{len(target_prompts)}...")
-                processed = await process_slide_with_chat(
-                    prompt_item,
-                    chat_session,
-                    session_id=session_id,
-                )
-                updated_prompts.append(processed)
-        
-        updated_prompts.sort(key=lambda x: x.slide_number)
-        visualizer_output.prompts = updated_prompts
-        
-        content_json = json.dumps(visualizer_output.model_dump(), ensure_ascii=False, indent=2)
-        logger.info(f"Visualizer generated {len(visualizer_output.prompts)} image prompts with artifacts")
-        result_summary = visualizer_output.execution_summary
+        for idx, slide_number in enumerate(generation_order, start=1):
+            slide_content = next((s for s in story_slides if s.get("slide_number") == slide_number), None)
+            if not slide_content:
+                logger.warning(f"Slide {slide_number} not found in story outline. Skipping.")
+                continue
 
-        # Update result summary in plan
+            plan_slide = plan_map.get(slide_number)
+            prompt_context = {
+                "slide_number": slide_number,
+                "storywriter_slide": slide_content,
+                "design_direction": design_dir,
+                "data_analyst": data_analyst_data,
+                "selected_inputs": plan_slide.selected_inputs if plan_slide else [],
+                "generation_notes": plan_slide.generation_notes if plan_slide else None,
+                "master_style": master_style,
+                "previous_generations": previous_generations or None
+            }
+
+            prompt_state = {"messages": []}
+            prompt_messages = apply_prompt_template("visualizer_prompt", prompt_state)
+            prompt_messages.append(
+                HumanMessage(
+                    content=json.dumps(prompt_context, ensure_ascii=False, indent=2),
+                    name="supervisor"
+                )
+            )
+
+            prompt_stream_config = config.copy()
+            prompt_stream_config["run_name"] = "visualizer_prompt"
+
+            prompt_item: ImagePrompt = await run_structured_output(
+                llm=llm,
+                schema=ImagePrompt,
+                messages=prompt_messages,
+                config=prompt_stream_config,
+                repair_hint="Schema: ImagePrompt. No extra text."
+            )
+
+            # Enforce slide number and layout if provided by planner
+            prompt_item.slide_number = slide_number
+            if plan_slide and plan_slide.layout_type:
+                prompt_item.layout_type = plan_slide.layout_type  # override if planner prefers
+
+            # Compile prompt for UI
+            if prompt_item.structured_prompt is not None:
+                compiled_prompt = compile_structured_prompt(
+                    prompt_item.structured_prompt,
+                    slide_number=slide_number
+                )
+            else:
+                compiled_prompt = prompt_item.image_generation_prompt or ""
+            prompt_item.compiled_prompt = compiled_prompt
+
+            # Update master style if needed
+            if prompt_item.structured_prompt and not master_style:
+                master_style = prompt_item.structured_prompt.visual_style
+
+            # Emit prompt event
+            await adispatch_custom_event(
+                "data-visual-prompt",
+                {
+                    "artifact_id": artifact_id,
+                    "deck_title": deck_title,
+                    "slide_number": slide_number,
+                    "title": slide_content.get("title"),
+                    "layout_type": prompt_item.layout_type,
+                    "prompt_text": compiled_prompt,
+                    "structured_prompt": prompt_item.structured_prompt.model_dump() if prompt_item.structured_prompt else None,
+                    "rationale": prompt_item.rationale,
+                    "selected_inputs": plan_slide.selected_inputs if plan_slide else []
+                },
+                config=config
+            )
+
+            # Reference image policy
+            reference_bytes = None
+            reference_url = None
+            if plan_slide and plan_slide.reference_policy == "explicit" and plan_slide.reference_url:
+                reference_url = plan_slide.reference_url
+                reference_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
+            elif plan_slide and plan_slide.reference_policy == "previous":
+                if last_generated_image_bytes:
+                    reference_bytes = last_generated_image_bytes
+                    reference_url = last_generated_image_url
+                else:
+                    # fallback: previous generation of same slide (edit mode)
+                    for prev in previous_generations:
+                        if prev.get("slide_number") == slide_number and prev.get("generated_image_url"):
+                            reference_url = prev["generated_image_url"]
+                            reference_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
+                            break
+
+            # Generate image
+            processed, image_bytes = await process_single_slide(
+                prompt_item,
+                previous_generations=previous_generations,
+                override_reference_bytes=reference_bytes,
+                override_reference_url=reference_url,
+                session_id=session_id
+            )
+
+            updated_prompts.append(processed)
+            if image_bytes and processed.generated_image_url:
+                last_generated_image_bytes = image_bytes
+                last_generated_image_url = processed.generated_image_url
+                pdf_images[slide_number] = image_bytes
+
+            await adispatch_custom_event(
+                "data-visual-image",
+                {
+                    "artifact_id": artifact_id,
+                    "deck_title": deck_title,
+                    "slide_number": slide_number,
+                    "title": slide_content.get("title"),
+                    "image_url": processed.generated_image_url,
+                    "status": "completed" if processed.generated_image_url else "failed"
+                },
+                config=config
+            )
+
+        updated_prompts.sort(key=lambda x: x.slide_number)
+
+        # Assemble PDF (1 page per slide) if all images are ready
+        combined_pdf_url = None
+        if len(pdf_images) == len(outline_order) and outline_order:
+            ordered_bytes = [pdf_images[n] for n in outline_order if n in pdf_images]
+            try:
+                pdf_bytes = assemble_pdf_from_images(ordered_bytes)
+                safe_title = _sanitize_filename(deck_title)
+                object_name = f"generated_assets/{session_id}/{safe_title}.pdf"
+
+                combined_pdf_url = await asyncio.to_thread(
+                    upload_to_gcs,
+                    pdf_bytes,
+                    content_type="application/pdf",
+                    session_id=None,
+                    slide_number=None,
+                    object_name=object_name
+                )
+
+                await adispatch_custom_event(
+                    "data-visual-pdf",
+                    {
+                        "artifact_id": artifact_id,
+                        "deck_title": deck_title,
+                        "title": deck_title,
+                        "pdf_url": combined_pdf_url,
+                        "page_count": len(ordered_bytes)
+                    },
+                    config=config
+                )
+            except Exception as pdf_error:
+                logger.error(f"Failed to assemble PDF: {pdf_error}")
+
+        # Build final Visualizer output
+        visualizer_output = VisualizerOutput(
+            execution_summary=visualizer_plan.execution_summary,
+            prompts=updated_prompts
+        )
+        visualizer_output.combined_pdf_url = combined_pdf_url
+
+        content_json = json.dumps(visualizer_output.model_dump(), ensure_ascii=False, indent=2)
+        result_summary = visualizer_output.execution_summary
+        if combined_pdf_url:
+            result_summary = f"{result_summary} / PDF生成完了"
+
         state["plan"][step_index]["result_summary"] = result_summary
 
         return create_worker_response(
             role="visualizer",
             content_json=content_json,
             result_summary=result_summary,
-            current_step_id=current_step['id'],
+            current_step_id=current_step["id"],
             state=state,
             artifact_key_suffix="visual",
             artifact_title="Visual Assets",
             artifact_icon="Image",
-            artifact_preview_urls=[p.generated_image_url for p in visualizer_output.prompts if p.generated_image_url]
+            artifact_preview_urls=[p.generated_image_url for p in updated_prompts if p.generated_image_url]
         )
 
     except Exception as e:
         logger.error(f"Visualizer failed: {e}")
         content_json = json.dumps({"error": str(e)}, ensure_ascii=False)
         result_summary = f"Error: {str(e)}"
-        
-        # Update result summary in plan
+
         state["plan"][step_index]["result_summary"] = result_summary
 
         return create_worker_response(
             role="visualizer",
             content_json=content_json,
             result_summary=result_summary,
-            current_step_id=current_step['id'],
+            current_step_id=current_step["id"],
             state=state,
             artifact_key_suffix="visual",
             artifact_title="Visual Assets",

@@ -63,9 +63,53 @@ export async function POST(req: NextRequest) {
                     let currentReasoningId: string | null = null;
                     let currentTextId: string | null = null;
                     let currentRunId: string | null = null;
+                    let plannerTextBuffer = '';
+                    let storywriterTextBuffer = '';
+                    let coordinatorTextBuffer = '';
+                    let supervisorTextBuffer = '';
 
                     // Track tool calls to associate results
                     const toolCallMap = new Map<string, string>(); // run_id -> toolCallId
+
+                    const extractFirstJson = (input: string) => {
+                        const match = input.match(/\{[\s\S]*\}/);
+                        return match ? match[0] : null;
+                    };
+
+                    const logToFile = (message: string) => {
+                        if (!logPath) return;
+                        try {
+                            fs.appendFileSync(logPath, message);
+                        } catch (logErr) {
+                            console.error('Failed to write to frontend_event.log:', logErr);
+                        }
+                    };
+
+                    const emitPlanFromParsed = (parsed: any) => {
+                        const steps = parsed?.steps ?? parsed?.plan ?? [];
+                        controller.enqueue({
+                            type: 'data-plan_update',
+                            data: {
+                                plan: steps,
+                                ui_type: 'plan_update',
+                                title: 'Execution Plan',
+                                description: 'The updated execution plan.'
+                            }
+                        } as any);
+                    };
+
+                    const emitOutlineFromParsed = (parsed: any) => {
+                        const slides = parsed?.slides ?? [];
+                        controller.enqueue({
+                            type: 'data-outline',
+                            data: {
+                                slides,
+                                ui_type: 'slide_outline',
+                                title: 'Slide Outline',
+                                description: 'The generated slide outline and narrative map.'
+                            }
+                        } as any);
+                    };
 
                     try {
                         try {
@@ -108,26 +152,29 @@ export async function POST(req: NextRequest) {
 
                                         case 'on_custom_event': {
                                             const eventName = eventData.name;
-                                            if (eventName === 'plan_updated') {
-                                                console.log("[Stream] Custom event 'plan_updated' received.");
-                                                // Send the plan data
+                                            if (eventName?.startsWith('data-')) {
                                                 controller.enqueue({
-                                                    type: 'data-plan',
-                                                    data: eventData.data
+                                                    type: eventName,
+                                                    data: eventData.data ?? {}
                                                 } as any);
-                                            } else if (eventName === 'slide_outline_updated') {
+                                                break;
+                                            }
+                                            if (eventName === 'plan_update') {
+                                                controller.enqueue({
+                                                    type: 'data-plan_update',
+                                                    data: eventData.data ?? {}
+                                                } as any);
+                                                break;
+                                            }
+                                            if (eventName === 'slide_outline_updated') {
                                                 console.log("[Stream] Custom event 'slide_outline_updated' received.");
-                                                // 1. Send the outline data part
-                                                controller.enqueue({
-                                                    type: 'data-outline',
-                                                    data: eventData.data
-                                                } as any);
+                                                // Backend slide_outline_updated is no longer used.
                                             } else if (eventName === 'title_generated') {
                                                 console.log(`[Stream] Custom event 'title_generated' received: ${eventData.data?.title}`);
                                                 // Forward title update to client
                                                 controller.enqueue({
                                                     type: 'data-title-update',
-                                                    title: eventData.data?.title
+                                                    data: { title: eventData.data?.title }
                                                 } as any);
                                             }
                                             // [Forward Research Events]
@@ -155,12 +202,18 @@ export async function POST(req: NextRequest) {
                                             const node = meta.langgraph_node;
                                             const checkpoint = meta.langgraph_checkpoint_ns || meta.checkpoint_ns || '';
                                             const isResearcherSubgraph = typeof checkpoint === 'string' && checkpoint.includes('researcher:');
-                                            const isPlanner = node === 'planner' || (typeof checkpoint === 'string' && checkpoint.includes('planner:'));
-                                            if (isPlanner || (isResearcherSubgraph && (node === 'manager' || node === 'research_worker'))) {
+                                            const runName = meta.run_name || eventData.name || '';
+                                            const isPlannerNode = node === 'planner' || (typeof checkpoint === 'string' && checkpoint.includes('planner:'));
+                                            const isStorywriterNode = node === 'storywriter' || (typeof checkpoint === 'string' && checkpoint.includes('storywriter:'));
+                                            const isCoordinatorNode = node === 'coordinator' || (typeof checkpoint === 'string' && checkpoint.includes('coordinator:'));
+                                            const isSupervisorNode = node === 'supervisor' || (typeof checkpoint === 'string' && checkpoint.includes('supervisor:'));
+                                            const isPlannerOrStorywriter = runName === 'planner' || runName === 'storywriter' || isPlannerNode || isStorywriterNode;
+                                            const isCoordinator = runName === 'coordinator' || isCoordinatorNode;
+                                            const isSupervisor = runName === 'supervisor' || isSupervisorNode;
+                                            if (isResearcherSubgraph && (node === 'manager' || node === 'research_worker')) {
                                                 break;
                                             }
                                             const runId = eventData.run_id;
-                                            const runName = eventData.name;
                                             currentRunId = runId;
 
                                             const chunk = eventData?.data?.chunk;
@@ -176,42 +229,52 @@ export async function POST(req: NextRequest) {
 
                                             if (Array.isArray(content)) {
                                                 for (const part of content) {
-                                                    if (part.type === 'thinking' && part.thinking) {
-                                                        // Handling THINKING part
-                                                        const reasoningContent = part.thinking;
+                                                    if (part.type === 'thinking' && (part.thinking || part.text)) {
+                                                        // Handling THINKING part (planner/storywriter only)
+                                                        const reasoningContent = part.thinking || part.text;
+                                                        if (isPlannerOrStorywriter) {
+                                                            if (currentTextId) {
+                                                                controller.enqueue({
+                                                                    type: 'text-end',
+                                                                    id: currentTextId
+                                                                } as any);
+                                                                currentTextId = null;
+                                                            }
 
-                                                        // If we were outputting text, must end it first
-                                                        if (currentTextId) {
-                                                            console.log(`[Stream] Ending text ${currentTextId} to start reasoning`);
+                                                            if (!currentReasoningId) {
+                                                                currentReasoningId = uuidv4();
+                                                                controller.enqueue({
+                                                                    type: 'reasoning-start',
+                                                                    id: currentReasoningId
+                                                                } as any);
+                                                            }
+
                                                             controller.enqueue({
-                                                                type: 'text-end',
-                                                                id: currentTextId
+                                                                type: 'reasoning-delta',
+                                                                id: currentReasoningId,
+                                                                delta: reasoningContent
                                                             } as any);
-                                                            currentTextId = null;
+                                                        }
+                                                    } else if ((part.type === 'text' || !part.type) && part.text) {
+                                                        if (isPlannerOrStorywriter) {
+                                                            if (runName === 'planner') {
+                                                                plannerTextBuffer += part.text;
+                                                            } else if (runName === 'storywriter') {
+                                                                storywriterTextBuffer += part.text;
+                                                            }
+                                                            continue;
+                                                        }
+                                                        if (isCoordinator) {
+                                                            coordinatorTextBuffer += part.text;
+                                                            continue;
+                                                        }
+                                                        if (isSupervisor) {
+                                                            supervisorTextBuffer += part.text;
+                                                            continue;
                                                         }
 
-                                                        // If we are not already in a reasoning block, start one
-                                                        if (!currentReasoningId) {
-                                                            currentReasoningId = uuidv4();
-                                                            console.log(`[Stream] Starting reasoning block: ${currentReasoningId}`);
-                                                            controller.enqueue({
-                                                                type: 'reasoning-start',
-                                                                id: currentReasoningId
-                                                            } as any);
-                                                        }
-
-                                                        controller.enqueue({
-                                                            type: 'reasoning-delta',
-                                                            id: currentReasoningId,
-                                                            delta: reasoningContent
-                                                        } as any);
-
-                                                    } else if (part.type === 'text' && part.text) {
-                                                        // Handling TEXT part
-
-                                                        // If we were outputting reasoning, must end it first
+                                                        // Handling TEXT part (non-planner/storywriter)
                                                         if (currentReasoningId) {
-                                                            console.log(`[Stream] Ending reasoning ${currentReasoningId} to start text`);
                                                             controller.enqueue({
                                                                 type: 'reasoning-end',
                                                                 id: currentReasoningId
@@ -219,10 +282,8 @@ export async function POST(req: NextRequest) {
                                                             currentReasoningId = null;
                                                         }
 
-                                                        // If we are not already in a text block, start one
                                                         if (!currentTextId) {
                                                             currentTextId = uuidv4();
-                                                            console.log(`[Stream] Starting text block: ${currentTextId}`);
                                                             controller.enqueue({
                                                                 type: 'text-start',
                                                                 id: currentTextId
@@ -237,7 +298,24 @@ export async function POST(req: NextRequest) {
                                                     }
                                                 }
                                             } else if (typeof content === 'string' && content) {
-                                                // Fallback for simple string content (treat as text)
+                                                if (isPlannerOrStorywriter) {
+                                                    if (runName === 'planner') {
+                                                        plannerTextBuffer += content;
+                                                    } else if (runName === 'storywriter') {
+                                                        storywriterTextBuffer += content;
+                                                    }
+                                                    break;
+                                                }
+                                                if (isCoordinator) {
+                                                    coordinatorTextBuffer += content;
+                                                    break;
+                                                }
+                                                if (isSupervisor) {
+                                                    supervisorTextBuffer += content;
+                                                    break;
+                                                }
+
+                                                // Fallback for simple string content (treat as text for other nodes)
 
                                                 if (currentReasoningId) {
                                                     controller.enqueue({
@@ -265,6 +343,89 @@ export async function POST(req: NextRequest) {
                                             // Explicitly close blocks when chunk_position: "last" is received
                                             if (isLastChunk) {
                                                 console.log(`[Stream] Received last chunk for runId: ${runId}`);
+                                                if (isPlannerOrStorywriter) {
+                                                    if (runName === 'planner') {
+                                                        const jsonText = extractFirstJson(plannerTextBuffer) || plannerTextBuffer;
+                                                        try {
+                                                            const parsed = JSON.parse(jsonText);
+                                                            emitPlanFromParsed(parsed);
+                                                        } catch (parseErr) {
+                                                            console.error('[Stream] Planner JSON parse failed:', parseErr);
+                                                            logToFile(`[${new Date().toISOString()}] [ParseError] planner JSON parse failed: ${String(parseErr)}\n`);
+                                                        }
+                                                    } else if (runName === 'storywriter') {
+                                                        const jsonText = extractFirstJson(storywriterTextBuffer) || storywriterTextBuffer;
+                                                        try {
+                                                            const parsed = JSON.parse(jsonText);
+                                                            emitOutlineFromParsed(parsed);
+                                                        } catch (parseErr) {
+                                                            console.error('[Stream] Storywriter JSON parse failed:', parseErr);
+                                                            logToFile(`[${new Date().toISOString()}] [ParseError] storywriter JSON parse failed: ${String(parseErr)}\n`);
+                                                        }
+                                                    }
+                                                }
+                                                if (isCoordinator) {
+                                                    const jsonText = extractFirstJson(coordinatorTextBuffer) || coordinatorTextBuffer;
+                                                    try {
+                                                        const parsed = JSON.parse(jsonText);
+                                                        const responseText = parsed?.response ?? '';
+                                                        const title = parsed?.title;
+
+                                                        if (currentReasoningId) {
+                                                            controller.enqueue({ type: 'reasoning-end', id: currentReasoningId } as any);
+                                                            currentReasoningId = null;
+                                                        }
+
+                                                        if (responseText) {
+                                                            if (!currentTextId) {
+                                                                currentTextId = uuidv4();
+                                                                controller.enqueue({
+                                                                    type: 'text-start',
+                                                                    id: currentTextId
+                                                                } as any);
+                                                            }
+                                                            controller.enqueue({
+                                                                type: 'text-delta',
+                                                                id: currentTextId,
+                                                                delta: responseText
+                                                            } as any);
+                                                        }
+
+                                                        if (title) {
+                                                            controller.enqueue({
+                                                                type: 'data-title-update',
+                                                                data: { title }
+                                                            } as any);
+                                                        }
+                                                    } catch (parseErr) {
+                                                        console.error('[Stream] Coordinator JSON parse failed:', parseErr);
+                                                        logToFile(`[${new Date().toISOString()}] [ParseError] coordinator JSON parse failed: ${String(parseErr)}\n`);
+                                                    }
+                                                }
+
+                                                if (isSupervisor) {
+                                                    if (currentReasoningId) {
+                                                        controller.enqueue({ type: 'reasoning-end', id: currentReasoningId } as any);
+                                                        currentReasoningId = null;
+                                                    }
+
+                                                    if (supervisorTextBuffer) {
+                                                        if (!currentTextId) {
+                                                            currentTextId = uuidv4();
+                                                            controller.enqueue({
+                                                                type: 'text-start',
+                                                                id: currentTextId
+                                                            } as any);
+                                                        }
+                                                        controller.enqueue({
+                                                            type: 'text-delta',
+                                                            id: currentTextId,
+                                                            delta: supervisorTextBuffer
+                                                        } as any);
+                                                        supervisorTextBuffer = '';
+                                                    }
+                                                }
+
                                                 if (currentTextId) {
                                                     controller.enqueue({ type: 'text-end', id: currentTextId } as any);
                                                     currentTextId = null;

@@ -10,11 +10,10 @@ from src.shared.config import AGENT_LLM_MAP
 from src.infrastructure.llm.llm import get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
 from src.shared.schemas import StorywriterOutput
-from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.runnables import RunnableConfig
 from src.core.workflow.state import State
 
-from .common import create_worker_response, run_structured_output
+from .common import create_worker_response, run_structured_output, extract_first_json, split_content_parts
 
 logger = logging.getLogger(__name__)
 
@@ -52,30 +51,32 @@ async def storywriter_node(state: State, config: RunnableConfig) -> Command[Lite
         stream_config = config.copy()
         stream_config["run_name"] = "storywriter"
         
-        story_output: StorywriterOutput = await run_structured_output(
-            llm=llm,
-            schema=StorywriterOutput,
-            messages=messages,
-            config=stream_config,
-            repair_hint="Schema: StorywriterOutput. No extra text."
-        )
+        # Stream tokens via on_chat_model_stream; keep final JSON in-buffer
+        full_text = ""
+        async for chunk in llm.astream(messages, config=stream_config):
+            if not getattr(chunk, "content", None):
+                continue
+            thinking_text, text = split_content_parts(chunk.content)
+            if text:
+                full_text += text
+
+        try:
+            json_text = extract_first_json(full_text) or full_text
+            story_output = StorywriterOutput.model_validate_json(json_text)
+        except Exception as parse_error:
+            logger.warning(f"Storywriter streaming JSON parse failed: {parse_error}. Falling back to repair.")
+            story_output = await run_structured_output(
+                llm=llm,
+                schema=StorywriterOutput,
+                messages=messages,
+                config=stream_config,
+                repair_hint="Schema: StorywriterOutput. No extra text."
+            )
         
         content_json = story_output.model_dump_json(exclude_none=True)
         result_summary = story_output.execution_summary
         logger.info(f"✅ Storywriter generated {len(story_output.slides)} slides")
 
-        # Emit custom event for Slide Outline approval
-        await adispatch_custom_event(
-            "slide_outline_updated",
-            {
-                "slides": [s.model_dump() for s in story_output.slides],
-                "ui_type": "slide_outline",
-                "title": "Slide Outline",
-                "description": "The generated slide outline and narrative map."
-            },
-            config=config
-        )
-        
         # Update result summary in plan
         state["plan"][step_index]["result_summary"] = result_summary
 

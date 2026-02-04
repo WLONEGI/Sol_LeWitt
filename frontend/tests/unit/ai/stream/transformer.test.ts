@@ -8,7 +8,7 @@ describe('parseNDJSONLine', () => {
   });
 
   it('returns null for empty or invalid line', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => { });
 
     expect(parseNDJSONLine('')).toBeNull();
     expect(parseNDJSONLine('not-json')).toBeNull();
@@ -25,13 +25,13 @@ describe('extractCustomEventPayload', () => {
   it('extracts payload with defaults', () => {
     const payload = extractCustomEventPayload({
       event: 'on_custom_event',
-      name: 'plan_updated',
+      name: 'plan_update',
       data: { ok: true },
       metadata: { step_id: 's1', agent_name: 'planner' },
     });
 
     expect(payload).toEqual({
-      type: 'plan_updated',
+      type: 'plan_update',
       data: { ok: true },
       stepId: 's1',
       agentName: 'planner',

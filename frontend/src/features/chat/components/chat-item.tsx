@@ -4,10 +4,10 @@ import { cn } from "@/lib/utils"
 import { Markdown } from "@/components/ui/markdown"
 import { motion } from "framer-motion";
 import { SlideDeckPreview } from "./slide-deck-preview"; // Assuming relative path
-import { useArtifactStore } from "@/features/preview/stores/artifact";
 import { TypewriterText } from "@/components/ui/typewriter-text";
 import { ToolInvocationBlock } from "./tool-invocation";
 import { TimelineReasoning } from "./timeline-reasoning";
+import { WaveText } from "@/components/ui/wave-text";
 
 interface ChatItemProps {
     role: 'user' | 'assistant' | 'system';
@@ -18,6 +18,7 @@ interface ChatItemProps {
     className?: string;
     /** ストリーミング中かどうか。trueの場合タイプライターエフェクトを適用 */
     isStreaming?: boolean;
+    loadingText?: string;
     // Optional artifact for rendering specific UI components within the chat stream
     artifact?: {
         kind: string;
@@ -30,8 +31,18 @@ interface ChatItemProps {
 }
 
 
-export function ChatItem({ role, content, parts, avatar, name, className, isStreaming = false, artifact, toolInvocations }: ChatItemProps) {
+export function ChatItem({ role, content, parts, avatar, name, className, isStreaming = false, loadingText, artifact, toolInvocations }: ChatItemProps) {
     const isUser = role === 'user';
+    const streamedText =
+        content ||
+        (parts ?? [])
+            .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+            .map((part) => part.text)
+            .join('');
+    const hasReasoningPart = (parts ?? []).some(
+        (part) => part?.type === 'reasoning' && typeof part.text === 'string'
+    );
+    const shouldShowLoader = isStreaming && !isUser && streamedText.length === 0 && !hasReasoningPart;
 
     // Check if this chat item is meant to display a slide deck
     if (artifact && artifact.kind === 'slide_deck') {
@@ -73,11 +84,18 @@ export function ChatItem({ role, content, parts, avatar, name, className, isStre
                         ? "rounded-2xl rounded-tr-sm px-6 py-4 bg-white text-foreground border border-gray-200 shadow-none text-base"
                         : "text-foreground p-0 bg-transparent border-none shadow-none w-full text-left font-typewriter text-base"
                 )}>
-                    {isStreaming && !isUser ? (
+                    {shouldShowLoader ? (
+                        <div className="flex items-center py-2">
+                            <WaveText
+                                text={loadingText ?? "Thinking..."}
+                                className="text-sm font-medium text-muted-foreground"
+                            />
+                        </div>
+                    ) : isStreaming && !isUser && !hasReasoningPart ? (
                         <div className="prose prose-base dark:prose-invert max-w-none text-foreground font-medium font-typewriter">
                             <TypewriterText
-                                text={content}
-                                speed={12}
+                                text={streamedText}
+                                speed={18}
                                 showCursor={true}
                             />
                         </div>
@@ -96,13 +114,18 @@ export function ChatItem({ role, content, parts, avatar, name, className, isStre
                                             </div>
                                         );
                                     }
-                                    if (part.type === 'reasoning' && part.text) {
-                                        if (!part.text.trim()) return null;
+                                    if (part.type === 'reasoning') {
+                                        const reasoningText =
+                                            typeof part.text === 'string'
+                                                ? part.text
+                                                : '';
+                                        if (!reasoningText.trim()) return null;
                                         return (
                                             <TimelineReasoning
                                                 key={idx}
-                                                content={part.text}
+                                                content={reasoningText}
                                                 isLastInSequence={idx === parts.length - 1}
+                                                isStreaming={isStreaming && !isUser}
                                             />
                                         );
                                     }

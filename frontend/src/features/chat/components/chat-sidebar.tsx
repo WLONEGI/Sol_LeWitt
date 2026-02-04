@@ -1,5 +1,7 @@
+"use client"
 import { useEffect, useState } from "react"
 import { useChatStore } from "../stores/chat"
+import { useShallow } from 'zustand/react/shallow'
 import { Plus, MessageSquare } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useRouter } from "next/navigation"
@@ -26,7 +28,15 @@ export function ChatSidebar() {
         setCurrentThreadId,
         fetchHistory,
         createSession,
-    } = useChatStore()
+    } = useChatStore(
+        useShallow((state) => ({
+            threads: state.threads,
+            currentThreadId: state.currentThreadId,
+            setCurrentThreadId: state.setCurrentThreadId,
+            fetchHistory: state.fetchHistory,
+            createSession: state.createSession,
+        }))
+    )
     const { state } = useSidebar()
     const isCollapsed = state === "collapsed"
 

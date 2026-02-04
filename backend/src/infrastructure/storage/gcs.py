@@ -9,7 +9,8 @@ def upload_to_gcs(
     file_data: bytes, 
     content_type: str = "image/png",
     session_id: str | None = None,
-    slide_number: int | None = None
+    slide_number: int | None = None,
+    object_name: str | None = None
 ) -> str:
     """
     Uploads binary data to Google Cloud Storage and returns the public URL.
@@ -35,25 +36,29 @@ def upload_to_gcs(
         storage_client = storage.Client()
         bucket = storage_client.bucket(settings.GCS_BUCKET_NAME)
         
-        # Generate filename with optional session folder structure
-        unique_id = uuid.uuid4()
-        
-        if session_id:
-            # セッションごとにフォルダ分け: generated_assets/{session_id}/slide_{number}_{uuid}.ext
-            if slide_number is not None:
-                base_name = f"slide_{slide_number:02d}_{unique_id}"
-            else:
-                base_name = str(unique_id)
-            filename = f"generated_assets/{session_id}/{base_name}"
+        if object_name:
+            filename = object_name.lstrip("/")
         else:
-            # フォールバック: 従来の構造
-            filename = f"generated_assets/{unique_id}"
+            # Generate filename with optional session folder structure
+            unique_id = uuid.uuid4()
+            if session_id:
+                # セッションごとにフォルダ分け: generated_assets/{session_id}/slide_{number}_{uuid}.ext
+                if slide_number is not None:
+                    base_name = f"slide_{slide_number:02d}_{unique_id}"
+                else:
+                    base_name = str(unique_id)
+                filename = f"generated_assets/{session_id}/{base_name}"
+            else:
+                # フォールバック: 従来の構造
+                filename = f"generated_assets/{unique_id}"
         
-        # 拡張子を追加
-        if content_type == "image/png":
+        # 拡張子を追加（object_nameが拡張子を含まない場合のみ追加）
+        if content_type == "image/png" and not filename.endswith(".png"):
             filename += ".png"
-        elif content_type == "image/jpeg":
+        elif content_type == "image/jpeg" and not filename.endswith(".jpg"):
             filename += ".jpg"
+        elif content_type == "application/pdf" and not filename.endswith(".pdf"):
+            filename += ".pdf"
             
         blob = bucket.blob(filename)
         

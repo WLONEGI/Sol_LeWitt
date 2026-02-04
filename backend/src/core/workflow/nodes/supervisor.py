@@ -3,7 +3,8 @@ from typing import Literal
 
 from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
-from langchain_core.messages import AIMessage, SystemMessage, RemoveMessage
+from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, RemoveMessage
+from langchain_core.callbacks.manager import adispatch_custom_event
 
 from src.infrastructure.llm.llm import get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
@@ -15,6 +16,12 @@ logger = logging.getLogger(__name__)
 MAX_MESSAGES = 40
 KEEP_LAST_MESSAGES = 10
 MAX_ARTIFACTS = 20
+
+def _normalize_plan_statuses(plan: list[dict]) -> None:
+    """Normalize legacy status values in-place."""
+    for step in plan:
+        if step.get("status") == "complete":
+            step["status"] = "completed"
 
 def _merge_updates(*updates: dict) -> dict:
     """Merge update dicts while concatenating messages."""
@@ -106,11 +113,12 @@ async def _generate_supervisor_report(state: State, config: RunnableConfig) -> s
     """Generate a dynamic status report using the basic LLM."""
     try:
         plan = state.get("plan", [])
+        _normalize_plan_statuses(plan)
         
         # Identify last achievement
         last_step = None
         for step in reversed(plan):
-            if step["status"] == "complete":
+            if step["status"] == "completed":
                 last_step = step
                 break
         
@@ -138,7 +146,8 @@ async def _generate_supervisor_report(state: State, config: RunnableConfig) -> s
 
         # Generate messages using only the specific context (no message history)
         # to prevent the "basic" model from hallucinating or summarizing the entire plan.
-        messages = [SystemMessage(content=apply_prompt_template("supervisor", enriched_state)[0].content)]
+        # Use HumanMessage because Gemini API requires at least one user-role message.
+        messages = [HumanMessage(content=apply_prompt_template("supervisor", enriched_state)[0].content)]
         # Use basic model for status reports to save cost/latency
         llm = get_llm_by_type("basic")
         
@@ -164,6 +173,22 @@ async def _generate_supervisor_report(state: State, config: RunnableConfig) -> s
         logger.error(f"Failed to generate supervisor report: {e}")
         return "進捗を確認しました。引き続き制作を進めてまいりますね。"
 
+async def _dispatch_plan_update(plan: list[dict], config: RunnableConfig) -> None:
+    """Emit the latest plan to the frontend."""
+    try:
+        await adispatch_custom_event(
+            "plan_update",
+            {
+                "plan": plan,
+                "ui_type": "plan_update",
+                "title": "Execution Plan",
+                "description": "The updated execution plan."
+            },
+            config=config
+        )
+    except Exception as e:
+        logger.warning(f"Failed to dispatch plan update: {e}")
+
 async def supervisor_node(state: State, config: RunnableConfig) -> Command[Literal[*TEAM_MEMBERS, "__end__"]]:
     """
     Supervisor Node (Orchestrator).
@@ -171,6 +196,7 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command[Liter
     logger.info("Supervisor evaluating state")
     
     plan = state.get("plan", [])
+    _normalize_plan_statuses(plan)
     
     current_step_index = -1
     current_step = None
@@ -210,8 +236,10 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command[Liter
         step_completed = artifact_key in artifacts
         
         if step_completed:
-            plan[current_step_index]["status"] = "complete"
-            logger.info(f"Step {current_step_index} ({current_role}) completed. Marking as complete.")
+            plan[current_step_index]["status"] = "completed"
+            logger.info(f"Step {current_step_index} ({current_role}) completed. Marking as completed.")
+
+            await _dispatch_plan_update(plan, config)
             
             # Generate report after completion
             report = await _generate_supervisor_report(state, config)
@@ -235,6 +263,8 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command[Liter
         logger.info(f"Starting Step {current_step_index} ({current_role})")
         
         plan[current_step_index]["status"] = "in_progress"
+
+        await _dispatch_plan_update(plan, config)
         
         # Generate report for next step
         report = await _generate_supervisor_report(state, config)

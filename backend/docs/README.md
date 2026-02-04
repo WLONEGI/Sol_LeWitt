@@ -23,7 +23,7 @@ Spell バックエンドの技術ドキュメントへようこそ。本シス�
 | ノード名 (Node) | バックエンド出力 (`stream_event`) | フロントエンド変換形式 (Vercel AI SDK) |
 | :--- | :--- | :--- |
 | **coordinator** | `title_generated`, `on_chat_model_stream` | `title_update`, `text-delta` |
-| **planner** | `plan_updated`, `on_chat_model_stream` | `data-plan`, `tool-approval-request`, `reasoning-delta` |
+| **planner** | `plan_update`, `on_chat_model_stream` | `plan_update`, `tool-approval-request`, `reasoning-delta` |
 | **supervisor** | `on_chat_model_stream` | `text-delta` |
 | **researcher** | `on_chat_model_stream`, `on_chain_end` | `text-delta`, (Artifacts) |
 | **storywriter** | `slide_outline_updated`, `on_chat_model_stream` | `data-outline`, `tool-approval-request`, `reasoning-delta` |

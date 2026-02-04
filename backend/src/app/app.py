@@ -210,6 +210,7 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
                     version="v2"
                 ):
                     event_type = event.get("event")
+                    event_run_name = event.get("metadata", {}).get("run_name")
                     
                     # Filter Logic
                     if event_type == "on_chat_model_stream":

@@ -41,10 +41,10 @@ export function useChatTimeline(
     const latestPlan = useMemo(() => {
         if (!data || data.length === 0) return null;
 
-        // Find the latest data-plan
+        // Find the latest plan_update
         for (let i = data.length - 1; i >= 0; i--) {
             const event = data[i];
-            if (event && typeof event === 'object' && event.type === 'data-plan') {
+            if (event && typeof event === 'object' && event.type === 'data-plan_update') {
                 return event.data;
             }
         }
@@ -81,6 +81,7 @@ export function useChatTimeline(
                             } as any
                         });
                     } else if (p.type === 'reasoning') {
+                        const reasoningText = (p as any).text ?? '';
                         items.push({
                             id: partId,
                             type: 'message',
@@ -89,7 +90,7 @@ export function useChatTimeline(
                                 id: msg.id,
                                 role: msg.role,
                                 content: '',
-                                reasoning: p.text,
+                                reasoning: reasoningText,
                                 parts: [part],
                             } as any
                         });
@@ -137,7 +138,7 @@ export function useChatTimeline(
         });
 
         // Add any remaining research events from the global data stream that might not be in parts
-        // (This is a safety net for other custom events like data-plan or data-outline)
+        // (This is a safety net for other custom events like plan_update or data-outline)
         return items.sort((a, b) => a.timestamp - b.timestamp);
     }, [messages])
 
@@ -155,5 +156,58 @@ export function useChatTimeline(
         return null;
     }, [data])
 
-    return { timeline, latestPlan, latestOutline }
+    const latestSlideDeck = useMemo(() => {
+        if (!data || data.length === 0) return null;
+
+        let deck: any = null;
+        const slidesMap = new Map<number, any>();
+
+        for (const event of data) {
+            if (!event || typeof event !== 'object') continue;
+            const type = event.type as string;
+            if (!type || !type.startsWith('data-visual-')) continue;
+
+            const payload = event.data || {};
+            const artifactId = payload.artifact_id || deck?.artifactId || 'visual_deck';
+
+            if (!deck || deck.artifactId !== artifactId) {
+                deck = {
+                    artifactId,
+                    title: payload.deck_title || payload.title || deck?.title || 'Generated Slides',
+                    slides: [],
+                    status: 'streaming',
+                    pdf_url: payload.pdf_url,
+                };
+            }
+
+            if (payload.slide_number) {
+                const existing = slidesMap.get(payload.slide_number) || { slide_number: payload.slide_number };
+                slidesMap.set(payload.slide_number, {
+                    ...existing,
+                    title: payload.title ?? existing.title,
+                    image_url: payload.image_url ?? existing.image_url,
+                    prompt_text: payload.prompt_text ?? existing.prompt_text,
+                    structured_prompt: payload.structured_prompt ?? existing.structured_prompt,
+                    rationale: payload.rationale ?? existing.rationale,
+                    layout_type: payload.layout_type ?? existing.layout_type,
+                    selected_inputs: payload.selected_inputs ?? existing.selected_inputs,
+                    status: payload.status ?? existing.status,
+                });
+            }
+
+            if (payload.pdf_url) {
+                deck.pdf_url = payload.pdf_url;
+            }
+        }
+
+        if (deck) {
+            deck.slides = Array.from(slidesMap.values()).sort((a, b) => a.slide_number - b.slide_number);
+            const allReady = deck.slides.length > 0 && deck.slides.every((s: any) => Boolean(s.image_url));
+            deck.status = allReady ? 'completed' : 'streaming';
+        }
+
+        return deck;
+    }, [data])
+
+    return { timeline, latestPlan, latestOutline, latestSlideDeck }
 }

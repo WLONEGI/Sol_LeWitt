@@ -48,6 +48,10 @@ export interface ArtifactTimelineItem extends TimelineItem {
     title: string;
     icon?: string;
     previewUrls?: string[];
+    kind?: string;
+    slides?: any[];
+    status?: string;
+    pdf_url?: string;
 }
 
 export interface PlanUpdateTimelineItem extends TimelineItem {

@@ -1,7 +1,7 @@
 import asyncio
 import os
 from langchain_core.messages import HumanMessage
-from src.core.workflow.nodes.coordinator import CoordinatorDecision
+from src.core.workflow.nodes.coordinator import CoordinatorOutput
 from src.infrastructure.llm.llm import get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
 
@@ -39,7 +39,7 @@ async def reproduce():
     print(f"LLM initialized: {llm.model_name}")
 
     # 3. Call structured output
-    structured_llm = llm.with_structured_output(CoordinatorDecision)
+    structured_llm = llm.with_structured_output(CoordinatorOutput)
     
     try:
         print("invoke calling...")

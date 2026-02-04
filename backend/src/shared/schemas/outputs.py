@@ -18,6 +18,30 @@ class TaskStep(BaseModel):
     )
     title: str = Field(description="このステップの短いタイトル（例：競合調査、構成案作成）")
     description: str = Field(description="このステップの概要説明")
+    inputs: List[str] = Field(
+        default_factory=list,
+        description="このステップで必要な入力（参照する成果物や前提）"
+    )
+    outputs: List[str] = Field(
+        default_factory=list,
+        description="このステップで生成すべき成果物"
+    )
+    preconditions: List[str] = Field(
+        default_factory=list,
+        description="実行前に満たすべき条件"
+    )
+    validation: List[str] = Field(
+        default_factory=list,
+        description="出力の妥当性を確認するためのチェック項目"
+    )
+    fallback: List[str] = Field(
+        default_factory=list,
+        description="失敗時の代替手段や再試行方針"
+    )
+    depends_on: List[int] = Field(
+        default_factory=list,
+        description="依存するステップID（順序・参照関係）"
+    )
     design_direction: Optional[str] = Field(
         default=None,
         description="Visualizerへのデザイン指示（トーン、スタイル、モチーフなど）。Storywriterの場合はNoneでよい。"
@@ -157,6 +181,11 @@ class ImagePrompt(BaseModel):
         default=None,
         description="従来形式のプロンプト文字列。structured_promptが指定されていない場合に使用。"
     )
+
+    compiled_prompt: Optional[str] = Field(
+        default=None,
+        description="structured_promptから生成した最終プロンプト（UI表示用）。"
+    )
     
     rationale: str = Field(description="このビジュアルを選んだ理由（推論の根拠）")
     generated_image_url: Optional[str] = Field(default=None, description="生成された画像のGCS URL（生成後に入力される）")
@@ -201,6 +230,40 @@ class VisualizerOutput(BaseModel):
     )
     seed: Optional[int] = Field(default=None, description="画像生成に使用するランダムシード（一貫性用）")
     parent_id: Optional[str] = Field(default=None, description="修正元の画像ID（編集時）")
+    combined_pdf_url: Optional[str] = Field(default=None, description="生成済みスライドを統合したPDFのURL")
+
+
+# === Visualizer Plan (v3) ===
+class VisualizerPlanSlide(BaseModel):
+    """Visualizer Plannerが決めるスライドごとの生成方針"""
+    slide_number: int = Field(description="対象スライド番号（アウトライン準拠）")
+    layout_type: Optional[str] = Field(
+        default=None,
+        description="推奨レイアウトタイプ（例: title_slide, content, comparison など）"
+    )
+    selected_inputs: List[str] = Field(
+        default_factory=list,
+        description="このスライド生成に使う入力の要約（Story/Planner/Data Analyst等）"
+    )
+    reference_policy: Literal["none", "previous", "explicit"] = Field(
+        default="none",
+        description="参照画像の利用方針"
+    )
+    reference_url: Optional[str] = Field(
+        default=None,
+        description="参照画像URL（explicitの場合）"
+    )
+    generation_notes: Optional[str] = Field(
+        default=None,
+        description="このスライドの生成上の注意点"
+    )
+
+
+class VisualizerPlan(BaseModel):
+    """Visualizer Plannerの出力"""
+    execution_summary: str = Field(description="計画の要約")
+    generation_order: List[int] = Field(description="生成順序（slide_numberの配列）")
+    slides: List[VisualizerPlanSlide] = Field(description="スライドごとの生成方針")
 
 
 

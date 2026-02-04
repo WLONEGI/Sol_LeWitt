@@ -16,10 +16,42 @@ def _update_artifact(state: State, key: str, value: Any) -> dict[str, Any]:
     artifacts[key] = value
     return artifacts
 
-def _extract_first_json(text: str) -> str | None:
+def extract_first_json(text: str) -> str | None:
     """Extract first JSON object from text."""
     match = re.search(r"\{.*\}", text, re.DOTALL)
     return match.group(0) if match else None
+
+def split_content_parts(content: Any) -> tuple[str, str]:
+    """Split content into (thinking_text, normal_text)."""
+    thinking_parts: list[str] = []
+    text_parts: list[str] = []
+
+    def _add(parts: list[str], value: Any) -> None:
+        if isinstance(value, str):
+            parts.append(value)
+
+    if isinstance(content, str):
+        _add(text_parts, content)
+    elif isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                part_text = part.get("text")
+                if part_type == "thinking":
+                    _add(thinking_parts, part_text)
+                else:
+                    _add(text_parts, part_text)
+            else:
+                _add(text_parts, part)
+    elif isinstance(content, dict):
+        part_type = content.get("type")
+        part_text = content.get("text")
+        if part_type == "thinking":
+            _add(thinking_parts, part_text)
+        else:
+            _add(text_parts, part_text)
+
+    return ("".join(thinking_parts), "".join(text_parts))
 
 async def run_structured_output(
     llm,
@@ -44,7 +76,7 @@ async def run_structured_output(
         )
         raw = await llm.ainvoke(repair_messages, config=config)
         raw_text = raw.content if hasattr(raw, "content") else str(raw)
-        json_text = _extract_first_json(raw_text)
+        json_text = extract_first_json(raw_text)
         if not json_text:
             raise first_error
         return schema.model_validate_json(json_text)

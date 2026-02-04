@@ -1,4 +1,4 @@
-from typing import Literal, TypedDict, Any, Annotated
+from typing import Literal, TypedDict, Any, Annotated, NotRequired
 from langgraph.graph import MessagesState
 
 from src.shared.schemas.outputs import ResearchTask, ResearchResult
@@ -10,8 +10,16 @@ class TaskStep(TypedDict):
     role: str  # The worker to execute this step (e.g., 'storywriter', 'coder')
     instruction: str  # Specific instruction for the worker
     description: str  # Brief description of the step
-    status: Literal["pending", "in_progress", "complete"]  # Status of the step
+    status: Literal["pending", "in_progress", "completed"]  # Status of the step
     result_summary: str | None  # Summary of the execution result
+    title: NotRequired[str]
+    design_direction: NotRequired[str | None]
+    inputs: NotRequired[list[str]]
+    outputs: NotRequired[list[str]]
+    preconditions: NotRequired[list[str]]
+    validation: NotRequired[list[str]]
+    fallback: NotRequired[list[str]]
+    depends_on: NotRequired[list[int]]
 
 
 def merge_artifacts(

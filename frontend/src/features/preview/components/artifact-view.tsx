@@ -6,6 +6,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Markdown } from "@/components/ui/markdown"
 import { LogViewer } from "@/features/preview/viewers/log-viewer"
 import { SlideViewer } from "@/features/preview/viewers/slide-viewer"
+import { SlideDeckViewer } from "@/features/preview/viewers/slide-deck-viewer"
 import { Button } from "@/components/ui/button"
 import { X } from "lucide-react"
 import { ArtifactContainer } from "./artifact-container"
@@ -67,7 +68,7 @@ export function ArtifactView() {
 
     if (!displayArtifact && !activeResearchTask) {
         return (
-            <div className="h-full w-full flex items-center justify-center text-muted-foreground bg-muted/5">
+            <div className="h-full w-full flex items-center justify-center text-muted-foreground bg-background">
                 <ArtifactContainer title="Preview" subtitle="No content selected">
                     <div className="h-full w-full flex items-center justify-center italic text-muted-foreground/50">
                         Select a task or artifact to preview
@@ -98,6 +99,8 @@ export function ArtifactView() {
                 return <ReportViewer content={displayArtifact.content} />
             case 'slide':
                 return <SlideViewer content={displayArtifact.content} imageId={displayArtifact.id} />
+            case 'slide_deck':
+                return <SlideDeckViewer content={displayArtifact.content} />
             default:
                 return <DefaultJsonViewer data={displayArtifact} />
         }
