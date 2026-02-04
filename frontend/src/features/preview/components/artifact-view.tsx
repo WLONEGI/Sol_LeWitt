@@ -7,6 +7,7 @@ import { Markdown } from "@/components/ui/markdown"
 import { LogViewer } from "@/features/preview/viewers/log-viewer"
 import { SlideViewer } from "@/features/preview/viewers/slide-viewer"
 import { SlideDeckViewer } from "@/features/preview/viewers/slide-deck-viewer"
+import { DataAnalystViewer } from "@/features/preview/viewers/data-analyst-viewer"
 import { Button } from "@/components/ui/button"
 import { X } from "lucide-react"
 import { ArtifactContainer } from "./artifact-container"
@@ -14,10 +15,10 @@ import { ArtifactContainer } from "./artifact-container"
 // Reuse Markdown component for Report/Outline
 function ReportViewer({ content, citations = [] }: { content: string, citations?: Array<{ title: string; uri: string }> }) {
     return (
-        <div className="flex flex-col h-full bg-background relative">
+        <div className="flex flex-col flex-1 min-h-0 bg-background relative">
             {/* Report Content */}
-            <ScrollArea className="flex-1 p-6 pb-32"> {/* Usage of pb-32 to avoid overlap with bottom citations */}
-                <div className="prose dark:prose-invert max-w-none">
+            <ScrollArea className="flex-1 p-6">
+                <div className="prose dark:prose-invert max-w-none pb-32"> {/* Move padding here */}
                     <Markdown>{content}</Markdown>
                 </div>
             </ScrollArea>
@@ -51,7 +52,7 @@ function ReportViewer({ content, citations = [] }: { content: string, citations?
 
 function DefaultJsonViewer({ data }: { data: any }) {
     return (
-        <ScrollArea className="h-full w-full p-4 bg-muted/20">
+        <ScrollArea className="flex-1 min-h-0 p-4 bg-muted/20">
             <pre className="text-xs font-mono">{JSON.stringify(data, null, 2)}</pre>
         </ScrollArea>
     )
@@ -101,6 +102,8 @@ export function ArtifactView() {
                 return <SlideViewer content={displayArtifact.content} imageId={displayArtifact.id} />
             case 'slide_deck':
                 return <SlideDeckViewer content={displayArtifact.content} />
+            case 'data_analyst':
+                return <DataAnalystViewer content={displayArtifact.content} status={displayArtifact.status} />
             default:
                 return <DefaultJsonViewer data={displayArtifact} />
         }

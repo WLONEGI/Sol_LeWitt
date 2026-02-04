@@ -353,6 +353,7 @@ export async function POST(req: NextRequest) {
                                                             console.error('[Stream] Planner JSON parse failed:', parseErr);
                                                             logToFile(`[${new Date().toISOString()}] [ParseError] planner JSON parse failed: ${String(parseErr)}\n`);
                                                         }
+                                                        plannerTextBuffer = '';
                                                     } else if (runName === 'storywriter') {
                                                         const jsonText = extractFirstJson(storywriterTextBuffer) || storywriterTextBuffer;
                                                         try {
@@ -362,6 +363,7 @@ export async function POST(req: NextRequest) {
                                                             console.error('[Stream] Storywriter JSON parse failed:', parseErr);
                                                             logToFile(`[${new Date().toISOString()}] [ParseError] storywriter JSON parse failed: ${String(parseErr)}\n`);
                                                         }
+                                                        storywriterTextBuffer = '';
                                                     }
                                                 }
                                                 if (isCoordinator) {
@@ -401,6 +403,7 @@ export async function POST(req: NextRequest) {
                                                         console.error('[Stream] Coordinator JSON parse failed:', parseErr);
                                                         logToFile(`[${new Date().toISOString()}] [ParseError] coordinator JSON parse failed: ${String(parseErr)}\n`);
                                                     }
+                                                    coordinatorTextBuffer = '';
                                                 }
 
                                                 if (isSupervisor) {

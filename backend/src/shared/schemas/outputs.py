@@ -302,10 +302,22 @@ class VisualBlueprint(BaseModel):
     annotations: List[str] = Field(default_factory=list, description="注釈や強調ポイント")
     design_notes: Optional[str] = Field(default=None, description="デザイン上の注意点（配色、強調など）")
 
+class OutputFile(BaseModel):
+    """DataAnalystが生成した成果物ファイル"""
+    url: str = Field(description="成果物のGCS URL")
+    title: Optional[str] = Field(default=None, description="成果物の短い名称")
+    mime_type: Optional[str] = Field(default=None, description="MIMEタイプ（例: application/pdf）")
+    description: Optional[str] = Field(default=None, description="成果物の説明（オプション）")
+
+
 class DataAnalystOutput(BaseModel):
     """DataAnalystノードの出力"""
     execution_summary: str = Field(description="実行結果の要約")
     analysis_report: str = Field(description="Markdown形式の分析レポート")
+    output_files: List[OutputFile] = Field(
+        default_factory=list,
+        description="生成された成果物ファイルのリスト"
+    )
     blueprints: List[VisualBlueprint] = Field(
         default_factory=list,
         description="生成されたビジュアル・ブループリントのリスト"

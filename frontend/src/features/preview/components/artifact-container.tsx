@@ -30,16 +30,10 @@ export function ArtifactContainer({
 
     return (
         <div className="h-full w-full p-4 lg:p-6 flex flex-col min-w-0">
-            <div className="flex-1 flex flex-col bg-card border border-border shadow-2xl rounded-2xl overflow-hidden relative group/window">
-                {/* macOS style header */}
+            <div className="flex-1 flex flex-col bg-background border border-border shadow-2xl rounded-2xl overflow-hidden relative group/window">
+                {/* Minimalist header */}
                 <div className="h-12 border-b border-border bg-muted/30 flex items-center px-4 justify-between shrink-0">
                     <div className="flex items-center gap-3 min-w-0">
-                        <div className="flex gap-1.5 px-1">
-                            <div className="w-3 Valid h-3 rounded-full bg-red-500/80 cursor-pointer hover:bg-red-500 transition-colors" onClick={() => setPreviewOpen(false)} />
-                            <div className="w-3 h-3 rounded-full bg-amber-500/80" />
-                            <div className="w-3 h-3 rounded-full bg-emerald-500/80" />
-                        </div>
-                        <div className="h-4 w-px bg-border mx-1" />
                         <div className="flex items-center gap-2 min-w-0">
                             <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
                             <div className="flex flex-col min-w-0">
@@ -82,7 +76,7 @@ export function ArtifactContainer({
                 </div>
 
                 {/* Content Area */}
-                <div className="flex-1 min-h-0 relative bg-background">
+                <div className="flex-1 min-h-0 relative bg-background flex flex-col">
                     {children}
                 </div>
 

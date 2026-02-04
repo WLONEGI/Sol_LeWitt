@@ -25,6 +25,7 @@ export function ChatList({ timeline, latestOutline, latestSlideDeck, isLoading, 
 
     // Auto-scroll on new items
     useEffect(() => {
+        if (isLoading) return;
         bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [timeline, isLoading]);
 

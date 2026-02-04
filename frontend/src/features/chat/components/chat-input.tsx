@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import TextareaAutosize from "react-textarea-autosize"
-import { SendHorizontal, Paperclip, X } from "lucide-react"
+import { ArrowUp, Paperclip, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -77,7 +77,7 @@ export function ChatInput({
                 </div>
             )}
 
-            <div className="relative flex items-end gap-2 bg-white border border-gray-200 rounded-2xl p-2 transition-all focus-within:border-gray-400 focus-within:ring-0">
+            <div className="relative flex items-end gap-2 bg-white border border-gray-200 rounded-2xl p-2 transition-all focus-within:border-gray-300 focus-within:ring-0">
                 <input
                     type="file"
                     className="hidden"
@@ -132,7 +132,7 @@ export function ChatInput({
                                     : "bg-gray-100 text-gray-400"
                             )}
                         >
-                            <SendHorizontal className="h-5 w-5" />
+                            <ArrowUp className="h-5 w-5" />
                             <span className="sr-only">Send</span>
                         </Button>
                     </TooltipTrigger>

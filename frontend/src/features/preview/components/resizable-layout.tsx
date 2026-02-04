@@ -1,5 +1,6 @@
 "use client"
 
+import { useId } from "react"
 import {
     Panel,
     Group,
@@ -20,14 +21,17 @@ export function ResizableLayout({
     navCollapsedSize = 0,
 }: ResizableLayoutProps) {
     const { isPreviewOpen } = useArtifactStore()
+    const id = useId()
 
     return (
         <Group
+            id={id}
             // @ts-ignore
             orientation="horizontal"
             className="h-full w-full bg-background overflow-hidden flex min-w-0 min-h-0"
         >
             <Panel
+                id={`${id}-left`}
                 defaultSize={isPreviewOpen ? defaultLayout[0] : 100}
                 minSize={30}
                 className={cn(
@@ -43,6 +47,7 @@ export function ResizableLayout({
 
             {isPreviewOpen && (
                 <Panel
+                    id={`${id}-right`}
                     defaultSize={defaultLayout[1]}
                     minSize={30}
                     className="relative z-20 h-full transition-all duration-500 ease-in-out min-w-0 min-h-0 bg-background panel-mobile-full"

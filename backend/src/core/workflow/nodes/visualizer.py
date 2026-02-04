@@ -25,7 +25,6 @@ from src.core.workflow.state import State
 
 # Updated Imports for Services
 from src.domain.designer.generator import generate_image, create_image_chat_session_async, send_message_for_image_async
-from src.domain.designer.pdf import assemble_pdf_from_images
 from src.infrastructure.storage.gcs import upload_to_gcs, download_blob_as_bytes
 
 from .common import create_worker_response, run_structured_output
@@ -407,7 +406,6 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         master_style: str | None = None
         last_generated_image_bytes: bytes | None = None
         last_generated_image_url: str | None = None
-        pdf_images: dict[int, bytes] = {}
 
         import uuid
         session_id = config.get("configurable", {}).get("thread_id") or str(uuid.uuid4())
@@ -518,8 +516,6 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
             if image_bytes and processed.generated_image_url:
                 last_generated_image_bytes = image_bytes
                 last_generated_image_url = processed.generated_image_url
-                pdf_images[slide_number] = image_bytes
-
             await adispatch_custom_event(
                 "data-visual-image",
                 {
@@ -535,49 +531,14 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
 
         updated_prompts.sort(key=lambda x: x.slide_number)
 
-        # Assemble PDF (1 page per slide) if all images are ready
-        combined_pdf_url = None
-        if len(pdf_images) == len(outline_order) and outline_order:
-            ordered_bytes = [pdf_images[n] for n in outline_order if n in pdf_images]
-            try:
-                pdf_bytes = assemble_pdf_from_images(ordered_bytes)
-                safe_title = _sanitize_filename(deck_title)
-                object_name = f"generated_assets/{session_id}/{safe_title}.pdf"
-
-                combined_pdf_url = await asyncio.to_thread(
-                    upload_to_gcs,
-                    pdf_bytes,
-                    content_type="application/pdf",
-                    session_id=None,
-                    slide_number=None,
-                    object_name=object_name
-                )
-
-                await adispatch_custom_event(
-                    "data-visual-pdf",
-                    {
-                        "artifact_id": artifact_id,
-                        "deck_title": deck_title,
-                        "title": deck_title,
-                        "pdf_url": combined_pdf_url,
-                        "page_count": len(ordered_bytes)
-                    },
-                    config=config
-                )
-            except Exception as pdf_error:
-                logger.error(f"Failed to assemble PDF: {pdf_error}")
-
         # Build final Visualizer output
         visualizer_output = VisualizerOutput(
             execution_summary=visualizer_plan.execution_summary,
             prompts=updated_prompts
         )
-        visualizer_output.combined_pdf_url = combined_pdf_url
 
         content_json = json.dumps(visualizer_output.model_dump(), ensure_ascii=False, indent=2)
         result_summary = visualizer_output.execution_summary
-        if combined_pdf_url:
-            result_summary = f"{result_summary} / PDF生成完了"
 
         state["plan"][step_index]["result_summary"] = result_summary
 

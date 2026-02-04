@@ -8,6 +8,8 @@ import { ArtifactView } from "@/features/preview/components/artifact-view";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { useChatStore } from "@/features/chat/stores/chat";
 
+import { Header } from "@/features/chat/components/header";
+
 export function HomeClient() {
   const { createSession } = useChatStore();
 
@@ -21,6 +23,7 @@ export function HomeClient() {
       <SidebarProvider defaultOpen={true}>
         <ChatSidebar />
         <div className="flex flex-col flex-1 min-w-0 h-full">
+          <Header />
           <div className="relative z-10 flex-1 w-full min-h-0">
             <div className="w-full h-full bg-transparent">
               <ResizableLayout defaultLayout={[40, 60]}>

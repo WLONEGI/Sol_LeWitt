@@ -137,10 +137,52 @@ export function useChatTimeline(
             }
         });
 
+        // Data Analyst artifacts from data stream
+        if (data && data.length > 0) {
+            const baseTimestamp = Date.now() - data.length * 500;
+            const analystMap = new Map<string, { item: any; lastTimestamp: number }>();
+
+            data.forEach((event, idx) => {
+                if (!event || typeof event !== 'object') return;
+                const type = event.type as string;
+                if (!type || !type.startsWith('data-analyst-')) return;
+
+                const payload = (event as any).data || {};
+                const artifactId = payload.artifact_id || 'data_analyst';
+                const timestamp = baseTimestamp + idx;
+
+                const existing = analystMap.get(artifactId);
+                if (existing) {
+                    existing.lastTimestamp = timestamp;
+                    if (payload.title) {
+                        existing.item.title = payload.title;
+                    }
+                    return;
+                }
+
+                analystMap.set(artifactId, {
+                    item: {
+                        id: `data-analyst-${artifactId}`,
+                        type: 'artifact',
+                        timestamp,
+                        artifactId,
+                        title: payload.title || 'Data Analyst',
+                        icon: 'BarChart'
+                    },
+                    lastTimestamp: timestamp
+                });
+            });
+
+            analystMap.forEach(({ item, lastTimestamp }) => {
+                item.timestamp = lastTimestamp;
+                items.push(item);
+            });
+        }
+
         // Add any remaining research events from the global data stream that might not be in parts
         // (This is a safety net for other custom events like plan_update or data-outline)
         return items.sort((a, b) => a.timestamp - b.timestamp);
-    }, [messages])
+    }, [messages, data])
 
     // Extract the latest slide outline from data stream
     const latestOutline = useMemo(() => {

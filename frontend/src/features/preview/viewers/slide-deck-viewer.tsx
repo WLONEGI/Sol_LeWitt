@@ -29,7 +29,7 @@ export function SlideDeckViewer({ content }: SlideDeckViewerProps) {
     }, [content?.slides])
 
     return (
-        <div className="flex flex-col h-full min-h-0 bg-background">
+        <div className="flex flex-col flex-1 min-h-0 bg-background">
             <div className="flex items-center justify-between px-4 py-3 border-b border-border">
                 <div className="flex items-center gap-2">
                     <button

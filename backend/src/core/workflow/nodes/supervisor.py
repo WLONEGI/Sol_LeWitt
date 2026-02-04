@@ -22,6 +22,8 @@ def _normalize_plan_statuses(plan: list[dict]) -> None:
     for step in plan:
         if step.get("status") == "complete":
             step["status"] = "completed"
+        if step.get("status") == "todo":
+            step["status"] = "pending"
 
 def _merge_updates(*updates: dict) -> dict:
     """Merge update dicts while concatenating messages."""
@@ -109,45 +111,61 @@ def _prune_artifacts_if_needed(state: State) -> dict | None:
         return None
     return {"artifacts": {k: None for k in to_remove}}
 
-async def _generate_supervisor_report(state: State, config: RunnableConfig) -> str:
+async def _generate_supervisor_report(state: State, config: RunnableConfig, is_final: bool = False) -> str:
     """Generate a dynamic status report using the basic LLM."""
     try:
         plan = state.get("plan", [])
         _normalize_plan_statuses(plan)
         
-        # Identify last achievement
-        last_step = None
-        for step in reversed(plan):
-            if step["status"] == "completed":
-                last_step = step
-                break
-        
-        # Identify next objective
-        next_step = None
-        for step in plan:
-            if step["status"] == "in_progress":
-                next_step = step
-                break
-        
-        # Default fallback values
-        last_achievement = "制作の準備と計画の立案"
-        if last_step:
-            summary = last_step.get("result_summary") or last_step.get("description", "")
-            last_achievement = f"{last_step.get('title', '前の工程')}: {summary}"
-            
-        next_objective = "全体構成の検討"
-        if next_step:
-            next_objective = f"{next_step.get('title', '次の工程')}: {next_step.get('instruction', '')}"
-
-        # Enrich state with context variables for the prompt
+        prompt_name = "supervisor"
         enriched_state = state.copy()
-        enriched_state["LAST_ACHIEVEMENT"] = last_achievement
-        enriched_state["NEXT_OBJECTIVE"] = next_objective
+
+        if is_final:
+            prompt_name = "supervisor_final"
+            # Summarize plan
+            plan_lines = []
+            for step in plan:
+                status_emoji = "✅" if step["status"] == "completed" else "⏳"
+                plan_lines.append(f"- {status_emoji} {step.get('title')}: {step.get('result_summary', '完了')}")
+            enriched_state["PLAN_SUMMARY"] = "\n".join(plan_lines)
+            
+            # Summarize artifacts (just keys/types to avoid token bloom)
+            artifacts = state.get("artifacts", {})
+            artifact_keys = [k for k in artifacts.keys() if artifacts[k] is not None]
+            enriched_state["ARTIFACTS_SUMMARY"] = ", ".join(artifact_keys) if artifact_keys else "なし"
+        else:
+            # Identify last achievement
+            last_step = None
+            for step in reversed(plan):
+                if step["status"] == "completed":
+                    last_step = step
+                    break
+            
+            # Identify next objective
+            next_step = None
+            for step in plan:
+                if step["status"] == "in_progress":
+                    next_step = step
+                    break
+            
+            # Default fallback values
+            last_achievement = "制作の準備と計画の立案"
+            if last_step:
+                summary = last_step.get("result_summary") or last_step.get("description", "")
+                last_achievement = f"{last_step.get('title', '前の工程')}: {summary}"
+                
+            next_objective = "全体構成の検討"
+            if next_step:
+                next_objective = f"{next_step.get('title', '次の工程')}: {next_step.get('instruction', '')}"
+
+            # Enrich state with context variables for the prompt
+            enriched_state["LAST_ACHIEVEMENT"] = last_achievement
+            enriched_state["NEXT_OBJECTIVE"] = next_objective
 
         # Generate messages using only the specific context (no message history)
         # to prevent the "basic" model from hallucinating or summarizing the entire plan.
         # Use HumanMessage because Gemini API requires at least one user-role message.
-        messages = [HumanMessage(content=apply_prompt_template("supervisor", enriched_state)[0].content)]
+        messages = [HumanMessage(content=apply_prompt_template(prompt_name, enriched_state)[0].content)]
         # Use basic model for status reports to save cost/latency
         llm = get_llm_by_type("basic")
         
@@ -217,8 +235,16 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command[Liter
                 break
     
     if current_step is None:
-        logger.info("All steps completed. Ending workflow.")
-        return Command(goto="__end__")
+        logger.info("All steps completed. Generating final report.")
+        
+        # Check if we've already sent the final report to avoid duplication
+        # We can use a custom flag in messages or just rely on the fact that this is the last call.
+        report = await _generate_supervisor_report(state, config, is_final=True)
+        
+        return Command(
+            goto="__end__",
+            update={"messages": [AIMessage(content=report, name="supervisor")]}
+        )
         
     current_role = current_step["role"]
     

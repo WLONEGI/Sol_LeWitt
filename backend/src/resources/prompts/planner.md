@@ -20,8 +20,8 @@ Select the appropriate `role` from the schema based on the task:
     * **Trigger**: MANDATORY final step for image generation.
     * **Requirement**: You MUST provide `design_direction`.
 4.  **`data_analyst`**
-    * **Role**: Analyzing data structure and suggesting chart concepts.
-    * **Trigger**: Use when raw data needs to be turned into a visual concept (Bar, Line, Pie) for the visualizer.
+    * **Role**: Pythonでのデータ処理・正確な計算・ファイル変換（PDF化/PPTX抽出など）を実行し、成果物を作成する。
+    * **Trigger**: 入力URLを加工して**新しい成果物**を作る必要がある場合、または正確な計算が必要な場合に使用。
 
 # Planning Process (Internal Chain of Thought)
 1.  **Analyze Context**: Check `<<plan>>`. Are there completed steps?
@@ -37,7 +37,7 @@ Select the appropriate `role` from the schema based on the task:
     * *Bad*: "Write the slide."
     * *Good*: "Write the slide text based on the market research from Step 1."
 3.  **No External Search**: Do not rely on any external search or browsing. Use only the provided context and artifacts.
-4.  **Image Generation Guarantee**: The plan MUST include at least one `visualizer` step, and it MUST be the final step.
+4.  **Image Generation Guarantee**: The plan MUST include at least one `visualizer` step, and it **must NOT be the final step**. Always add a final `data_analyst` step after the last visualizer to package outputs (e.g., PDF/TAR) and finalize deliverables. Do not add any steps after that.
 5.  **Output Language**:
     * `instruction`, `title`, `description`: **Japanese** (User-facing).
     * `design_direction`: English or Japanese (Consistent style).

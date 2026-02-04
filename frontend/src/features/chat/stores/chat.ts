@@ -43,9 +43,22 @@ export const useChatStore = create<ChatState>()(
                 },
                 createSession: () => set({ currentThreadId: null }),
 
-                updateThreadTitle: (id: string, title: string) => set((state) => ({
-                    threads: state.threads.map((t) => (t.id === id ? { ...t, title } : t)),
-                })),
+                updateThreadTitle: (id: string, title: string) => set((state) => {
+                    const exists = state.threads.some((t) => t.id === id);
+                    if (exists) {
+                        return {
+                            threads: state.threads.map((t) => (t.id === id ? { ...t, title, updatedAt: new Date().toISOString() } : t)),
+                        };
+                    } else {
+                        // If it doesn't exist (e.g. new chat), add it
+                        return {
+                            threads: [
+                                { id, title, updatedAt: new Date().toISOString() },
+                                ...state.threads,
+                            ],
+                        };
+                    }
+                }),
             }),
             {
                 name: 'lobe-chat-storage',

@@ -33,6 +33,11 @@ const DATA_EVENTS_TO_STORE = new Set([
     'data-visual-prompt',
     'data-visual-image',
     'data-visual-pdf',
+    'data-analyst-start',
+    'data-analyst-code-delta',
+    'data-analyst-log-delta',
+    'data-analyst-output',
+    'data-analyst-complete',
 ])
 
 export function ChatInterface({ threadId }: { threadId?: string | null }) {
@@ -156,6 +161,47 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         })
     }, [stableId, upsertArtifact])
 
+    const upsertDataAnalystArtifact = useCallback((
+        payload: any,
+        eventType: 'start' | 'code' | 'log' | 'output' | 'complete'
+    ) => {
+        if (!payload) return
+        const artifactId = typeof payload.artifact_id === 'string'
+            ? payload.artifact_id
+            : `data_analyst_${stableId}`
+
+        const state = useArtifactStore.getState()
+        const existing = state.artifacts[artifactId]
+        const existingContent = (existing?.content && typeof existing.content === 'object') ? existing.content : {}
+
+        const nextContent: Record<string, any> = { ...existingContent }
+        if (eventType === 'start' && payload.input) {
+            nextContent.input = payload.input
+        }
+        if (eventType === 'code' && typeof payload.delta === 'string') {
+            nextContent.code = `${existingContent.code || ''}${payload.delta}`
+        }
+        if (eventType === 'log' && typeof payload.delta === 'string') {
+            nextContent.log = `${existingContent.log || ''}${payload.delta}`
+        }
+        if (eventType === 'output' && payload.output) {
+            nextContent.output = payload.output
+        }
+
+        const nextStatus =
+            payload.status ||
+            (eventType === 'complete' ? 'completed' : (existing?.status || 'streaming'))
+
+        upsertArtifact({
+            id: artifactId,
+            type: "data_analyst",
+            title: payload.title || existing?.title || "Data Analyst",
+            content: nextContent,
+            version: (existing?.version ?? 0) + 1,
+            status: nextStatus,
+        })
+    }, [stableId, upsertArtifact])
+
     const {
         messages,
         setMessages,
@@ -201,6 +247,21 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
             }
             if (data?.type === 'data-visual-pdf') {
                 upsertSlideDeck({ ...(data.data as Record<string, any>), status: 'completed' })
+            }
+            if (data?.type === 'data-analyst-start') {
+                upsertDataAnalystArtifact(data.data, 'start')
+            }
+            if (data?.type === 'data-analyst-code-delta') {
+                upsertDataAnalystArtifact(data.data, 'code')
+            }
+            if (data?.type === 'data-analyst-log-delta') {
+                upsertDataAnalystArtifact(data.data, 'log')
+            }
+            if (data?.type === 'data-analyst-output') {
+                upsertDataAnalystArtifact(data.data, 'output')
+            }
+            if (data?.type === 'data-analyst-complete') {
+                upsertDataAnalystArtifact(data.data, 'complete')
             }
         },
         onError: (error: Error) => {
