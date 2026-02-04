@@ -2,7 +2,7 @@
 
 import { Button } from "@/components/ui/button"
 import { FileText, Image, BarChart, BookOpen, ExternalLink } from "lucide-react"
-import { useArtifactStore } from "../../preview/store/artifact"
+import { useArtifactStore } from "@/features/preview/stores/artifact"
 import { cn } from "@/lib/utils"
 import { ActionPill } from "./action-pill"
 

@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Check, X, Loader2 } from "lucide-react"
-import { useArtifactStore } from "../store/artifact"
+import { useArtifactStore } from "@/features/preview/stores/artifact"
 import { cn } from "@/lib/utils"
 
 interface SlideViewerProps {

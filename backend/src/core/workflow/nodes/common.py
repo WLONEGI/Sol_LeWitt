@@ -1,8 +1,12 @@
-from typing import Any, Literal
-from langchain_core.messages import AIMessage
+import re
+from typing import Any, TypeVar
+from pydantic import BaseModel
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 from src.shared.config.settings import settings
 from src.core.workflow.state import State
+
+T = TypeVar("T", bound=BaseModel)
 
 def _update_artifact(state: State, key: str, value: Any) -> dict[str, Any]:
     """Helper to update artifacts dictionary."""
@@ -11,6 +15,39 @@ def _update_artifact(state: State, key: str, value: Any) -> dict[str, Any]:
         artifacts = {}
     artifacts[key] = value
     return artifacts
+
+def _extract_first_json(text: str) -> str | None:
+    """Extract first JSON object from text."""
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    return match.group(0) if match else None
+
+async def run_structured_output(
+    llm,
+    schema: type[T],
+    messages: list,
+    config: dict,
+    repair_hint: str
+) -> T:
+    """Structured output with fallback JSON repair."""
+    try:
+        structured_llm = llm.with_structured_output(schema)
+        return await structured_llm.ainvoke(messages, config=config)
+    except Exception as first_error:
+        repair_messages = list(messages)
+        repair_messages.append(
+            HumanMessage(
+                content=(
+                    "Return ONLY valid JSON for the schema. "
+                    f"{repair_hint}"
+                )
+            )
+        )
+        raw = await llm.ainvoke(repair_messages, config=config)
+        raw_text = raw.content if hasattr(raw, "content") else str(raw)
+        json_text = _extract_first_json(raw_text)
+        if not json_text:
+            raise first_error
+        return schema.model_validate_json(json_text)
 
 def create_worker_response(
     role: str,

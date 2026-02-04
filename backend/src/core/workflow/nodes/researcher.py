@@ -1,10 +1,10 @@
 import logging
 import json
-from typing import Literal
+from typing import Literal, Any
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.types import Command, Send
-from langgraph.graph import StateGraph, START
+from langgraph.graph import StateGraph, START, END
 from langchain_core.runnables import RunnableConfig
 
 from src.infrastructure.llm.llm import get_llm_by_type
@@ -16,14 +16,38 @@ from src.shared.schemas import (
     ResearchTaskList
 )
 from src.core.workflow.state import ResearchSubgraphState
-from .common import _update_artifact
+from .common import _update_artifact, run_structured_output
 
 logger = logging.getLogger(__name__)
+
+def _extract_text_from_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type == "text" and isinstance(part.get("text"), str):
+                    texts.append(part["text"])
+                elif part_type == "thinking":
+                    continue
+                elif isinstance(part.get("text"), str):
+                    texts.append(part["text"])
+            elif isinstance(part, str):
+                texts.append(part)
+        return "".join(texts)
+    if isinstance(content, dict):
+        text = content.get("text")
+        return text if isinstance(text, str) else ""
+    return ""
 
 async def research_worker_node(state: ResearchSubgraphState, config: RunnableConfig) -> dict:
     """
     Worker node for executing a single research task.
     """
+    from langchain_core.callbacks.manager import adispatch_custom_event
+
     task_data = state.get("task")
     if not task_data:
         logger.warning("Research Worker received empty task")
@@ -41,9 +65,26 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
     task_id = getattr(task, "id", "unknown")
     logger.info(f"Worker executing task {task_id}: {task.perspective}")
     
+    # Use step_id from state if provided (passed via Send), or fallback to plan search
+    step_id = state.get("step_id")
+    if not step_id:
+        try:
+            current_step = next(
+                step for step in state.get("plan", []) 
+                if step.get("status") == "in_progress" and step.get("role") == "researcher"
+            )
+            step_id = current_step["id"]
+        except (StopIteration, KeyError, TypeError):
+            step_id = "unknown"
+    
     try:
-        from src.resources.prompts.template import load_prompt_markdown
-        
+        # 1. Dispatch Start Event
+        await adispatch_custom_event(
+            "research_worker_start",
+            {"task_id": task.id, "perspective": task.perspective},
+            config=config
+        )
+
         system_prompt = load_prompt_markdown("researcher")
         
         instruction = (
@@ -59,55 +100,101 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
         ]
         
         # Use Grounded LLM (Google Search enabled)
-        from src.infrastructure.llm.llm import create_grounded_llm
-        llm_with_search = create_grounded_llm(
-            model=settings.BASIC_MODEL,
-            temperature=0.0
-        )
+        llm = get_llm_by_type("grounded")
         
-        accumulated_content = ""
+        # Add run_name for better visibility in stream events
+        stream_config = config.copy()
+        stream_config["run_name"] = f"research_worker_{task_id}"
         
-        # Stream the response
-        async for chunk in llm_with_search.astream(messages, config=config):
-            content = chunk.content
-            if content:
-                # Handle list content (rare in streaming but possible)
-                if isinstance(content, list):
-                    text_chunk = ""
-                    for part in content:
-                        if isinstance(part, dict) and "text" in part:
-                            text_chunk += part["text"]
-                        elif isinstance(part, str):
-                            text_chunk += part
-                    content = text_chunk
-                
-                accumulated_content += content
-                
+        # 2. Stream Tokens
+        full_content = ""
+        
+        async for chunk in llm.astream(messages, config=stream_config):
+            # Dispatch Token Event
+            if chunk.content:
+                text_chunk = _extract_text_from_content(chunk.content)
+                if not text_chunk:
+                    continue
+                full_content += text_chunk
+                await adispatch_custom_event(
+                    "research_worker_token",
+                    {"task_id": task.id, "token": text_chunk},
+                    config=config
+                )
 
-        res = ResearchResult(
+        result = ResearchResult(
             task_id=task.id,
             perspective=task.perspective,
-            report=accumulated_content,
-            sources=[], 
-            confidence=1.0
-        )
-        return {"internal_research_results": [res]}
-        
-    except Exception as e:
-        logger.error(f"Worker failed task {task.id}: {e}")
-        err_res = ResearchResult(
-            task_id=task.id,
-            perspective=task.perspective,
-            report=f"## Error\nInvestigation failed: {str(e)}",
+            report=full_content,
             sources=[],
-            confidence=0.0
+            confidence=0.9
         )
-        return {"internal_research_results": [err_res]}
+        
+        # [Decentralized Reporting] Emit individual results immediately
+        summary_text = f"【{task.perspective}】の調査が完了しました。"
+        artifact_id = f"step_{step_id}_research_{task.id}"
 
+        # 3. Dispatch Complete Event
+        await adispatch_custom_event(
+             "research_worker_complete",
+             {"task_id": task.id},
+             config=config
+        )
+        
+        return {
+            "internal_research_results": [result],
+            "artifacts": _update_artifact(state, artifact_id, full_content),
+            "messages": [
+                AIMessage(
+                    content=summary_text,
+                    additional_kwargs={
+                        "ui_type": "worker_result",
+                        "role": "researcher", 
+                        "status": "completed",
+                        "result_summary": summary_text
+                    },
+                    name=f"researcher_{task.id}_ui"
+                ),
+                AIMessage(
+                    content=f"Research Report: {task.perspective}",
+                    additional_kwargs={
+                        "ui_type": "artifact_view",
+                        "artifact_id": artifact_id,
+                        "title": f"調査レポート: {task.perspective}",
+                        "icon": "BookOpen"
+                    },
+                    name=f"researcher_{task.id}_artifact"
+                )
+            ]
+        }
 
-async def research_manager_node(state: ResearchSubgraphState) -> Command[Literal["research_worker", "__end__"]]:
+    except Exception as e:
+        logger.error(f"Research worker {task_id} failed: {e}")
+        error_message = f"Research worker failed: {e}"
+        try:
+            await adispatch_custom_event(
+                "research_worker_complete",
+                {"task_id": task.id, "status": "failed", "error": error_message},
+                config=config
+            )
+        except Exception as dispatch_error:
+            logger.error(f"Failed to dispatch research_worker_complete: {dispatch_error}")
+        return {
+            "internal_research_results": [
+                ResearchResult(
+                    task_id=task.id,
+                    perspective=task.perspective,
+                    report=error_message,
+                    sources=[],
+                    confidence=0.0
+                )
+            ]
+        }
+
+async def research_manager_node(state: ResearchSubgraphState, config: RunnableConfig) -> Command[Literal["research_worker", "__end__"]]:
     """
-    Manager Node (Orchestrator).
+    Manager Node (Orchestrator). 
+    Handles decomposition and sequential dispatch of workers.
     """
     logger.info(f"Research Manager active. Decomposed: {state.get('is_decomposed', False)}")
 
@@ -118,12 +205,21 @@ async def research_manager_node(state: ResearchSubgraphState) -> Command[Literal
         )
     except StopIteration:
         logger.error("Research Manager called but no in_progress step found.")
-        return Command(goto="__end__", update={})
+        return Command(goto=END, update={})
+        
     internal_tasks = state.get("internal_research_tasks", [])
     results = state.get("internal_research_results", [])
+    current_idx = state.get("current_task_index", 0)
+    completed_task_ids = set()
+    for result in results:
+        if hasattr(result, "task_id"):
+            completed_task_ids.add(result.task_id)
+        elif isinstance(result, dict) and "task_id" in result:
+            completed_task_ids.add(result["task_id"])
 
     if not state.get("is_decomposed"):
         logger.info("Manager: Decomposing research step...")
+        clear_update = {"internal_research_results": []}
         
         base_prompt = load_prompt_markdown("research_topic_analyzer")
         instruction_content = f"User Instruction: {current_step['instruction']}"
@@ -131,16 +227,23 @@ async def research_manager_node(state: ResearchSubgraphState) -> Command[Literal
         llm = get_llm_by_type("reasoning")
         
         try:
-            # Use with_structured_output explicitly for Pydantic parsing reliability
-            structured_llm = llm.with_structured_output(ResearchTaskList)
-            
             # Prepare messages for the LLM
             messages = [
                 SystemMessage(content=base_prompt),
                 HumanMessage(content=instruction_content)
             ]
             
-            qa_result: ResearchTaskList = await structured_llm.ainvoke(messages)
+            # Add run_name for better visibility in stream events
+            stream_config = config.copy()
+            stream_config["run_name"] = "researcher"
+            
+            qa_result: ResearchTaskList = await run_structured_output(
+                llm=llm,
+                schema=ResearchTaskList,
+                messages=messages,
+                config=stream_config,
+                repair_hint="Schema: ResearchTaskList. No extra text."
+            )
             tasks = qa_result.tasks
             if not tasks:
                  raise ValueError("No tasks generated")
@@ -156,64 +259,64 @@ async def research_manager_node(state: ResearchSubgraphState) -> Command[Literal
                 )
             ]
 
-        logger.info(f"Manager: Generated {len(tasks)} parallel tasks.")
-        
-        sends = [Send("research_worker", {"task": t.model_dump()}) for t in tasks]
+        logger.info(f"Manager: Decomposition complete. {len(tasks)} tasks generated.")
+        # [Serialization] Start sequential execution from the first task
+        first_task = tasks[0]
         return Command(
-             update={"internal_research_tasks": tasks, "is_decomposed": True, "internal_research_results": []},
-             goto=sends
+            goto=Send("research_worker", {"task": first_task, "step_id": current_step["id"]}),
+            update={
+                "internal_research_tasks": tasks,
+                "is_decomposed": True,
+                "current_task_index": 1,  # Next task index
+                **clear_update
+            }
         )
 
-    if len(results) >= len(internal_tasks):
-        logger.info("Manager: All tasks completed. Aggregating.")
-        results.sort(key=lambda x: x.task_id)
+    # If already decomposed, check if there are more tasks to run
+    if current_idx < len(internal_tasks):
+        while current_idx < len(internal_tasks):
+            next_task = internal_tasks[current_idx]
+            next_task_id = next_task.id if hasattr(next_task, "id") else next_task.get("id")
+            if next_task_id in completed_task_ids:
+                logger.info(f"Manager: Skipping already completed task {next_task_id}")
+                current_idx += 1
+                continue
+            break
+
+    if current_idx < len(internal_tasks):
+        logger.info(f"Manager: Dispatching next task ({current_idx + 1}/{len(internal_tasks)})")
+        next_task = internal_tasks[current_idx]
+        return Command(
+            goto=Send("research_worker", {"task": next_task, "step_id": current_step["id"]}),
+            update={
+                "current_task_index": current_idx + 1
+            }
+        )
+
+    # Check if all workers finished (safety check, though in sequential it should be true here)
+    if len(results) >= len(internal_tasks) and len(internal_tasks) > 0:
+        logger.info("Manager: All workers finished. Finalizing step.")
         
-        aggregated_content = {
-            "tasks": [t.model_dump() for t in internal_tasks],
-            "results": [r.model_dump() for r in results]
-        }
-        content_json = json.dumps(aggregated_content, ensure_ascii=False)
-        
-        summary_text = f"以下の項目について詳細に調査し、分析レポートを作成しました: {', '.join([r.perspective for r in results])}"
+        summary_text = f"計 {len(results)} 件の個別調査が完了しました。"
         current_step["result_summary"] = summary_text
 
-        logger.info(f"Research Manager finished. Aggregated {len(results)} results.")
+        logger.info(f"Research Manager finished. Finalized {len(results)} individual results.")
         
         return Command(
-            goto="supervisor",
+            goto=END,
             update={
-                "artifacts": _update_artifact(state, f"step_{current_step['id']}_research", content_json),
-                "messages": [
-                    AIMessage(
-                        content=summary_text,
-                        additional_kwargs={
-                            "ui_type": "worker_result",
-                            "role": "researcher", 
-                            "status": "completed",
-                            "result_summary": summary_text
-                        },
-                        name="researcher_ui"
-                    ),
-                    AIMessage(
-                        content="Research Report",
-                        additional_kwargs={
-                            "ui_type": "artifact_view",
-                            "artifact_id": f"step_{current_step['id']}_research",
-                            "title": "Research Report",
-                            "icon": "BookOpen"
-                        },
-                        name="researcher_artifact"
-                    )
-                ],
-                "internal_research_tasks": [], # Reset
+                "artifacts": _update_artifact(state, f"step_{current_step['id']}_research", summary_text),
+                "internal_research_tasks": [], 
                 "internal_research_results": [],
                 "is_decomposed": False,
+                # Clear index for next potential research step
+                "current_task_index": 0,
                 "plan": state["plan"]
             }
         )
     
-    logger.info(f"Manager: Waiting for workers. {len(results)}/{len(internal_tasks)} completed.")
-    return Command(update={})
+    logger.info(f"Manager: Waiting for results (Sequential). {len(results)}/{len(internal_tasks)} completed.")
+    return Command(goto=END) # Should not reach here in normal sequential flow
 
 
 def build_researcher_subgraph():
@@ -224,6 +327,7 @@ def build_researcher_subgraph():
     workflow.add_node("research_worker", research_worker_node)
     
     workflow.add_edge(START, "manager")
+    # In sequential flow, worker always returns to manager to check for next task
     workflow.add_edge("research_worker", "manager")
     
     return workflow.compile()

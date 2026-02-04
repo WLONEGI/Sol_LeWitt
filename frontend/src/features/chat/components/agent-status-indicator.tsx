@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react"
 import { cn } from "@/lib/utils"
 import { Loader2, Bot, Brain, Sparkles, CheckCircle } from "lucide-react"
+import { AnimatedShinyText } from "@/components/ui/animated-shiny-text"
 
 interface AgentStatus {
     stepId: string
@@ -84,9 +85,15 @@ export function AgentStatusIndicator({ status, isActive, className }: AgentStatu
             {/* Status Text */}
             <div className="flex flex-col min-w-0">
                 <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-slate-700 truncate max-w-[200px]">
-                        {status.label}
-                    </span>
+                    {status.status === 'in_progress' ? (
+                        <AnimatedShinyText className="inline-flex items-center justify-start text-sm font-medium transition-all ease-in hover:cursor-pointer hover:text-neutral-600 focus:text-neutral-600  hover:dark:text-neutral-400 focus:dark:text-neutral-400">
+                            <span>{status.label}</span>
+                        </AnimatedShinyText>
+                    ) : (
+                        <span className="text-sm font-medium text-slate-700 truncate max-w-[200px]">
+                            {status.label}
+                        </span>
+                    )}
                     {!isCompleted && (
                         <Loader2 className="h-3 w-3 animate-spin text-slate-400 shrink-0" />
                     )}

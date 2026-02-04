@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 class TaskStep(BaseModel):
     """実行計画の1ステップ"""
     id: int = Field(description="ステップ番号（1から始まる）")
-    role: Literal["researcher", "storywriter", "visualizer", "coder", "data_analyst"] = Field(
+    role: Literal["researcher", "storywriter", "visualizer", "data_analyst"] = Field(
         description="担当エージェント名"
     )
     instruction: str = Field(
@@ -22,7 +22,7 @@ class TaskStep(BaseModel):
         default=None,
         description="Visualizerへのデザイン指示（トーン、スタイル、モチーフなど）。Storywriterの場合はNoneでよい。"
     )
-    status: Literal["pending", "in_progress", "complete"] = Field(
+    status: Literal["pending", "in_progress", "completed"] = Field(
         default="pending",
         description="ステップの実行ステータス"
     )

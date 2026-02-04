@@ -1,0 +1,142 @@
+import { CheckCircle2, Circle, Loader2, ChevronDown, ChevronUp, Check, X } from "lucide-react";
+import { useState } from "react";
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import {
+    Collapsible,
+    CollapsibleContent,
+    CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+
+interface PlanStep {
+    id: number;
+    role: string;
+    instruction: string;
+    title: string;
+    description: string;
+    status: "pending" | "in_progress" | "completed";
+    result_summary?: string | null;
+}
+
+interface PlanData {
+    plan: PlanStep[];
+    title?: string;
+    description?: string;
+    ui_type?: string;
+}
+
+interface PlanStatusChecklistProps {
+    data: PlanData;
+    className?: string;
+    approvalStatus?: 'loading' | 'idle';
+}
+
+export function PlanStatusChecklist({
+    data,
+    className,
+    approvalStatus = 'idle'
+}: PlanStatusChecklistProps) {
+    // Determine overall status based on steps? 
+    // Usually the last plan update reflects current state.
+
+    return (
+        <Card className={cn(
+            "w-full border-indigo-100 bg-indigo-50/30 dark:bg-indigo-950/10 dark:border-indigo-900/50 shadow-sm",
+            className
+        )}>
+            <CardHeader className="pb-3 text-center sm:text-left">
+                <CardTitle className={cn(
+                    "text-base font-semibold flex items-center gap-2",
+                    "text-indigo-900 dark:text-indigo-100"
+                )}>
+                    <Loader2 className="h-5 w-5 animate-spin text-indigo-500" />
+                    {data.title || "Execution Plan"}
+                </CardTitle>
+                {data.description && (
+                    <CardDescription className={cn(
+                        "text-sm mt-1.5",
+                        "text-indigo-600 dark:text-indigo-400"
+                    )}>
+                        {data.description}
+                    </CardDescription>
+                )}
+            </CardHeader>
+            <CardContent className="grid gap-2">
+                {data.plan.map((step) => (
+                    <PlanStepItem key={step.id} step={step} />
+                ))}
+            </CardContent>
+        </Card>
+    );
+}
+
+function PlanStepItem({ step }: { step: PlanStep }) {
+    const [isOpen, setIsOpen] = useState(false);
+
+    const isCompleted = step.status === "completed";
+    const isInProgress = step.status === "in_progress";
+    const isPending = step.status === "pending";
+
+    return (
+        <Collapsible
+            open={isOpen}
+            onOpenChange={setIsOpen}
+            className={cn(
+                "group rounded-lg border border-transparent bg-white dark:bg-slate-900 shadow-sm transition-all",
+                isInProgress && "border-indigo-200 ring-1 ring-indigo-200 dark:border-indigo-800 dark:ring-indigo-800",
+                isCompleted && "bg-slate-50/50 dark:bg-slate-900/50 text-slate-500"
+            )}
+        >
+            <CollapsibleTrigger asChild>
+                <div className="flex items-center gap-3 p-3 cursor-pointer w-full">
+                    <div className="flex-shrink-0 text-slate-400">
+                        {isCompleted ? (
+                            <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                        ) : isInProgress ? (
+                            <div className="relative">
+                                <Circle className="h-5 w-5 text-indigo-500" />
+                                <span className="absolute inset-0 flex items-center justify-center">
+                                    <span className="h-2 w-2 rounded-full bg-indigo-500 animate-pulse" />
+                                </span>
+                            </div>
+                        ) : (
+                            <Circle className="h-5 w-5 text-slate-300" />
+                        )}
+                    </div>
+
+                    <div className="flex-1 text-left min-w-0">
+                        <h4 className={cn(
+                            "text-base font-medium leading-none truncate",
+                            isCompleted ? "text-slate-600 dark:text-slate-400 decoration-slate-400" : "text-slate-900 dark:text-slate-200"
+                        )}>
+                            {step.title}
+                        </h4>
+                        <p className="text-sm text-slate-500 mt-1.5 truncate">
+                            {step.role} • {step.description}
+                        </p>
+                    </div>
+
+                    <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0 text-slate-400">
+                        {isOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                    </Button>
+                </div>
+            </CollapsibleTrigger>
+
+            <CollapsibleContent>
+                <div className="px-10 pb-4 pt-1 text-sm text-slate-600 dark:text-slate-400 space-y-2.5">
+                    <div className="p-3 rounded bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800">
+                        <span className="font-semibold block mb-1">Instruction:</span>
+                        {step.instruction}
+                    </div>
+                    {step.result_summary && (
+                        <div className="p-3 rounded bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/50">
+                            <span className="font-semibold block mb-1 text-emerald-700 dark:text-emerald-400">Result:</span>
+                            {step.result_summary}
+                        </div>
+                    )}
+                </div>
+            </CollapsibleContent>
+        </Collapsible>
+    );
+}

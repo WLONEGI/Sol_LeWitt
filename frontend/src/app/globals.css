@@ -136,6 +136,22 @@
   --font-typewriter: var(--font-courier-prime), monospace;
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
+  --animate-shimmer: shimmer 8s infinite;
+
+  @keyframes shimmer {
+
+    0%,
+    90%,
+    100% {
+      background-position: calc(-100% - var(--shimmer-width)) 0;
+    }
+
+    30%,
+    60% {
+      background-position: calc(100% + var(--shimmer-width)) 0;
+    }
+  }
 }
 
 @layer base {
@@ -152,8 +168,42 @@
   /* ::-webkit-scrollbar { width: 6px; height: 6px; } ... removed */
 }
 
-@utility font-typewriter {
-  font-family: var(--font-typewriter);
+@layer utilities {
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.1);
+    border-radius: 10px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.2);
+  }
 }
 
-@layer components {}
+@layer components {
+
+  /* Sidebar Item Hover Animation */
+  .sidebar-item-transition {
+    @apply transition-all duration-200 ease-out;
+  }
+
+  .sidebar-item-transition:active {
+    @apply scale-[0.98] brightness-95;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}

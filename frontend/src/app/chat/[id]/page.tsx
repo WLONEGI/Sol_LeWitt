@@ -1,24 +1,29 @@
-"use client"
+import { Header } from "@/features/chat/components/header";
+import { ChatInterface } from "@/features/chat/components/chat-interface";
+import { ResizableLayout } from "@/features/preview/components/resizable-layout";
+import { ArtifactView } from "@/features/preview/components/artifact-view";
+import { ChatSidebar } from "@/features/chat/components/chat-sidebar";
 
-import { ChatInterface } from "@/features/chat/chat-interface";
-import { ResizableLayout } from "@/components/layout/resizable-layout";
-import { ArtifactView } from "@/features/preview/artifact-view";
-import { useParams } from "next/navigation";
-
-export default function ChatPage() {
-    const params = useParams();
-    const id = params.id as string;
+export default function ChatPage({ params }: { params: { id: string } }) {
+    const id = params.id;
 
     return (
-        <main className="h-screen w-screen overflow-hidden bg-background relative selection:bg-primary/20">
-            <div className="relative z-10 h-full w-full flex items-center justify-center">
-                <div className="w-full h-full bg-transparent">
-                    <ResizableLayout
-                        defaultLayout={[40, 60]}
-                    >
-                        <ChatInterface key={id} threadId={id} />
-                        <ArtifactView />
-                    </ResizableLayout>
+        <main className="h-screen w-screen overflow-hidden bg-background relative selection:bg-primary/20 flex">
+            {/* Sidebar Scope: Full height, left side */}
+            <ChatSidebar />
+
+            {/* Content Scope: Header + Main Content */}
+            <div className="flex flex-col flex-1 min-w-0 h-full">
+                <Header />
+                <div className="relative z-10 flex-1 w-full min-h-0">
+                    <div className="w-full h-full bg-transparent">
+                        <ResizableLayout
+                            defaultLayout={[40, 60]}
+                        >
+                            <ChatInterface key={id} threadId={id} />
+                            <ArtifactView />
+                        </ResizableLayout>
+                    </div>
                 </div>
             </div>
         </main>

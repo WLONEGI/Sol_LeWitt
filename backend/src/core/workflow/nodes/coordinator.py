@@ -13,100 +13,79 @@ from src.core.workflow.state import State
 
 logger = logging.getLogger(__name__)
 
-class CoordinatorDecision(BaseModel):
-    """Decision made by the Coordinator."""
-    decision: Literal["handoff_to_planner", "reply_to_user"] = Field(
-        ...,
-        description="Whether to handoff the task to the planner (production request) or reply to the user (clarification/chat)."
-    )
+class HandoffToPlanner(BaseModel):
+    """
+    Call this tool when the user's request is ready for production (topic is clear).
+    This will trigger the handoff to the planning team.
+    """
     reasoning: str = Field(
         ...,
-        description="Brief reasoning for the decision."
+        description="Reasoning for why the request is ready for production (e.g., 'Topic is clear', 'User confirmed intent')."
     )
 
 async def coordinator_node(state: State, config: RunnableConfig) -> Command[Literal["planner", "supervisor", "__end__"]]:
     """
-    Coordinator Node: Gatekeeper & UX Manager (HITL).
-    Decides execution flow first, then streams response if needed.
+    Coordinator Node: Gatekeeper & UX Manager (Unified).
+    Uses tool calling to decide execution flow while simultaneously streaming the response to the user.
     """
-    logger.info("Coordinator processing request")
+    logger.info("Coordinator processing request (Unified Mode)")
     
     messages = apply_prompt_template("coordinator", state)
     logger.debug(f"Coordinator Messages: {messages}")
     
-    # 1. Decision Step (Call-time binding)
-    llm = get_llm_by_type(AGENT_LLM_MAP["coordinator"])
+    # 1. Setup LLM with Tool
+    # We bind the HandoffToPlanner tool. 
+    # The model is instructed (via prompt) to call this tool if appropriate, 
+    # AND to generate a polite text response in the same turn.
+    llm = get_llm_by_type(AGENT_LLM_MAP["coordinator"], streaming=True)
+    llm_with_tools = llm.bind_tools([HandoffToPlanner])
     
-    try:
-        # Use with_structured_output explicitly since gemini-3/2.0-flash with current lib 
-        # doesn't reliably parse response_format in ainvoke.
-        structured_llm = llm.with_structured_output(CoordinatorDecision)
-        decision_output: CoordinatorDecision = await structured_llm.ainvoke(messages)
-        logger.debug(f"[DEBUG] Coordinator decision response: {decision_output.decision} (Reasoning: {decision_output.reasoning})")
-    except Exception as e:
-        logger.error(f"[DEBUG] Structured output parsing failed IN COORDINATOR: {e}", exc_info=True)
-        return Command(
-            update={"messages": [AIMessage(content="申し訳ありません、判断中にエラーが発生しました。", name="coordinator")]},
-            goto="__end__"
-        )
-
-    # 2. Execution Step (Streaming)
-    if decision_output.decision == "handoff_to_planner":
-        logger.info("Handing off to planner.")
-        
-        # Async Title Generation
-        thread_id = config.get("configurable", {}).get("thread_id")
-        await _generate_and_save_title(state, thread_id)
-        
-        # Generate a polite handoff message (Standard Streaming)
-        handoff_prompt = messages + [
-            HumanMessage(content=f"Decision: Handoff to Planner.\nReasoning: {decision_output.reasoning}\n\nTask: Generate a polite, encouraging, Japanese confirmation message to the user stating that we are starting the planning process based on the request. Do NOT describe technical details like 'nodes'.")
-        ]
-        
-        # We use astream to ensure individual tokens are emitted as on_chat_model_stream.
-        response_content = ""
-        async for chunk in llm.astream(handoff_prompt, config=config):
-            if chunk.content:
-                if isinstance(chunk.content, str):
-                    response_content += chunk.content
-                elif isinstance(chunk.content, list):
-                    for part in chunk.content:
-                        if isinstance(part, dict) and "text" in part:
-                            response_content += part["text"]
-                        elif isinstance(part, str):
-                            response_content += part
-        
-        return Command(
-            update={"messages": [AIMessage(content=response_content, name="coordinator")]},
-            goto="planner",
-        )
+    # 2. Add run_name for better visibility
+    stream_config = config.copy()
+    stream_config["run_name"] = "coordinator" # Unified run name
     
-    else: # reply_to_user
-        logger.info("Replying to user branch entered. Using standard streaming.")
-        # Just generate the natural response (Standard Streaming)
-        response_content = ""
-        async for chunk in llm.astream(messages, config=config):
-            if chunk.content:
-                if isinstance(chunk.content, str):
-                    response_content += chunk.content
-                elif isinstance(chunk.content, list):
-                    for part in chunk.content:
-                        if isinstance(part, dict) and "text" in part:
-                            response_content += part["text"]
-                        elif isinstance(part, str):
-                            response_content += part
+    # 3. Stream Integration
+    # We want to stream the text chunks to the frontend as they arrive (handled by callbacks), 
+    # while capturing the final output to utilize any tool calls.
+    # Using `ainvoke` with streaming=True allows the underlying callbacks to fire for tokens,
+    # and returns the final AIMessage with tool_calls.
+    
+    logger.info("Coordinator: Invoking model (streaming events should flow to frontend)...")
+    response_message = await llm_with_tools.ainvoke(messages, config=stream_config)
+    
+    logger.debug(f"Coordinator Response: content='{response_message.content}', tool_calls={response_message.tool_calls}")
+    
+    # 4. Decision Logic
+    goto_destination = "__end__"
+    
+    if response_message.tool_calls:
+        # Check if the desired tool was called
+        for tc in response_message.tool_calls:
+            if tc["name"] == "HandoffToPlanner":
+                logger.info(f"Handoff tool called. Reasoning: {tc['args'].get('reasoning')}")
+                goto_destination = "planner"
+                
+                # Async Title Generation (Preserved logic)
+                thread_id = config.get("configurable", {}).get("thread_id")
+                # We await this to ensure title is ready before next steps if needed
+                title = await _generate_and_save_title(state, thread_id)
+                if title:
+                    await adispatch_custom_event(
+                        "title_generated",
+                        {"title": title},
+                        config=config
+                    )
+                break
+    
+    # 5. Return Command
+    # We return the message so it's added to history.
+    return Command(
+        update={"messages": [response_message]},
+        goto=goto_destination
+    )
 
-        if not response_content:
-            logger.warning("Coordinator generated empty response. Using fallback.")
-            response_content = "申し訳ありません、応答を生成できませんでした。"
-
-        return Command(
-            update={"messages": [AIMessage(content=response_content, name="coordinator")]},
-            goto="__end__"
-        )
-
-async def _generate_and_save_title(state: State, thread_id: str):
-    """Generates a title using Flash model and saves to DB."""
+async def _generate_and_save_title(state: State, thread_id: str) -> str | None:
+    """Generates a title using Flash model and saves to DB. Returns the title if generated/found."""
     try:
         from src.shared.config.settings import settings
         # Import internally to avoid circular dependency with service -> build_graph -> coordinator
@@ -126,14 +105,14 @@ async def _generate_and_save_title(state: State, thread_id: str):
                 row = await cur.fetchone()
                 if row and row[0]:
                     logger.info(f"Title already exists for thread {thread_id}, skipping generation.")
-                    return
+                    return row[0]
 
         # 1. Generate Title
         model_name = settings.BASIC_MODEL or "gemini-1.5-flash"
         llm = get_llm_by_type(model_name) 
         
         messages = state.get("messages", [])
-        if not messages: return
+        if not messages: return None
 
         # Simple context extraction
         context = "\n".join([f"{m.type}: {m.content}" for m in messages if isinstance(m.content, str)])
@@ -163,7 +142,9 @@ async def _generate_and_save_title(state: State, thread_id: str):
                 )
         
         logger.info(f"Title generated and saved: {title}")
+        return title
         
     except Exception as e:
         logger.warning(f"Failed to generate session title: {e}")
+        return None
 

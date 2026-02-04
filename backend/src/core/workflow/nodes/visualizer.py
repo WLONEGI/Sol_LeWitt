@@ -24,7 +24,7 @@ from src.core.workflow.state import State
 from src.domain.designer.generator import generate_image, create_image_chat_session_async, send_message_for_image_async
 from src.infrastructure.storage.gcs import upload_to_gcs, download_blob_as_bytes
 
-from .common import create_worker_response
+from .common import create_worker_response, run_structured_output
 
 logger = logging.getLogger(__name__)
 
@@ -287,9 +287,17 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
     llm = get_llm_by_type(AGENT_LLM_MAP["visualizer"])
     
     try:
-        # Use with_structured_output explicitly for Pydantic parsing reliability
-        structured_llm = llm.with_structured_output(VisualizerOutput)
-        visualizer_output: VisualizerOutput = await structured_llm.ainvoke(messages)
+        # Add run_name for better visibility in stream events
+        stream_config = config.copy()
+        stream_config["run_name"] = "visualizer"
+        
+        visualizer_output: VisualizerOutput = await run_structured_output(
+            llm=llm,
+            schema=VisualizerOutput,
+            messages=messages,
+            config=stream_config,
+            repair_hint="Schema: VisualizerOutput. No extra text."
+        )
         
         logger.debug(f"Visualizer Output: {visualizer_output}")
 

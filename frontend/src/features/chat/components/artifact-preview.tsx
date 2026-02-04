@@ -1,7 +1,7 @@
 "use client"
 
 import { ExternalLink } from "lucide-react"
-import { useArtifactStore } from "../../preview/store/artifact"
+import { useArtifactStore } from "@/features/preview/stores/artifact"
 
 interface ArtifactPreviewProps {
     previewUrls: string[];

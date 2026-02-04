@@ -144,7 +144,7 @@ def create_grounded_llm(
 
 
 @lru_cache(maxsize=10)
-def get_llm_by_type(llm_type: str) -> ChatGoogleGenerativeAI:
+def get_llm_by_type(llm_type: str, streaming: bool = True) -> ChatGoogleGenerativeAI:
     """
     設定に基づいてLLMインスタンスを取得するファクトリ関数。
 
@@ -152,6 +152,7 @@ def get_llm_by_type(llm_type: str) -> ChatGoogleGenerativeAI:
 
     Args:
         llm_type: LLMタイプ ("reasoning", "vision", "high_reasoning", "basic")
+        streaming: ストリーミングを有効にするかどうか (デフォルト: True)
 
     Returns:
         LLMインスタンス (ChatGoogleGenerativeAI)
@@ -187,8 +188,8 @@ def get_llm_by_type(llm_type: str) -> ChatGoogleGenerativeAI:
 
     # Vertex AI を利用 (ChatVertexAI)
     logger.info(
-        f"Using Vertex AI via ChatVertexAI for {llm_type} (model: {model}, "
-        f"include_thoughts={include_thoughts}, thinking_level={thinking_level})"
+        f"[DEBUG] Factory get_llm_by_type: '{llm_type}' "
+        f"(streaming={streaming}, include_thoughts={include_thoughts})"
     )
     return create_gemini_llm(
         model=model,
@@ -196,6 +197,7 @@ def get_llm_by_type(llm_type: str) -> ChatGoogleGenerativeAI:
         location=settings.VERTEX_LOCATION,
         temperature=0.0,
         include_thoughts=include_thoughts,
-        thinking_level=thinking_level
+        thinking_level=thinking_level,
+        streaming=streaming
     )
 

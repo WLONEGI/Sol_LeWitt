@@ -8,6 +8,7 @@ SCRIPT_DIR=$(cd $(dirname $0); pwd)
 BACKEND_DIR=$(cd $SCRIPT_DIR/..; pwd)
 PROJECT_ROOT=$(cd $BACKEND_DIR/..; pwd)
 FRONTEND_DIR="$PROJECT_ROOT/frontend"
+LOG_DIR="$PROJECT_ROOT/logs"
 
 # Load essential configuration from backend/.env
 PROJECT_ID="aerobic-stream-483505-a0" # Fallback
@@ -43,6 +44,12 @@ lsof -ti:3000 | xargs kill -9 2>/dev/null && echo "  - Stopped frontend on port 
 # Kill Backend port 8000
 lsof -ti:8000 | xargs kill -9 2>/dev/null && echo "  - Stopped process on port 8000"
 
+# Clean up log files
+mkdir -p "$LOG_DIR"
+rm -f "$BACKEND_DIR/backend.log" "$BACKEND_DIR/proxy.log" "$LOG_DIR/frontend.log" "$LOG_DIR/frontend_event.log"
+touch "$BACKEND_DIR/backend.log" "$BACKEND_DIR/proxy.log" "$LOG_DIR/frontend.log" "$LOG_DIR/frontend_event.log"
+echo "  - Cleaned up and recreated log files (backend.log, proxy.log, logs/frontend.log, logs/frontend_event.log)"
+
 sleep 2
 
 # 2. Starting processes
@@ -51,7 +58,7 @@ echo "[2/2] Starting services in background..."
 # Start Cloud SQL Proxy
 cd "$BACKEND_DIR"
 if [ -f "./cloud-sql-proxy" ]; then
-    nohup ./cloud-sql-proxy "$CONNECTION_NAME" > proxy.log 2>&1 &
+    nohup ./cloud-sql-proxy "$CONNECTION_NAME" --debug-logs > proxy.log 2>&1 &
     echo "  - Cloud SQL Proxy started (PID: $!). Logs: backend/proxy.log"
 else
     echo "  - ⚠️ Error: cloud-sql-proxy binary not found in $BACKEND_DIR"
@@ -60,17 +67,33 @@ fi
 # Start Backend
 if [ -d ".venv" ]; then
     # Start uvicorn via uv in background
-    nohup uv run uvicorn src.app.app:app --reload --port 8000 > backend.log 2>&1 &
+    nohup uv run uvicorn src.app.app:app --reload --port 8000 --log-level debug > backend.log 2>&1 &
     echo "  - Backend started (PID: $!). Logs: backend/backend.log"
 else
     echo "  - ⚠️ Error: .venv not found in $BACKEND_DIR. Run uv sync first."
 fi
 
+# Wait for Backend to be ready
+echo "Waiting for backend to be ready on port 8000..."
+MAX_RETRIES=30
+COUNT=0
+while ! curl -s http://localhost:8000 > /dev/null; do
+    sleep 1
+    COUNT=$((COUNT+1))
+    if [ $COUNT -ge $MAX_RETRIES ]; then
+        echo "  - ⚠️ Timeout waiting for backend to start."
+        break
+    fi
+    echo -n "."
+done
+echo ""
+echo "  - Backend is ready."
+
 # Start Frontend
 cd "$FRONTEND_DIR"
 if [ -d "node_modules" ]; then
-    nohup npm run dev > frontend.log 2>&1 &
-    echo "  - Frontend started (PID: $!). Logs: frontend/frontend.log"
+    nohup npm run dev > "$LOG_DIR/frontend.log" 2>&1 &
+    echo "  - Frontend started (PID: $!). Logs: logs/frontend.log"
 else
     echo "  - ⚠️ Error: node_modules not found in $FRONTEND_DIR. Run npm install first."
 fi
@@ -79,6 +102,7 @@ echo "===================================================="
 echo "All services have been triggered to restart."
 echo "Use the following commands to check logs:"
 echo "  tail -f $BACKEND_DIR/backend.log"
-echo "  tail -f $FRONTEND_DIR/frontend.log"
+echo "  tail -f $LOG_DIR/frontend.log"
+echo "  tail -f $LOG_DIR/frontend_event.log"
 echo "  tail -f $BACKEND_DIR/proxy.log"
 echo "===================================================="

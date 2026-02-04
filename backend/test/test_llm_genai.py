@@ -37,7 +37,7 @@ async def test_chat_google_genai():
             project=project_id,
             location=location,
             temperature=0.0,
-            streaming=True,
+            streaming=False,
             safety_settings=safety_settings,
         )
         

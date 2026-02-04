@@ -11,7 +11,7 @@ interface ActionPillProps {
 export function ActionPill({ icon: Icon, label, value, className }: ActionPillProps) {
     return (
         <div className={cn(
-            "inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-gray-100/80 border border-transparent hover:border-gray-200 transition-colors",
+            "inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/50 border border-gray-100/80 hover:border-gray-200 transition-colors shadow-sm",
             className
         )}>
             <Icon className="h-3.5 w-3.5 text-gray-500" />

@@ -39,6 +39,5 @@ def build_graph(checkpointer=None):
 
     return builder.compile(
         checkpointer=checkpointer,
-        interrupt_after=["planner"]
     )
 

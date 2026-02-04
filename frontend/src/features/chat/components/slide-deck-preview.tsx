@@ -1,7 +1,7 @@
 "use client"
 
 import { Image as ImageIcon, Maximize2, Loader2, CheckCircle2 } from "lucide-react"
-import { useArtifactStore } from "../../preview/store/artifact"
+import { useArtifactStore } from "@/features/preview/stores/artifact"
 import { cn } from "@/lib/utils"
 
 export interface SlideDeckItem {

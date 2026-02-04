@@ -17,6 +17,19 @@ Spell バックエンドの技術ドキュメントへようこそ。本シス�
 - **[セットアップ & 開発](./guides/setup_and_development.md)**: ローカル環境構築。
 - **[デプロイ & 運用](./guides/deployment_and_ops.md)**: Cloud Run へのデプロイ。
 
+### 📊 エージェント出力マッピング
+各ノードが出力するイベントと、BFF (`/api/chat/route.ts`) で変換される前端データ形式の対応表です。詳細な挙動は **[ストリーミング・プロトコル](./architecture/03_streaming_protocol.md)** を参照してください。
+
+| ノード名 (Node) | バックエンド出力 (`stream_event`) | フロントエンド変換形式 (Vercel AI SDK) |
+| :--- | :--- | :--- |
+| **coordinator** | `title_generated`, `on_chat_model_stream` | `title_update`, `text-delta` |
+| **planner** | `plan_updated`, `on_chat_model_stream` | `data-plan`, `tool-approval-request`, `reasoning-delta` |
+| **supervisor** | `on_chat_model_stream` | `text-delta` |
+| **researcher** | `on_chat_model_stream`, `on_chain_end` | `text-delta`, (Artifacts) |
+| **storywriter** | `slide_outline_updated`, `on_chat_model_stream` | `data-outline`, `tool-approval-request`, `reasoning-delta` |
+| **visualizer** | `on_chat_model_stream`, `on_chain_end` | `reasoning-delta`, (Artifacts) |
+| **data_analyst** | `on_chat_model_stream` | `reasoning-delta`, `text-delta` |
+
 ---
 
 ## 🔍 クイックスタート

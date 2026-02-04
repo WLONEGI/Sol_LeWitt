@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import { Noto_Serif_JP, Courier_Prime } from "next/font/google";
 import "./globals.css";
-import { ThemeProvider } from "@/components/theme-provider";
+import { ThemeProvider } from "@/providers/theme-provider";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 const notoSerifJP = Noto_Serif_JP({
   weight: ["200", "300", "400", "500", "600", "700", "900"],
@@ -37,7 +38,9 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          {children}
+          <TooltipProvider>
+            {children}
+          </TooltipProvider>
         </ThemeProvider>
       </body>
     </html>

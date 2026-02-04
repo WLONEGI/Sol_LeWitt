@@ -10,10 +10,11 @@ from src.shared.config import AGENT_LLM_MAP
 from src.infrastructure.llm.llm import get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
 from src.shared.schemas import StorywriterOutput
+from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.runnables import RunnableConfig
 from src.core.workflow.state import State
 
-from .common import create_worker_response
+from .common import create_worker_response, run_structured_output
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +48,33 @@ async def storywriter_node(state: State, config: RunnableConfig) -> Command[Lite
     llm = get_llm_by_type(AGENT_LLM_MAP["storywriter"])
     
     try:
-        # Use with_structured_output explicitly for Pydantic parsing reliability
-        structured_llm = llm.with_structured_output(StorywriterOutput)
-        story_output: StorywriterOutput = await structured_llm.ainvoke(messages, config=config)
+        # Add run_name for better visibility in stream events
+        stream_config = config.copy()
+        stream_config["run_name"] = "storywriter"
+        
+        story_output: StorywriterOutput = await run_structured_output(
+            llm=llm,
+            schema=StorywriterOutput,
+            messages=messages,
+            config=stream_config,
+            repair_hint="Schema: StorywriterOutput. No extra text."
+        )
         
         content_json = story_output.model_dump_json(exclude_none=True)
         result_summary = story_output.execution_summary
         logger.info(f"✅ Storywriter generated {len(story_output.slides)} slides")
+
+        # Emit custom event for Slide Outline approval
+        await adispatch_custom_event(
+            "slide_outline_updated",
+            {
+                "slides": [s.model_dump() for s in story_output.slides],
+                "ui_type": "slide_outline",
+                "title": "Slide Outline",
+                "description": "The generated slide outline and narrative map."
+            },
+            config=config
+        )
         
         # Update result summary in plan
         state["plan"][step_index]["result_summary"] = result_summary

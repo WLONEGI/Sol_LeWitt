@@ -1,12 +1,12 @@
 import logging
 import json
 import re
+import asyncio
 from typing import Literal
 
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
-from src.shared.config.settings import settings
 from src.shared.config import AGENT_LLM_MAP
 from src.infrastructure.llm.llm import get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
@@ -14,7 +14,6 @@ from src.shared.schemas import DataAnalystOutput
 from src.core.workflow.state import State
 from .common import create_worker_response
 from langchain_core.runnables import RunnableConfig
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +56,11 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
         accumulated_content = ""
         tool_calls_buffer = []
         
-        async for chunk in llm_with_code_exec.astream(messages, config=config):
+        # Add run_name for better visibility in stream events
+        stream_config = config.copy()
+        stream_config["run_name"] = "data_analyst"
+        
+        async for chunk in llm_with_code_exec.astream(messages, config=stream_config):
             if hasattr(chunk, 'content') and chunk.content:
                 content_part = chunk.content
                 if isinstance(content_part, list):
@@ -105,7 +108,11 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
                     # Execute code
                     try:
                         # Pass config!
-                        output = repl_tool.invoke(tool_call["args"], config=config)
+                        output = await asyncio.to_thread(
+                            repl_tool.invoke,
+                            tool_call["args"],
+                            config=config
+                        )
                         tool_outputs.append(f"Output for {tool_call['name']}:\n{output}")
                     except Exception as e:
                         logger.error(f"Tool execution failed: {e}")

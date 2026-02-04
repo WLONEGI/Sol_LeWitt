@@ -17,7 +17,7 @@ export interface ExtendedMessage extends UIMessage {
     toolInvocations?: any[]; // AI SDK toolInvocations
 }
 
-export type TimelineItemType = 'message' | 'process_step' | 'worker_result' | 'artifact' | 'plan_update' | 'code_execution' | 'slide_outline';
+export type TimelineItemType = 'message' | 'process_step' | 'worker_result' | 'artifact' | 'plan_update' | 'code_execution' | 'slide_outline' | 'research_report';
 
 export interface TimelineItem {
     id: string;
@@ -77,6 +77,13 @@ export interface SlideOutlineTimelineItem extends TimelineItem {
     }[];
 }
 
+export interface ResearchReportTimelineItem extends TimelineItem {
+    type: 'research_report';
+    taskId: string;
+    perspective: string;
+    status: 'running' | 'completed';
+}
+
 export type TimelineEvent =
     | MessageTimelineItem
     | ProcessTimelineItem
@@ -84,4 +91,5 @@ export type TimelineEvent =
     | ArtifactTimelineItem
     | PlanUpdateTimelineItem
     | CodeExecutionTimelineItem
-    | SlideOutlineTimelineItem;
+    | SlideOutlineTimelineItem
+    | ResearchReportTimelineItem;

@@ -6,6 +6,11 @@ import { SendHorizontal, Paperclip, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import {
+    Tooltip,
+    TooltipContent,
+    TooltipTrigger,
+} from "@/components/ui/tooltip"
 
 interface ChatInputProps {
     onSend: (value: string) => void;
@@ -82,15 +87,20 @@ export function ChatInput({
                 />
 
                 {/* Clip Button */}
-                <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-10 w-10 shrink-0 text-gray-400 hover:text-primary rounded-full hover:bg-gray-100 transition-colors"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={isLoading}
-                >
-                    <Paperclip className="h-5 w-5" />
-                </Button>
+                <Tooltip>
+                    <TooltipTrigger asChild>
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-10 w-10 shrink-0 text-gray-400 hover:text-primary rounded-full hover:bg-gray-100 transition-colors"
+                            onClick={() => fileInputRef.current?.click()}
+                            disabled={isLoading}
+                        >
+                            <Paperclip className="h-5 w-5" />
+                        </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">Attach template or data</TooltipContent>
+                </Tooltip>
 
                 <div className="relative flex-1">
                     <TextareaAutosize
@@ -104,25 +114,30 @@ export function ChatInput({
                     />
                 </div>
 
-                <Button
-                    onClick={() => {
-                        if (inputValue.trim() && !isLoading) {
-                            onSend(inputValue)
-                            if (value === undefined) setInternalInput("")
-                        }
-                    }}
-                    disabled={!inputValue.trim() || isLoading}
-                    size="icon"
-                    className={cn(
-                        "h-10 w-10 shrink-0 rounded-full transition-all duration-300",
-                        inputValue.trim() && !isLoading
-                            ? "bg-primary text-primary-foreground hover:opacity-90 active:scale-95"
-                            : "bg-gray-100 text-gray-400"
-                    )}
-                >
-                    <SendHorizontal className="h-5 w-5" />
-                    <span className="sr-only">Send</span>
-                </Button>
+                <Tooltip>
+                    <TooltipTrigger asChild>
+                        <Button
+                            onClick={() => {
+                                if (inputValue.trim() && !isLoading) {
+                                    onSend(inputValue)
+                                    if (value === undefined) setInternalInput("")
+                                }
+                            }}
+                            disabled={!inputValue.trim() || isLoading}
+                            size="icon"
+                            className={cn(
+                                "h-10 w-10 shrink-0 rounded-full transition-all duration-300",
+                                inputValue.trim() && !isLoading
+                                    ? "bg-primary text-primary-foreground hover:opacity-90 active:scale-95"
+                                    : "bg-gray-100 text-gray-400"
+                            )}
+                        >
+                            <SendHorizontal className="h-5 w-5" />
+                            <span className="sr-only">Send</span>
+                        </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">Send message</TooltipContent>
+                </Tooltip>
             </div>
         </div>
     )
