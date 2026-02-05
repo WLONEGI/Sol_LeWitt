@@ -261,6 +261,8 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
             media_type="text/event-stream"
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in custom stream setup: {e}")
         raise HTTPException(status_code=500, detail=str(e))
