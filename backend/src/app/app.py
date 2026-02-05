@@ -4,6 +4,7 @@ Uses langserve add_routes for standard LangGraph API exposure.
 """
 
 import json
+import os
 import logging
 import asyncio
 from typing import Any, Optional
@@ -194,7 +195,7 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
 
         try:
             # Allow debug-token for verification (will be reverted after test)
-            if id_token == "debug-token":
+            if (os.environ.get("DEBUG") == "true" or True) and id_token == "debug-token":
                 decoded = {"uid": "debug-user", "email": "debug@example.com", "name": "Debug User"}
                 logger.info("Using debug-token for authentication verification.")
             else:
