@@ -9,6 +9,7 @@ langchain-experimental>=0.4.1
 langserve[all]>=0.3.3
 psycopg[binary,pool]>=3.3.2
 google-cloud-storage>=3.8.0
+firebase-admin>=6.5.0
 pydantic-settings>=2.12.0
 python-multipart>=0.0.22
 pdf2image>=1.17.0

@@ -19,6 +19,8 @@ import langserve.serialization
 from langgraph.types import Send
 
 from src.core.workflow.service import initialize_graph, close_graph, _manager
+from src.infrastructure.auth.firebase import verify_firebase_token
+from src.infrastructure.auth.user_store import upsert_user
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -177,6 +179,28 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
     - on_custom_event (excluding citation_metadata)
     """
     try:
+        # Authenticate (Firebase ID token)
+        auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+        if not auth_header or not auth_header.lower().startswith("bearer "):
+            logger.warning("Auth failed: missing Authorization bearer token.")
+            raise HTTPException(status_code=401, detail="Missing Authorization bearer token")
+        id_token = auth_header.split(" ", 1)[1].strip()
+        if not id_token:
+            logger.warning("Auth failed: empty bearer token.")
+            raise HTTPException(status_code=401, detail="Missing Authorization bearer token")
+
+        try:
+            decoded = verify_firebase_token(id_token)
+        except Exception as e:
+            logger.warning(f"Auth failed: invalid or expired token. {e}")
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+        try:
+            await upsert_user(_manager.pool, decoded)
+        except Exception as e:
+            logger.error(f"Failed to upsert user: {e}")
+            raise HTTPException(status_code=500, detail="Failed to persist user")
+
         # Re-fetch graph with types to ensure it's available
         graph = _manager.get_graph()
         if not graph:
