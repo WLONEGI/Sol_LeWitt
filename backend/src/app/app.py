@@ -194,12 +194,7 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
             raise HTTPException(status_code=401, detail="Missing Authorization bearer token")
 
         try:
-            # Allow debug-token for verification (will be reverted after test)
-            if (os.environ.get("DEBUG") == "true" or True) and id_token == "debug-token":
-                decoded = {"uid": "debug-user", "email": "debug@example.com", "name": "Debug User"}
-                logger.info("Using debug-token for authentication verification.")
-            else:
-                decoded = verify_firebase_token(id_token)
+            decoded = verify_firebase_token(id_token)
         except Exception as e:
             logger.warning(f"Auth failed: invalid or expired token. {e}")
             raise HTTPException(status_code=401, detail="Invalid or expired token")
