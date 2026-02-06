@@ -18,7 +18,7 @@ export function TaskAccordion({ steps }: TaskAccordionProps) {
     if (steps.length === 0) return null;
 
     return (
-        <div className="w-full max-w-3xl mx-auto my-4">
+        <div className="w-full max-w-3xl mx-auto my-1">
             <div className="w-full space-y-0">
                 {steps.map((step, index) => (
                     <TaskStepItem

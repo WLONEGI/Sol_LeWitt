@@ -1,257 +1,320 @@
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { ChatItem } from "./chat-item"
-import { TaskAccordion } from "./task-accordion"
-import { PlanStatusChecklist } from "./plan-status-checklist"
-import { ArtifactButton } from "./artifact-button"
-import { WorkerResult } from "./worker-result"
-import { ResearchStatusButton } from "./message/research-status-button"
-import { ArtifactPreview } from "./artifact-preview"
-import { CodeExecutionBlock } from "./code-execution-block"
-import { SlideOutline } from "./slide-outline"
-import { TimelineEvent } from "../types/timeline"
-import { useEffect, useRef, useMemo } from "react"
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { ChatItem } from "./chat-item";
+import { TaskAccordion } from "./task-accordion";
+import { ArtifactButton } from "./artifact-button";
+import { WorkerResult } from "./worker-result";
+import { ResearchStatusButton } from "./message/research-status-button";
+import { ArtifactPreview } from "./artifact-preview";
+import { CodeExecutionBlock } from "./code-execution-block";
+import { SlideOutline } from "./slide-outline";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { cn } from "@/lib/utils";
+import { CheckCircle2, ChevronDown, ChevronUp, Circle, Loader2 } from "lucide-react";
+import { TimelineEvent } from "../types/timeline";
+import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
+
+type PlanStepStatus = "pending" | "in_progress" | "completed";
 
 interface ChatListProps {
     timeline: TimelineEvent[];
-    latestOutline?: any; // Added
+    latestPlan?: any;
+    latestOutline?: any;
     latestSlideDeck?: any;
     isLoading?: boolean;
-    status?: 'ready' | 'submitted' | 'streaming' | 'error';
+    status?: "ready" | "submitted" | "streaming" | "error";
     className?: string;
 }
 
-export function ChatList({ timeline, latestOutline, latestSlideDeck, isLoading, status, className }: ChatListProps) {
-    const bottomRef = useRef<HTMLDivElement>(null);
+type TimelineRenderEntry =
+    | { kind: "item"; key: string; item: TimelineEvent }
+    | {
+        kind: "step_group";
+        key: string;
+        stepId: string;
+        title: string;
+        items: TimelineEvent[];
+        status: PlanStepStatus;
+    };
 
-    // Auto-scroll on new items
+export function ChatList({
+    timeline,
+    latestPlan,
+    latestOutline: _latestOutline,
+    latestSlideDeck: _latestSlideDeck,
+    isLoading,
+    status,
+    className,
+}: ChatListProps) {
+    const scrollAreaRef = useRef<HTMLDivElement | null>(null);
+    const viewportRef = useRef<HTMLElement | null>(null);
+    const shouldAutoScrollRef = useRef(true);
+    const NEAR_BOTTOM_THRESHOLD = 120;
+
     useEffect(() => {
-        if (isLoading) return;
-        bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+        const root = scrollAreaRef.current;
+        if (!root) return;
+        const viewport = root.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]');
+        if (!viewport) return;
+
+        viewportRef.current = viewport;
+        const updateAutoScrollState = () => {
+            const distance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+            shouldAutoScrollRef.current = distance <= NEAR_BOTTOM_THRESHOLD;
+        };
+
+        updateAutoScrollState();
+        viewport.addEventListener("scroll", updateAutoScrollState, { passive: true });
+        return () => {
+            viewport.removeEventListener("scroll", updateAutoScrollState);
+            if (viewportRef.current === viewport) {
+                viewportRef.current = null;
+            }
+        };
+    }, []);
+
+    useEffect(() => {
+        const viewport = viewportRef.current;
+        if (!viewport) return;
+        if (!shouldAutoScrollRef.current) return;
+        viewport.scrollTo({
+            top: viewport.scrollHeight,
+            behavior: isLoading ? "auto" : "smooth",
+        });
     }, [timeline, isLoading]);
 
-    // Enhanced timeline with outline injection
-    const processedTimeline = useMemo(() => {
-        const items = [...timeline];
-        if (latestOutline) {
-            items.push({
-                id: 'current-slide-outline',
-                type: 'slide_outline',
-                timestamp: Date.now(),
-                slides: latestOutline.slides,
-                title: latestOutline.title
-            } as any);
-        }
-        if (latestSlideDeck) {
-            items.push({
-                id: 'current-slide-deck',
-                type: 'artifact',
-                timestamp: Date.now() + 1,
-                artifactId: latestSlideDeck.artifactId,
-                title: latestSlideDeck.title,
-                kind: 'slide_deck',
-                slides: latestSlideDeck.slides,
-                status: latestSlideDeck.status,
-                pdf_url: latestSlideDeck.pdf_url
-            } as any);
-        }
-        return items;
-    }, [timeline, latestOutline, latestSlideDeck]);
+    const processedTimeline = useMemo(() => [...timeline], [timeline]);
 
     const lastMessageId = useMemo(() => {
         for (let i = processedTimeline.length - 1; i >= 0; i--) {
             const item = processedTimeline[i];
-            if (item.type === 'message') return item.id;
+            if (item.type === "message") return item.id;
         }
         return undefined;
     }, [processedTimeline]);
 
-    const lastMessageEvent = useMemo(() => {
-        for (let i = processedTimeline.length - 1; i >= 0; i--) {
-            const item = processedTimeline[i];
-            if (item.type === 'message') return item;
-        }
-        return undefined;
+    const isLastPartReasoning = useMemo(() => {
+        const lastMessage = [...processedTimeline].reverse().find((item) => item.type === "message");
+        if (!lastMessage?.message?.parts) return false;
+        const parts = lastMessage.message.parts;
+        const lastPart = parts[parts.length - 1];
+        return lastPart?.type === "reasoning";
     }, [processedTimeline]);
 
-    const lastAssistantMessage = useMemo(() => {
-        for (let i = processedTimeline.length - 1; i >= 0; i--) {
-            const item = processedTimeline[i];
-            if (item.type === 'message' && item.message?.role === 'assistant') return item;
+    const shouldRenderPendingAssistant = Boolean(isLoading && !isLastPartReasoning);
+    const pendingLabel = status === "streaming" ? "Generating..." : "Thinking...";
+
+    const planStepStatusById = useMemo(() => {
+        const statusMap = new Map<string, PlanStepStatus>();
+        const steps = Array.isArray(latestPlan?.plan) ? latestPlan.plan : [];
+        steps.forEach((step: any, index: number) => {
+            const stepId = String(step?.id ?? index);
+            const rawStatus = step?.status;
+            const normalized: PlanStepStatus =
+                rawStatus === "in_progress" || rawStatus === "pending" || rawStatus === "completed"
+                    ? rawStatus
+                    : "pending";
+            statusMap.set(stepId, normalized);
+        });
+        return statusMap;
+    }, [latestPlan]);
+
+    const renderEntries = useMemo<TimelineRenderEntry[]>(() => {
+        const entries: TimelineRenderEntry[] = [];
+        let currentGroup:
+            | { stepId: string; title: string; items: TimelineEvent[] }
+            | null = null;
+
+        const pushGroup = (group: { stepId: string; title: string; items: TimelineEvent[] }, isLastGroup: boolean) => {
+            const statusFromPlan = planStepStatusById.get(group.stepId);
+            const fallbackStatus: PlanStepStatus =
+                statusFromPlan ?? (isLastGroup && isLoading ? "in_progress" : "completed");
+
+            entries.push({
+                kind: "step_group",
+                key: `step-${group.stepId}-${entries.length}`,
+                stepId: group.stepId,
+                title: group.title,
+                items: group.items,
+                status: fallbackStatus,
+            });
+        };
+
+        processedTimeline.forEach((item, idx) => {
+            if (item.type === "plan_step_marker") {
+                if (currentGroup) {
+                    pushGroup(currentGroup, false);
+                }
+                currentGroup = {
+                    stepId: item.stepId,
+                    title: item.title,
+                    items: [],
+                };
+                return;
+            }
+
+            if (item.type === "plan_step_end_marker") {
+                if (currentGroup) {
+                    pushGroup(currentGroup, false);
+                    currentGroup = null;
+                }
+                return;
+            }
+
+            if (currentGroup) {
+                currentGroup.items.push(item);
+                return;
+            }
+
+            entries.push({
+                kind: "item",
+                key: `item-${item.id}-${idx}`,
+                item,
+            });
+        });
+
+        if (currentGroup) {
+            pushGroup(currentGroup, true);
         }
-        return undefined;
-    }, [processedTimeline]);
 
-    const assistantMessageText = useMemo(() => {
-        const msg = lastAssistantMessage?.message;
-        if (!msg) return '';
-        if (msg.content) return msg.content;
-        if (!msg.parts) return '';
-        return msg.parts
-            .filter((part: any) => part?.type === 'text' && typeof part.text === 'string')
-            .map((part: any) => part.text)
-            .join('');
-    }, [lastAssistantMessage]);
+        return entries;
+    }, [isLoading, planStepStatusById, processedTimeline]);
 
-    const assistantHasReasoning = useMemo(() => {
-        const msg = lastAssistantMessage?.message;
-        if (!msg?.parts) return false;
-        return msg.parts.some(
-            (part: any) => part?.type === 'reasoning' && typeof part.text === 'string'
-        );
-    }, [lastAssistantMessage]);
+    const renderTimelineItem = (item: TimelineEvent, key: string): ReactNode => {
+        const isLastMessage = item.type === "message" && item.id === lastMessageId;
 
-    const shouldRenderPendingAssistant = Boolean(
-        isLoading &&
-            (
-                !lastAssistantMessage ||
-                lastMessageEvent?.message?.role === 'user' ||
-                (assistantMessageText.length === 0 && !assistantHasReasoning)
-            )
-    );
-    const pendingLabel = status === 'streaming' ? 'Generating...' : 'Thinking...';
+        if (item.type === "message") {
+            const msg = item.message;
+            return (
+                <div key={key} className="flex flex-col gap-2">
+                    <ChatItem
+                        role={msg.role}
+                        content={msg.content}
+                        parts={msg.parts}
+                        name={msg.name}
+                        avatar={msg.avatar}
+                        toolInvocations={msg.toolInvocations}
+                        isStreaming={isLastMessage && msg.role === "assistant" && isLoading}
+                    />
+                </div>
+            );
+        }
+
+        if (item.type === "process_step") {
+            return <TaskAccordion key={key} steps={[item.step]} />;
+        }
+
+        if (item.type === "worker_result") {
+            return (
+                <WorkerResult
+                    key={key}
+                    role={item.role}
+                    summary={item.summary}
+                    status={item.status}
+                />
+            );
+        }
+
+        if (item.type === "artifact") {
+            if ((item as any).kind === "slide_deck") {
+                return (
+                    <div key={key} className="flex flex-col gap-2">
+                        <ChatItem
+                            role="assistant"
+                            content=""
+                            name="Visualizer"
+                            artifact={{
+                                kind: "slide_deck",
+                                id: item.artifactId,
+                                title: item.title,
+                                slides: (item as any).slides,
+                                status: (item as any).status,
+                            }}
+                            isStreaming={(item as any).status === "streaming"}
+                        />
+                    </div>
+                );
+            }
+
+            return (
+                <div key={key} className="flex flex-col gap-1 pl-4 md:pl-10">
+                    <ArtifactButton
+                        artifactId={item.artifactId}
+                        title={item.title}
+                        icon={item.icon}
+                    />
+                    {item.previewUrls && item.previewUrls.length > 0 && (
+                        <ArtifactPreview
+                            previewUrls={item.previewUrls}
+                            title={item.title}
+                            artifactId={item.artifactId}
+                        />
+                    )}
+                </div>
+            );
+        }
+
+        if (item.type === "code_execution") {
+            return (
+                <CodeExecutionBlock
+                    key={key}
+                    code={item.code}
+                    language={item.language}
+                    status={item.status}
+                    result={item.result}
+                    toolCallId={item.toolCallId}
+                />
+            );
+        }
+
+        if (item.type === "slide_outline") {
+            return (
+                <div key={key} className="flex flex-col gap-1">
+                    <SlideOutline
+                        slides={item.slides}
+                        title={(item as any).title}
+                        approvalStatus={isLoading ? "loading" : "idle"}
+                    />
+                </div>
+            );
+        }
+
+        if (item.type === "research_report") {
+            return (
+                <div key={key} className="flex w-full gap-4 p-4 justify-start">
+                    <div className="flex flex-col items-start w-full">
+                        <ResearchStatusButton
+                            taskId={item.taskId}
+                            perspective={item.perspective}
+                            status={item.status}
+                        />
+                    </div>
+                </div>
+            );
+        }
+
+        return null;
+    };
 
     return (
-        <ScrollArea className={className}>
-            <div className="flex flex-col gap-6 p-4 pb-32 max-w-4xl mx-auto w-full">
-                {processedTimeline.map((item: any) => {
-                    const isLastMessage = item.type === 'message' && item.id === lastMessageId;
-
-                    // 1. User/Assistant Message
-                    if (item.type === 'message') {
-                        const msg = item.message;
-
-                        // Extract reasoning from parts (Standard Protocol) or fallback to custom property
-                        const reasoningPart = msg.parts?.find((p: any) => p.type === 'reasoning');
-                        const reasoningText = reasoningPart && 'text' in reasoningPart
-                            ? (reasoningPart as any).text
-                            : (msg as any).reasoning;
-
-                        return (
-                            <div key={item.id} className="flex flex-col gap-2">
-                                <ChatItem
-                                    role={msg.role}
-                                    content={msg.content}
-                                    parts={msg.parts}
-                                    name={msg.name}
-                                    avatar={msg.avatar}
-                                    toolInvocations={msg.toolInvocations}
-                                    isStreaming={isLastMessage && msg.role === 'assistant' && isLoading}
-                                />
-                            </div>
-                        );
+        <ScrollArea ref={scrollAreaRef} className={className}>
+            <div className="flex flex-col gap-1 p-4 pb-32 max-w-5xl mx-auto w-full">
+                {renderEntries.map((entry) => {
+                    if (entry.kind === "item") {
+                        return renderTimelineItem(entry.item, entry.key);
                     }
 
-                    // 2. Process Step (Accordion)
-                    if (item.type === 'process_step') {
-                        return (
-                            <TaskAccordion key={item.id} steps={[item.step]} />
-                        );
-                    }
-
-                    // 3. Worker Result
-                    if (item.type === 'worker_result') {
-                        return (
-                            <WorkerResult
-                                key={item.id}
-                                role={item.role}
-                                summary={item.summary}
-                                status={item.status}
-                            />
-                        );
-                    }
-
-                    // 4. Artifact / Images
-                    if (item.type === 'artifact') {
-                        // Check for slide_deck artifact to use specialized ChatItem view
-                        if ((item as any).kind === 'slide_deck') {
-                            return (
-                                <div key={item.id} className="flex flex-col gap-2">
-                                    <ChatItem
-                                        role="assistant"
-                                        content="" // No text content for slide deck itself
-                                        name="Visualizer" // Or generic robot name
-                                        artifact={{
-                                            kind: 'slide_deck',
-                                            id: item.artifactId,
-                                            title: item.title,
-                                            slides: (item as any).slides,
-                                            status: (item as any).status
-                                        }}
-                                        isStreaming={(item as any).status === 'streaming'}
-                                    />
-                                </div>
-                            )
-                        }
-
-                        return (
-                            <div key={item.id} className="flex flex-col gap-1 pl-4 md:pl-10">
-                                <ArtifactButton
-                                    artifactId={item.artifactId}
-                                    title={item.title}
-                                    icon={item.icon}
-                                />
-                                {item.previewUrls && item.previewUrls.length > 0 && (
-                                    <ArtifactPreview
-                                        previewUrls={item.previewUrls}
-                                        title={item.title}
-                                        artifactId={item.artifactId}
-                                    />
-                                )}
-                            </div>
-                        );
-                    }
-
-                    // 5. Plan Update - Handled by FixedPlanOverlay in ChatInterface
-                    /*
-                    if (item.type === 'plan_update') {
-                        // ...
-                    }
-                    */
-
-                    // 6. Code Execution Artifact
-                    if (item.type === 'code_execution') {
-                        return (
-                            <CodeExecutionBlock
-                                key={item.id}
-                                code={item.code}
-                                language={item.language}
-                                status={item.status}
-                                result={item.result}
-                                toolCallId={item.toolCallId}
-                            />
-                        )
-                    }
-
-                    if (item.type === 'slide_outline') {
-                        // Similar logic as plan_update, look for pending approve_outline tool call
-                        const approvalTool = null;
-
-                        return (
-                            <div key={item.id} className="flex flex-col gap-1">
-                                <SlideOutline
-                                    slides={item.slides}
-                                    title={item.title}
-                                    approvalStatus={isLoading ? 'loading' : 'idle'}
-                                />
-                            </div>
-                        );
-                    }
-
-                    if (item.type === 'research_report') {
-                        return (
-                            <div key={item.id} className="flex w-full gap-4 p-4 justify-start">
-                                <div className="flex flex-col items-start w-full">
-                                    <ResearchStatusButton
-                                        taskId={item.taskId}
-                                        perspective={item.perspective}
-                                        status={item.status}
-                                    />
-                                </div>
-                            </div>
-                        );
-                    }
-
-                    return null;
+                    return (
+                        <PlanStepSection
+                            key={entry.key}
+                            stepId={entry.stepId}
+                            title={entry.title}
+                            status={entry.status}
+                        >
+                            {entry.items.map((item, idx) =>
+                                renderTimelineItem(item, `${entry.key}-item-${idx}`)
+                            )}
+                        </PlanStepSection>
+                    );
                 })}
 
                 {shouldRenderPendingAssistant && (
@@ -265,9 +328,69 @@ export function ChatList({ timeline, latestOutline, latestSlideDeck, isLoading, 
                         />
                     </div>
                 )}
-
-                <div ref={bottomRef} />
             </div>
         </ScrollArea>
-    )
+    );
+}
+
+interface PlanStepSectionProps {
+    stepId: string;
+    title: string;
+    status: PlanStepStatus;
+    children: ReactNode;
+}
+
+function PlanStepSection({ stepId, title, status, children }: PlanStepSectionProps) {
+    const [open, setOpen] = useState(status === "in_progress");
+
+    useEffect(() => {
+        if (status === "in_progress") {
+            setOpen(true);
+        }
+    }, [status]);
+
+    const statusIcon = (() => {
+        if (status === "completed") {
+            return <CheckCircle2 className="h-4 w-4 text-emerald-500" />;
+        }
+        if (status === "in_progress") {
+            return <Loader2 className="h-4 w-4 animate-spin text-indigo-500" />;
+        }
+        return <Circle className="h-4 w-4 text-slate-300" />;
+    })();
+
+    return (
+        <Collapsible
+            open={open}
+            onOpenChange={setOpen}
+            className="relative w-full"
+            data-step-id={stepId}
+        >
+            <div className={cn(
+                "absolute left-[14px] top-9 bottom-2 border-l border-dashed border-slate-300/80",
+                !open && "bottom-auto h-3"
+            )} />
+            <CollapsibleTrigger asChild>
+                <button
+                    type="button"
+                    className="flex w-full items-center gap-3 py-1 text-left hover:opacity-90 transition-opacity"
+                >
+                    <span className="relative z-10 flex h-7 w-7 items-center justify-center rounded-full bg-white border border-slate-200 shadow-sm">
+                        {statusIcon}
+                    </span>
+                    <span className="flex-1 min-w-0 text-[18px] leading-tight font-semibold text-slate-900 truncate">
+                        {title}
+                    </span>
+                    {open ? (
+                        <ChevronUp className="h-5 w-5 text-slate-500" />
+                    ) : (
+                        <ChevronDown className="h-5 w-5 text-slate-500" />
+                    )}
+                </button>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+                <div className="pl-10 pb-1 flex flex-col gap-1">{children}</div>
+            </CollapsibleContent>
+        </Collapsible>
+    );
 }

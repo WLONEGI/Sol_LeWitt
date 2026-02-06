@@ -21,12 +21,24 @@
 ### セッション履歴の取得
 - **Endpoint**: `/api/history`
 - **Usage**: `src/features/chat/store/chat.ts` の `fetchHistory`
+- **Auth**: `Authorization: Bearer <Firebase ID Token>` 必須
 - **Response**: `Array<{ id: string, title: string, updatedAt: string }>`
 
-### 特定スレッドのメッセージ読込
+### 特定スレッドの復元スナップショット読込
+- **Endpoint**: `/api/threads/{threadId}/snapshot`
+- **Usage**: `src/features/chat/components/chat-interface.tsx` の初期ロード
+- **Auth**: 必須
+- **Response**:
+  - `messages`: `UIMessage[]`
+  - `plan`: 実行プラン
+  - `artifacts`: `Record<string, Artifact>`
+  - `ui_events`: タイムライン再現用 `data-*` イベント列
+
+### 旧フォールバック（互換）
 - **Endpoint**: `/api/threads/{threadId}/messages`
-- **Usage**: `src/features/chat/chat-interface.tsx` 内の `useEffect`
-- **Response**: `Message[]` (LangChain 互換形式)
+- **Usage**: `snapshot` が利用できない場合のみ
+- **Auth**: 必須
+- **Response**: `Message[]` (UIMessage 互換形式)
 
 ## 3. 型定義 (TypeScript)
 フロントエンドでのデータ安全性は `src/features/chat/types/` および `src/features/preview/store/artifact.ts` で定義されたインターフェースにより担保されています。

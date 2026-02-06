@@ -8,6 +8,19 @@ LangGraph の `AsyncPostgresSaver` を使用し、以下のテーブルで状態
 - **`checkpoints_blobs`**: 大容量データ（Artifacts等）の効率的な格納。
 - **`checkpoints_writes`**: 非同期処理での書き込みログ。
 
+加えて、アプリケーションの認証・履歴管理用に以下を利用します。
+
+- **`users`**: Firebase ユーザー情報 (`uid` 主キー)。
+- **`threads`**: スレッドメタデータ。
+  - `thread_id` (PK)
+  - `owner_uid` (FK -> `users.uid`)
+  - `title`, `summary`, `created_at`, `updated_at`
+
+`threads.owner_uid` により、履歴取得 API はユーザー単位でスコープされます。
+LangGraph のチェックポイント参照時は `checkpoint_ns = owner_uid` を設定し、同一 `thread_id` でもユーザー間で状態が分離されます。
+
+既存データ移行時は `scripts/backfill_thread_ownership.py` を使い、`threads.owner_uid` 更新と `checkpoint_ns=''` から `checkpoint_ns=<owner_uid>` へのコピー/削除を実施します。
+
 ### 認証設定
 `POSTGRES_DB_URI` 環境変数を使用します。Cloud Run 環境下では、`CLOUD_SQL_CONNECTION_NAME` が設定されている場合に自動的に Unix Domain Socket 接続へと切り替わります。
 

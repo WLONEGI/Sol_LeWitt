@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { devtools, persist } from 'zustand/middleware';
 
 export interface Artifact {
     id: string;
@@ -22,32 +23,42 @@ interface ArtifactState {
     updateArtifactContent: (id: string, content: any) => void;
 }
 
-export const useArtifactStore = create<ArtifactState>((set) => ({
-    currentArtifact: null,
-    activeContextId: null,
-    isPreviewOpen: false,
-    artifacts: {},
-    setArtifact: (artifact) => set({ currentArtifact: artifact }),
-    setActiveContextId: (id) => set({ activeContextId: id }),
-    setPreviewOpen: (open) => set({ isPreviewOpen: open }),
-    setArtifacts: (artifacts) => set({ artifacts }),
-    upsertArtifact: (artifact) => set((state) => {
-        const existing = state.artifacts[artifact.id];
-        const mergedContent =
-            existing && typeof existing.content === 'object' && typeof artifact.content === 'object'
-                ? { ...existing.content, ...artifact.content }
-                : (artifact.content ?? existing?.content);
-        const merged = { ...existing, ...artifact, content: mergedContent };
-        const artifacts = { ...state.artifacts, [artifact.id]: merged };
-        const currentArtifact = state.currentArtifact?.id === artifact.id ? merged : state.currentArtifact;
-        return { artifacts, currentArtifact };
-    }),
-    updateArtifactContent: (id, content) => set((state) => {
-        const artifacts = { ...state.artifacts };
-        if (artifacts[id]) {
-            artifacts[id] = { ...artifacts[id], content };
-        }
-        const currentArtifact = state.currentArtifact?.id === id ? { ...state.currentArtifact, content } : state.currentArtifact;
-        return { artifacts, currentArtifact };
-    }),
-}));
+export const useArtifactStore = create<ArtifactState>()(
+    devtools(
+        persist(
+            (set) => ({
+                currentArtifact: null,
+                activeContextId: null,
+                isPreviewOpen: false,
+                artifacts: {},
+                setArtifact: (artifact) => set({ currentArtifact: artifact }),
+                setActiveContextId: (id) => set({ activeContextId: id }),
+                setPreviewOpen: (open) => set({ isPreviewOpen: open }),
+                setArtifacts: (artifacts) => set({ artifacts }),
+                upsertArtifact: (artifact) => set((state) => {
+                    const existing = state.artifacts[artifact.id];
+                    const mergedContent =
+                        existing && typeof existing.content === 'object' && typeof artifact.content === 'object'
+                            ? { ...existing.content, ...artifact.content }
+                            : (artifact.content ?? existing?.content);
+                    const merged = { ...existing, ...artifact, content: mergedContent };
+                    const artifacts = { ...state.artifacts, [artifact.id]: merged };
+                    const currentArtifact = state.currentArtifact?.id === artifact.id ? merged : state.currentArtifact;
+                    return { artifacts, currentArtifact };
+                }),
+                updateArtifactContent: (id, content) => set((state) => {
+                    const artifacts = { ...state.artifacts };
+                    if (artifacts[id]) {
+                        artifacts[id] = { ...artifacts[id], content };
+                    }
+                    const currentArtifact = state.currentArtifact?.id === id ? { ...state.currentArtifact, content } : state.currentArtifact;
+                    return { artifacts, currentArtifact };
+                }),
+            }),
+            {
+                name: 'artifact-storage',
+                partialize: (state) => ({ artifacts: state.artifacts }),
+            }
+        )
+    )
+);

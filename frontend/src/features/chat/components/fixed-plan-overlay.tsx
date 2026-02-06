@@ -49,92 +49,101 @@ export function FixedPlanOverlay({
         steps.find(s => s.status === "pending") ||
         steps[steps.length - 1];
 
+    // Find the current index for the progress status
+    const activeStepIndex = steps.indexOf(activeStep) + 1;
+
     if (!data || !steps || steps.length === 0) return null;
 
     return (
-        <div className={cn("w-full max-w-3xl mx-auto mb-2 px-4", className)}>
+        <div className={cn("w-full max-w-5xl mx-auto", className)}>
             <Card className="overflow-hidden border-indigo-100/50 bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl shadow-sm transition-all duration-300 ease-in-out">
                 <Collapsible open={isExpanded} onOpenChange={setIsExpanded} className="flex flex-col-reverse">
                     {/* Collapsed/Header View (Bottom position) */}
-                    <div className="flex items-center justify-between py-1 px-3 gap-3">
+                    <div className="flex items-center justify-between py-0.5 px-2 gap-2">
                         {/* Status Icon Area */}
-                        <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
                             <div className="flex-shrink-0">
                                 {activeStep.status === "in_progress" ? (
                                     <div className="relative flex items-center justify-center w-4 h-4">
                                         <div className="absolute inset-0 rounded-full bg-indigo-500/20 animate-ping" />
-                                        <Circle className="h-3 w-3 text-indigo-600 animate-pulse fill-indigo-100" />
+                                        <Circle className="h-3.5 w-3.5 text-indigo-600 animate-pulse fill-indigo-100" />
                                     </div>
                                 ) : activeStep.status === "completed" ? (
-                                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
                                 ) : (
-                                    <Circle className="h-3.5 w-3.5 text-slate-300" />
+                                    <Circle className="h-4 w-4 text-slate-300" />
                                 )}
+
                             </div>
 
-                            {/* Unified Header Text: Always show Step X: Title */}
+                            {/* Unified Header Text: Just show Title */}
                             <div className="min-w-0 flex items-center gap-2">
-                                <span className="text-[11px] font-bold text-slate-700 dark:text-slate-200 truncate">
-                                    Step {activeStep.id}: {activeStep.title}
-                                </span>
-                                <span className="text-[9px] text-slate-400 font-medium whitespace-nowrap">
-                                    ({activeStep.id}/{totalSteps})
+                                <span className="text-sm font-sans font-semibold text-slate-700 dark:text-slate-200 truncate">
+                                    {activeStep.title}
                                 </span>
                             </div>
                         </div>
 
-                        {/* Toggle Button */}
-                        <CollapsibleTrigger asChild>
-                            <Button
-                                variant="ghost"
-                                size="sm"
-                                aria-label={isExpanded ? "Collapse plan" : "Expand plan"}
-                                className="h-5 w-5 p-0 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 transition-colors shrink-0"
-                            >
-                                {isExpanded ? (
-                                    <ChevronDown className="h-3 w-3" />
-                                ) : (
-                                    <ChevronUp className="h-3 w-3" />
-                                )}
-                            </Button>
-                        </CollapsibleTrigger>
+                        {/* Progress and Toggle Area */}
+                        <div className="flex items-center gap-1.5 shrink-0">
+                            <span className="text-[10px] font-medium text-slate-500 dark:text-slate-400">
+                                {activeStepIndex}/{totalSteps}
+                            </span>
+                            <CollapsibleTrigger asChild>
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    aria-label={isExpanded ? "Collapse plan" : "Expand plan"}
+                                    className="h-4 w-4 p-0 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 transition-colors shrink-0"
+                                >
+                                    {isExpanded ? (
+                                        <ChevronDown className="h-2.5 w-2.5" />
+                                    ) : (
+                                        <ChevronUp className="h-2.5 w-2.5" />
+                                    )}
+                                </Button>
+                            </CollapsibleTrigger>
+                        </div>
                     </div>
+
 
                     {/* Expanded Content (Top position) */}
                     <CollapsibleContent>
-                        <CardContent className="pb-0 pt-2 px-2 border-b border-indigo-50/50 dark:border-indigo-900/10 mb-0.5">
+                        <CardContent className="pb-0 pt-1 px-1.5 border-b border-indigo-50/50 dark:border-indigo-900/10 mb-0">
                             {/* Normal Order List (Step 1 -> N) */}
-                            <div className="max-h-[30vh] overflow-y-auto space-y-0.5 mb-2 pr-1 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
+                            <div className="max-h-[24vh] overflow-y-auto space-y-0.5 mb-1 pr-1 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
                                 {steps.map((step) => (
                                     <div
                                         key={step.id}
                                         className={cn(
-                                            "flex items-start gap-3 p-1.5 rounded-md transition-all",
+                                            "flex items-start gap-2 p-1 rounded-md transition-all",
                                             step.status === "in_progress" && "bg-indigo-50/50 dark:bg-indigo-950/30",
                                             step.status === "completed" && "opacity-60"
                                         )}
                                     >
                                         <div className="mt-0.5 flex-shrink-0">
                                             {step.status === "completed" ? (
-                                                <CheckCircle2 className="h-3 w-3 text-emerald-500" />
+                                                <CheckCircle2 className="h-2.5 w-2.5 text-emerald-500" />
                                             ) : step.status === "in_progress" ? (
-                                                <Circle className="h-3 w-3 text-indigo-500 animate-pulse fill-indigo-500/10" />
+                                                <Circle className="h-2.5 w-2.5 text-indigo-500 animate-pulse fill-indigo-500/10" />
                                             ) : (
-                                                <Circle className="h-3 w-3 text-slate-300 dark:text-slate-700" />
+                                                <Circle className="h-2.5 w-2.5 text-slate-300 dark:text-slate-700" />
                                             )}
                                         </div>
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-center justify-between gap-2">
                                                 <span className={cn(
-                                                    "text-[11px] font-medium",
+                                                    "text-sm font-sans font-medium",
                                                     step.status === "completed" ? "text-slate-500" : "text-slate-800 dark:text-slate-200"
                                                 )}>
                                                     {step.title}
                                                 </span>
                                             </div>
-                                            <p className="text-[9px] text-slate-500 dark:text-slate-400 mt-0.5 line-clamp-1 leading-tight">
+                                            <p className="text-xs font-sans text-slate-500 dark:text-slate-400 mt-0 line-clamp-1 leading-tight">
                                                 {step.description}
                                             </p>
+
+
                                         </div>
                                     </div>
                                 ))}

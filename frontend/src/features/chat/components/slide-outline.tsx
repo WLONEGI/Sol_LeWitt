@@ -34,7 +34,7 @@ export function SlideOutline({
         <div className={cn("w-full max-w-2xl my-4", className)}>
             <Accordion type="single" collapsible defaultValue="outline" className="border rounded-xl bg-card text-card-foreground shadow-sm overflow-hidden">
                 <AccordionItem value="outline" className="border-none">
-                    <AccordionTrigger className="flex items-center justify-between p-4 hover:bg-muted/30 transition-colors hover:no-underline pointer-events-auto">
+                    <AccordionTrigger className="flex items-center justify-between p-4 transition-colors hover:no-underline pointer-events-auto">
                         <div className="flex items-center gap-3">
                             <div className="flex items-center justify-center w-8 h-8 rounded-lg shadow-sm bg-primary text-primary-foreground">
                                 <Presentation className="w-4 h-4" />
@@ -54,7 +54,7 @@ export function SlideOutline({
                                     <div className="flex-shrink-0 mt-0.5">
                                         <div className={cn(
                                             "flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold transition-colors",
-                                            "bg-muted text-muted-foreground group-hover:bg-primary group-hover:text-primary-foreground"
+                                            "bg-foreground text-background"
                                         )}>
                                             {slide.slide_number}
                                         </div>
@@ -67,14 +67,6 @@ export function SlideOutline({
                                             <p className="text-sm text-muted-foreground leading-relaxed">
                                                 {slide.description}
                                             </p>
-                                        )}
-                                        {slide.key_message && (
-                                            <div className="mt-1 px-2.5 py-1.5 bg-primary/5 border border-primary/10 rounded-md">
-                                                <span className="text-xs font-semibold text-primary/80 uppercase tracking-wider block mb-0.5 text-[10px]">Key Message</span>
-                                                <p className="text-sm text-foreground/90 font-medium">
-                                                    {slide.key_message}
-                                                </p>
-                                            </div>
                                         )}
                                     </div>
                                 </div>

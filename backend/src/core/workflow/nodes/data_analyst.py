@@ -47,8 +47,8 @@ def _get_latest_artifact_by_suffix(artifacts: dict, suffix: str) -> dict | None:
     _, key = sorted(candidates, key=lambda x: x[0])[-1]
     return _safe_json_loads(artifacts.get(key))
 
-async def _get_thread_title(thread_id: str | None) -> str | None:
-    if not thread_id:
+async def _get_thread_title(thread_id: str | None, owner_uid: str | None) -> str | None:
+    if not thread_id or not owner_uid:
         return None
     try:
         from src.core.workflow.service import _manager
@@ -56,7 +56,10 @@ async def _get_thread_title(thread_id: str | None) -> str | None:
             return None
         async with _manager.pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT title FROM threads WHERE thread_id = %s", (thread_id,))
+                await cur.execute(
+                    "SELECT title FROM threads WHERE thread_id = %s AND owner_uid = %s",
+                    (thread_id, owner_uid),
+                )
                 row = await cur.fetchone()
                 if row and row[0]:
                     return row[0]
@@ -139,7 +142,8 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     )
 
     thread_id = config.get("configurable", {}).get("thread_id")
-    deck_title = await _get_thread_title(thread_id) or current_step.get("title") or "Untitled"
+    user_uid = config.get("configurable", {}).get("user_uid")
+    deck_title = await _get_thread_title(thread_id, user_uid) or current_step.get("title") or "Untitled"
     session_id = thread_id or str(uuid.uuid4())
     safe_title = _sanitize_filename(str(deck_title))
     output_prefix = f"generated_assets/{session_id}/{safe_title}"
@@ -232,7 +236,8 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
                     tool_name = tool_call.get("name")
                     tool_args = tool_call.get("args")
                     output = ""
-                    if tool_name == "python_repl":
+                    tool_key = (tool_name or "").lower()
+                    if tool_key == "python_repl":
                         code_text = _extract_python_code(tool_args)
                         if code_text:
                             code_block = f"\n# Run {round_index + 1}\n{code_text}\n"

@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     # ===========================
     CHROME_INSTANCE_PATH: str | None = Field(default=None)
     JINA_API_KEY: str | None = Field(default=None)
+    FIREBASE_PROJECT_ID: str | None = Field(default=None)
+    FIREBASE_SERVICE_ACCOUNT_JSON: str | None = Field(default=None)
 
     # ===========================
     # Utils Configuration

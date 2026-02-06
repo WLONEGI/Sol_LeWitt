@@ -113,7 +113,7 @@ def create_grounded_llm(
     
     # Grounded LLM use the reasoning model by default, so we usually want thinking enabled here if it's the reasoning model
     include_thoughts = (model == settings.REASONING_MODEL or model == settings.HIGH_REASONING_MODEL)
-    thinking_level = "high" if include_thoughts else None
+    thinking_level = "low" if include_thoughts else None
 
     logger.info(
         f"Creating Grounded LLM (Google Search: Static) for project={project}, "
@@ -167,13 +167,13 @@ def get_llm_by_type(llm_type: str, streaming: bool = True) -> ChatGoogleGenerati
     if llm_type == "reasoning":
         model = settings.REASONING_MODEL
         include_thoughts = True
-        thinking_level = "high"
+        thinking_level = "low"
     elif llm_type == "vision":
         model = settings.VL_MODEL
     elif llm_type == "high_reasoning":
         model = settings.HIGH_REASONING_MODEL
         include_thoughts = True
-        thinking_level = "high"
+        thinking_level = "low"
     else:  # basic / default
         model = settings.BASIC_MODEL
         include_thoughts = False

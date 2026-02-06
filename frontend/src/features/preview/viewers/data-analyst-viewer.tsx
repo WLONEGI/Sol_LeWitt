@@ -8,6 +8,9 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Check, Copy } from "lucide-react"
 
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
+
 interface DataAnalystViewerProps {
     content: any
     status?: string
@@ -43,7 +46,7 @@ export function DataAnalystViewer({ content, status }: DataAnalystViewerProps) {
 
     return (
         <div className="flex flex-col flex-1 min-h-0 bg-background">
-            <ScrollArea className="flex-1 p-6">
+            <ScrollArea className="flex-1 min-h-0 p-6">
                 <div className="flex flex-col gap-6 pb-12">
                     <Card>
                         <CardHeader>
@@ -96,27 +99,27 @@ export function DataAnalystViewer({ content, status }: DataAnalystViewerProps) {
                                     </span>
                                 )}
                                 <div className="inline-flex rounded-md border border-border overflow-hidden">
-                                <button
-                                    type="button"
-                                    onClick={() => setActiveTab("code")}
-                                    className={cn(
-                                        "px-3 py-1 text-xs font-medium border-r border-border",
-                                        activeTab === "code" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground"
-                                    )}
-                                >
-                                    Code
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setActiveTab("log")}
-                                    className={cn(
-                                        "px-3 py-1 text-xs font-medium",
-                                        activeTab === "log" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground"
-                                    )}
-                                >
-                                    Log
-                                </button>
-                            </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setActiveTab("code")}
+                                        className={cn(
+                                            "px-3 py-1 text-xs font-medium border-r border-border",
+                                            activeTab === "code" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground"
+                                        )}
+                                    >
+                                        Code
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setActiveTab("log")}
+                                        className={cn(
+                                            "px-3 py-1 text-xs font-medium",
+                                            activeTab === "log" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground"
+                                        )}
+                                    >
+                                        Log
+                                    </button>
+                                </div>
                                 <Button
                                     variant="outline"
                                     size="sm"
@@ -135,21 +138,31 @@ export function DataAnalystViewer({ content, status }: DataAnalystViewerProps) {
                                     <span>{activeTab === "code" ? "Python" : "Runtime Log"}</span>
                                     <span>{activeTab === "code" ? `${codeLines.length} lines` : `${logLines.length} lines`}</span>
                                 </div>
-                                <div className={cn(
-                                    "grid grid-cols-[auto_1fr] font-mono text-xs",
-                                    activeTab === "code" ? "bg-[#0b0f1a] text-[#d7def7]" : "bg-black/90 text-emerald-300"
-                                )}>
-                                    <div className="select-none text-[10px] text-white/30 px-3 py-2 border-r border-white/5 text-right">
-                                        {(activeTab === "code" ? codeLines : logLines).map((_, idx) => (
-                                            <div key={`ln-${idx}`}>{idx + 1}</div>
-                                        ))}
+                                {activeTab === "code" ? (
+                                    <div className="bg-[#1e1e1e] p-0 overflow-x-auto relative group">
+                                        <SyntaxHighlighter
+                                            language="python"
+                                            style={vscDarkPlus}
+                                            showLineNumbers={true}
+                                            customStyle={{ margin: 0, padding: '1rem', background: 'transparent' }}
+                                            codeTagProps={{ style: { fontSize: '0.75rem', fontFamily: 'var(--font-mono)', lineHeight: '1.5' } }}
+                                            lineNumberStyle={{ minWidth: '2.5em', paddingRight: '1em', color: 'rgba(255,255,255,0.3)', textAlign: 'right', fontSize: '10px' }}
+                                        >
+                                            {code || "コードがまだ出力されていません。"}
+                                        </SyntaxHighlighter>
                                     </div>
-                                    <div className="px-3 py-2 whitespace-pre-wrap break-words">
-                                        {activeTab === "code"
-                                            ? (code || "コードがまだ出力されていません。")
-                                            : (log || "ログがまだ出力されていません。")}
+                                ) : (
+                                    <div className="grid grid-cols-[auto_1fr] font-mono text-xs bg-black/90 text-emerald-300">
+                                        <div className="select-none text-[10px] text-white/30 px-3 py-2 border-r border-white/5 text-right">
+                                            {logLines.map((_: string, idx: number) => (
+                                                <div key={`ln-${idx}`}>{idx + 1}</div>
+                                            ))}
+                                        </div>
+                                        <div className="px-3 py-2 whitespace-pre-wrap break-words">
+                                            {log || "ログがまだ出力されていません。"}
+                                        </div>
                                     </div>
-                                </div>
+                                )}
                             </div>
                         </CardContent>
                     </Card>
@@ -172,7 +185,7 @@ export function DataAnalystViewer({ content, status }: DataAnalystViewerProps) {
                                 <div>
                                     <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Files</div>
                                     <ul className="list-disc pl-5 space-y-1">
-                                        {outputFiles.map((file, index) => (
+                                        {outputFiles.map((file: any, index: number) => (
                                             <li key={`${file?.url || "file"}-${index}`} className="text-xs break-all">
                                                 {file?.title || file?.url || "Untitled"}
                                             </li>

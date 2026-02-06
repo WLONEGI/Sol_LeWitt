@@ -37,6 +37,7 @@ def generate_image(prompt: str, seed: int | None = None, reference_image: bytes 
             model=model_name,
             project=settings.VERTEX_PROJECT_ID,
             location=settings.VERTEX_LOCATION,
+            image_config={"image_size": "2K"},
         )
 
         messages = []

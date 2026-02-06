@@ -1,8 +1,9 @@
 "use client"
 
-import { Image as ImageIcon, Maximize2, Loader2, CheckCircle2 } from "lucide-react"
+import { Layout, Loader2, Maximize2 } from "lucide-react"
 import { useArtifactStore } from "@/features/preview/stores/artifact"
 import { cn } from "@/lib/utils"
+import { motion } from "framer-motion"
 
 export interface SlideDeckItem {
     slide_number: number;
@@ -18,80 +19,72 @@ interface SlideDeckPreviewProps {
     isStreaming?: boolean;
 }
 
-export function SlideDeckPreview({ artifactId, slides, title = "Generated Slides", isStreaming }: SlideDeckPreviewProps) {
+export function SlideDeckPreview({ artifactId, slides, title = "Slides", isStreaming }: SlideDeckPreviewProps) {
     const { setActiveContextId, setPreviewOpen } = useArtifactStore();
 
     if (!slides || slides.length === 0) return null;
 
     const handleSlideClick = (slideIndex: number) => {
-        // Here we might want to open the viewer at a specific index
-        // For now, just open the artifact viewer
         setActiveContextId(artifactId);
         setPreviewOpen(true);
     };
 
     return (
-        <div className="flex flex-col gap-3 my-2 w-full max-w-md">
-            <div className="flex items-center justify-between px-1">
-                <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-2">
-                    <ImageIcon className="w-3 h-3" />
-                    {title}
-                </span>
-                {isStreaming && (
-                    <span className="flex items-center gap-1.5 text-xs text-emerald-400 animate-pulse">
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        Generating...
-                    </span>
-                )}
-            </div>
-
-            <div className="grid grid-cols-1 gap-3">
-                {slides.map((slide, idx) => (
-                    <div
-                        key={`${slide.slide_number}-${idx}`}
-                        className="group relative flex items-center gap-4 p-3 bg-black/20 border border-white/5 rounded-lg hover:bg-white/5 hover:border-white/10 transition-all cursor-pointer overflow-hidden animate-in slide-in-from-bottom-2 duration-500 fade-in"
-                        onClick={() => handleSlideClick(idx)}
-                    >
-                        {/* Thumbnail */}
-                        <div className="relative aspect-video h-16 w-28 shrink-0 rounded-md overflow-hidden bg-muted/20 border border-white/5 shadow-sm">
-                            {slide.image_url ? (
-                                <img
-                                    src={slide.image_url}
-                                    alt={`Slide ${slide.slide_number}`}
-                                    className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-110"
-                                />
-                            ) : (
-                                <div className="h-full w-full flex items-center justify-center text-[10px] text-muted-foreground">
-                                    Generating...
-                                </div>
-                            )}
-                            {/* Overlay Icon */}
-                            <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
-                                <Maximize2 className="w-4 h-4 text-white" />
+        <div className="flex flex-col gap-6 my-4 w-full max-w-2xl">
+            {slides.map((slide, idx) => (
+                <motion.div
+                    key={`${slide.slide_number}-${idx}`}
+                    initial={{ opacity: 0, scale: 0.95 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ duration: 0.4, delay: idx * 0.1 }}
+                    className="group relative flex flex-col bg-white/5 border border-white/10 rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-shadow active:scale-[0.99]"
+                    onClick={() => handleSlideClick(idx)}
+                >
+                    {/* Header: Title + Page Number */}
+                    <div className="flex items-center justify-between px-5 py-3 bg-white/5 border-b border-white/10">
+                        <div className="flex items-center gap-3 min-w-0">
+                            <div className="p-1.5 rounded-lg bg-primary/10 border border-primary/20">
+                                <Layout className="w-4 h-4 text-primary" />
                             </div>
+                            <span className="text-sm font-semibold text-foreground/90 truncate">
+                                {slide.title || title}
+                            </span>
                         </div>
+                        <div className="flex items-center gap-3 shrink-0">
+                            {slide.status === "generating" && (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin text-primary/60" />
+                            )}
+                            <span className="text-xs font-mono font-bold tracking-tighter text-muted-foreground bg-black/20 px-2 py-1 rounded-md border border-white/5">
+                                {slide.slide_number} / {slides.length}
+                            </span>
+                        </div>
+                    </div>
 
-                        {/* Info */}
-                        <div className="flex flex-col min-w-0 flex-1 gap-1">
-                            <div className="flex items-center justify-between">
-                                <span className="text-xs font-semibold text-white/90 truncate pr-2">
-                                    {slide.title || `Slide ${slide.slide_number}`}
-                                </span>
-                                <span className="text-[10px] font-mono text-muted-foreground bg-white/5 px-1.5 py-0.5 rounded-sm shrink-0 border border-white/5">
-                                    {String(slide.slide_number).padStart(2, '0')}
-                                </span>
+                    {/* Content: Main Image */}
+                    <div className="relative aspect-video w-full bg-muted/20 cursor-pointer overflow-hidden group">
+                        {slide.image_url ? (
+                            <img
+                                src={slide.image_url}
+                                alt={`Slide ${slide.slide_number}`}
+                                className="h-full w-full object-cover transition-transform duration-700 group-hover:scale-[1.02]"
+                            />
+                        ) : (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
+                                <Loader2 className="w-8 h-8 animate-spin text-primary/40" />
+                                <span className="text-xs text-muted-foreground animate-pulse">Generating Slide...</span>
                             </div>
+                        )}
 
-                            <div className="flex items-center gap-2">
-                                <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden">
-                                    <div className="h-full w-full bg-emerald-500/50 rounded-full" />
-                                </div>
-                                <CheckCircle2 className="w-3 h-3 text-emerald-500/80 shrink-0" />
+                        {/* Hover Overlay */}
+                        <div className="absolute inset-0 bg-black/10 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-all duration-300">
+                            <div className="p-3 rounded-full bg-white/10 backdrop-blur-md border border-white/20 shadow-xl transform translate-y-4 group-hover:translate-y-0 transition-transform duration-300">
+                                <Maximize2 className="w-5 h-5 text-white" />
                             </div>
                         </div>
                     </div>
-                ))}
-            </div>
+                </motion.div>
+            ))}
+
         </div>
     )
 }

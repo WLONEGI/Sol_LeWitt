@@ -1,10 +1,8 @@
 "use client"
 
-import { useId } from "react"
 import {
     Panel,
     Group,
-    Separator,
 } from "react-resizable-panels"
 import { useArtifactStore } from "@/features/preview/stores/artifact"
 import { cn } from "@/lib/utils"
@@ -21,7 +19,7 @@ export function ResizableLayout({
     navCollapsedSize = 0,
 }: ResizableLayoutProps) {
     const { isPreviewOpen } = useArtifactStore()
-    const id = useId()
+    const id = "resizable-layout"
 
     return (
         <Group
@@ -35,12 +33,12 @@ export function ResizableLayout({
                 defaultSize={isPreviewOpen ? defaultLayout[0] : 100}
                 minSize={30}
                 className={cn(
-                    "transition-all duration-500 ease-in-out relative z-10 flex flex-col items-center min-w-0 min-h-0 bg-background",
+                    "transition-all duration-500 ease-in-out relative z-10 flex flex-col min-w-0 min-h-0 bg-background",
                     !isPreviewOpen && "min-w-full",
                     isPreviewOpen ? "panel-mobile-hidden" : "panel-mobile-full"
                 )}
             >
-                <div className="w-full max-w-4xl h-full flex flex-col min-w-0 min-h-0">
+                <div className="w-full h-full flex flex-col min-w-0 min-h-0">
                     {children[0]}
                 </div>
             </Panel>

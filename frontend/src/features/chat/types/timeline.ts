@@ -17,7 +17,7 @@ export interface ExtendedMessage extends UIMessage {
     toolInvocations?: any[]; // AI SDK toolInvocations
 }
 
-export type TimelineItemType = 'message' | 'process_step' | 'worker_result' | 'artifact' | 'plan_update' | 'code_execution' | 'slide_outline' | 'research_report';
+export type TimelineItemType = 'message' | 'process_step' | 'worker_result' | 'artifact' | 'plan_update' | 'code_execution' | 'slide_outline' | 'research_report' | 'plan_step_marker' | 'plan_step_end_marker';
 
 export interface TimelineItem {
     id: string;
@@ -72,6 +72,7 @@ export interface CodeExecutionTimelineItem extends TimelineItem {
 
 export interface SlideOutlineTimelineItem extends TimelineItem {
     type: 'slide_outline';
+    title?: string;
     slides: {
         slide_number: number;
         title: string;
@@ -88,6 +89,17 @@ export interface ResearchReportTimelineItem extends TimelineItem {
     status: 'running' | 'completed';
 }
 
+export interface PlanStepMarkerTimelineItem extends TimelineItem {
+    type: 'plan_step_marker';
+    stepId: string;
+    title: string;
+}
+
+export interface PlanStepEndMarkerTimelineItem extends TimelineItem {
+    type: 'plan_step_end_marker';
+    stepId: string;
+}
+
 export type TimelineEvent =
     | MessageTimelineItem
     | ProcessTimelineItem
@@ -96,4 +108,6 @@ export type TimelineEvent =
     | PlanUpdateTimelineItem
     | CodeExecutionTimelineItem
     | SlideOutlineTimelineItem
-    | ResearchReportTimelineItem;
+    | ResearchReportTimelineItem
+    | PlanStepMarkerTimelineItem
+    | PlanStepEndMarkerTimelineItem;

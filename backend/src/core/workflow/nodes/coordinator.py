@@ -66,8 +66,9 @@ async def coordinator_node(state: State, config: RunnableConfig) -> Command[Lite
 
     if goto_destination == "planner":
         thread_id = config.get("configurable", {}).get("thread_id")
+        user_uid = config.get("configurable", {}).get("user_uid")
         title = result.title or _derive_fallback_title(state)  # CHANGED: deterministic fallback
-        saved_title = await _save_title(thread_id, title)
+        saved_title = await _save_title(thread_id, user_uid, title)
         if saved_title:
             await adispatch_custom_event(
                 "title_generated",
@@ -90,13 +91,17 @@ def _derive_fallback_title(state: State) -> str:
             return msg.content.strip()[:20]
     return "プレゼン資料"
 
-async def _save_title(thread_id: str | None, title: str | None) -> str | None:
+async def _save_title(
+    thread_id: str | None,
+    owner_uid: str | None,
+    title: str | None,
+) -> str | None:
     """Saves a title to DB if not already present. Returns the saved or existing title."""
     try:
         # Import internally to avoid circular dependency with service -> build_graph -> coordinator
         from src.core.workflow.service import _manager
         
-        if not thread_id or not title:
+        if not thread_id or not title or not owner_uid:
             return None
 
         # Check if pool is available
@@ -107,7 +112,10 @@ async def _save_title(thread_id: str | None, title: str | None) -> str | None:
         # 0. Check if title already exists (Idempotency) - Reuse pool
         async with _manager.pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT title FROM threads WHERE thread_id = %s", (thread_id,))
+                await cur.execute(
+                    "SELECT title FROM threads WHERE thread_id = %s AND owner_uid = %s",
+                    (thread_id, owner_uid),
+                )
                 row = await cur.fetchone()
                 if row and row[0]:
                     logger.info(f"Title already exists for thread {thread_id}, skipping generation.")
@@ -118,13 +126,22 @@ async def _save_title(thread_id: str | None, title: str | None) -> str | None:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    INSERT INTO threads (thread_id, title, summary) 
-                    VALUES (%s, %s, %s) 
+                    INSERT INTO threads (thread_id, owner_uid, title, summary) 
+                    VALUES (%s, %s, %s, %s) 
                     ON CONFLICT (thread_id) 
-                    DO UPDATE SET title = EXCLUDED.title, updated_at = NOW();
+                    DO UPDATE SET title = EXCLUDED.title, updated_at = NOW()
+                    WHERE threads.owner_uid = EXCLUDED.owner_uid;
                     """,
-                    (thread_id, title, "")
+                    (thread_id, owner_uid, title, "")
                 )
+                if cur.rowcount == 0:
+                    logger.warning(
+                        "Skip title update due to owner mismatch. thread_id=%s owner_uid=%s",
+                        thread_id,
+                        owner_uid,
+                    )
+                    return None
+                await conn.commit()
         
         logger.info(f"Title saved: {title}")
         return title

@@ -1,18 +1,25 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
     try {
+        const authHeader = req.headers.get("authorization") || req.headers.get("Authorization");
+        if (!authHeader || !authHeader.toLowerCase().startsWith("bearer ")) {
+            return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
+        }
+
         const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
         const response = await fetch(`${backendUrl}/api/history`, {
             headers: {
                 'Content-Type': 'application/json',
+                'Authorization': authHeader,
             },
             cache: 'no-store'
         });
 
         if (!response.ok) {
-            console.error(`History API proxy: Backend error (${backendUrl}): ${response.statusText}`);
-            return NextResponse.json([], { status: 200 }); // Return empty array instead of 500 to keep UI stable
+            const detail = await response.text();
+            console.error(`History API proxy: Backend error (${backendUrl}): ${response.status} ${detail}`);
+            return NextResponse.json({ detail: "Failed to load history" }, { status: response.status });
         }
 
         const data = await response.json();
@@ -20,6 +27,6 @@ export async function GET() {
     } catch (error) {
         const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000';
         console.error(`History API proxy error (Target: ${backendUrl}):`, error);
-        return NextResponse.json([], { status: 200 }); // Graceful fallback
+        return NextResponse.json({ detail: "Failed to load history" }, { status: 500 });
     }
 }

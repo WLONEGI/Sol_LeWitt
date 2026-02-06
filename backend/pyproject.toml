@@ -25,6 +25,7 @@ dependencies = [
     "langgraph-checkpoint-postgres>=3.0.4",
     "psycopg[binary,pool]>=3.3.2",
     "google-cloud-storage>=3.8.0",
+    "firebase-admin>=6.5.0",
     "pydantic-settings>=2.12.0",
     "pdf2image>=1.17.0",
     "Pillow>=12.1.0",

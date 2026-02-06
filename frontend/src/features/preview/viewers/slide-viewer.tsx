@@ -1,42 +1,60 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useMemo, useState } from "react"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Check, X, Loader2 } from "lucide-react"
+import { ChevronLeft, ChevronRight, Pencil } from "lucide-react"
 import { useArtifactStore } from "@/features/preview/stores/artifact"
 import { cn } from "@/lib/utils"
+import { InpaintCanvas } from "@/features/preview/components/inpaint-canvas"
 
 interface SlideViewerProps {
     content: any // Expecting string (URL) or object with url
     imageId?: string
 }
 
-interface Rect {
-    x: number
-    y: number
-    w: number
-    h: number
+function getVersionState(content: any) {
+    const baseUrl = typeof content === "string" ? content : (content?.url || content?.image_url || null)
+    const versions = Array.isArray(content?.image_versions)
+        ? content.image_versions.filter(Boolean)
+        : (baseUrl ? [baseUrl] : [])
+    let currentIndex = Number.isInteger(content?.current_version)
+        ? content.current_version
+        : (versions.length > 0 ? versions.length - 1 : 0)
+    if (versions.length === 0) {
+        return { url: baseUrl, versions: [], currentIndex: 0 }
+    }
+    if (currentIndex < 0 || currentIndex >= versions.length) {
+        currentIndex = versions.length - 1
+    }
+    const url = versions[currentIndex] ?? baseUrl
+    return { url, versions, currentIndex }
+}
+
+function buildVersionedContent(content: any, url: string, versions: string[], currentIndex: number) {
+    if (!content || typeof content === "string") {
+        return {
+            url,
+            image_url: url,
+            image_versions: versions,
+            current_version: currentIndex,
+        }
+    }
+    return {
+        ...content,
+        url,
+        image_url: url,
+        image_versions: versions,
+        current_version: currentIndex,
+    }
 }
 
 export function SlideViewer({ content, imageId }: SlideViewerProps) {
-    const imageUrl = typeof content === 'string' ? content : (content?.url || content?.image_url);
     const { updateArtifactContent } = useArtifactStore()
 
-    // Interaction State
-    const [selection, setSelection] = useState<Rect | null>(null)
-    const [isDrawing, setIsDrawing] = useState(false)
-    const [startPoint, setStartPoint] = useState<{ x: number, y: number } | null>(null)
-    const [prompt, setPrompt] = useState("")
-    const [isSubmitting, setIsSubmitting] = useState(false)
+    const versionState = useMemo(() => getVersionState(content), [content])
+    const imageUrl = versionState.url
 
-    const containerRef = useRef<HTMLDivElement>(null)
-
-    // Reset selection when image changes
-    useEffect(() => {
-        setSelection(null)
-        setPrompt("")
-    }, [imageUrl])
+    const [isEditing, setIsEditing] = useState(false)
 
     if (!imageUrl) {
         return (
@@ -47,86 +65,31 @@ export function SlideViewer({ content, imageId }: SlideViewerProps) {
         )
     }
 
-    // Coordinates are in % (0-100) to be responsive
-    const getCoords = (e: React.MouseEvent) => {
-        if (!containerRef.current) return { x: 0, y: 0 }
-        const rect = containerRef.current.getBoundingClientRect()
-        const x = ((e.clientX - rect.left) / rect.width) * 100
-        const y = ((e.clientY - rect.top) / rect.height) * 100
-        return { x, y }
+    const handleVersionChange = (nextIndex: number) => {
+        if (!imageId) return
+        const { versions } = getVersionState(content)
+        if (!versions[nextIndex]) return
+        const nextUrl = versions[nextIndex]
+        updateArtifactContent(imageId, buildVersionedContent(content, nextUrl, versions, nextIndex))
     }
 
-    const handleMouseDown = (e: React.MouseEvent) => {
-        if (selection || isSubmitting) return;
-        const p = getCoords(e)
-        setStartPoint(p)
-        setIsDrawing(true)
-        setSelection({ x: p.x, y: p.y, w: 0, h: 0 })
-    }
-
-    const handleMouseMove = (e: React.MouseEvent) => {
-        if (!isDrawing || !startPoint) return
-        const p = getCoords(e)
-
-        // Calculate rect logic
-        const x = Math.min(p.x, startPoint.x)
-        const y = Math.min(p.y, startPoint.y)
-        const w = Math.abs(p.x - startPoint.x)
-        const h = Math.abs(p.y - startPoint.y)
-
-        setSelection({ x, y, w, h })
-    }
-
-    const handleMouseUp = () => {
-        if (isDrawing) {
-            setIsDrawing(false)
-            // If too small, cancel
-            if (selection && (selection.w < 1 || selection.h < 1)) {
-                setSelection(null)
-            }
+    const handleInpaintSubmit = async (prompt: string) => {
+        if (!imageId) return
+        const response = await fetch(`/api/image/${imageId}/inpaint`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt, image_url: imageUrl })
+        })
+        const data = await response.json()
+        if (!data?.new_image_url) {
+            alert(data?.message || "Request sent (Stub)")
+            return
         }
-    }
-
-    const handleClear = () => {
-        setSelection(null)
-        setPrompt("")
-    }
-
-    const handleSubmit = async () => {
-        if (!selection || !prompt || !imageId) return
-        setIsSubmitting(true)
-
-        try {
-            const response = await fetch(`/api/image/${imageId}/inpaint`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    rect: selection, // {x, y, w, h} in %
-                    prompt: prompt
-                })
-            })
-
-            const data = await response.json()
-            console.log("In-painting Response:", data)
-
-            if (data.new_image_url) {
-                // Update the artifact with the new image
-                // Assuming content structure: { ..., url: new_url } or just new_url string
-                const newContent = typeof content === 'string' ? data.new_image_url : { ...content, url: data.new_image_url }
-                updateArtifactContent(imageId, newContent)
-                handleClear()
-            } else {
-                // Stub behavior or error
-                alert(data.message || "Request sent (Stub)")
-                handleClear()
-            }
-
-        } catch (error) {
-            console.error("In-painting failed:", error)
-            alert("Failed to submit in-painting request")
-        } finally {
-            setIsSubmitting(false)
-        }
+        const current = getVersionState(content)
+        const baseVersions = current.versions.length > 0 ? current.versions : (current.url ? [current.url] : [])
+        const nextVersions = [...baseVersions, data.new_image_url]
+        const nextIndex = nextVersions.length - 1
+        updateArtifactContent(imageId, buildVersionedContent(content, data.new_image_url, nextVersions, nextIndex))
     }
 
     return (
@@ -135,74 +98,65 @@ export function SlideViewer({ content, imageId }: SlideViewerProps) {
 
                 {/* Image Container with Cinematic Glow */}
                 <div
-                    ref={containerRef}
-                    className="relative max-h-full max-w-full aspect-[16/9] shadow-2xl rounded-sm cursor-crosshair transition-transform duration-500 ease-out group-hover:scale-[1.01]"
+                    className="relative max-h-full max-w-full aspect-[16/9] shadow-2xl rounded-sm transition-transform duration-500 ease-out group-hover:scale-[1.01]"
                     style={{
                         boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 40px rgba(124, 58, 237, 0.1)"
                     }}
-                    onMouseDown={handleMouseDown}
-                    onMouseMove={handleMouseMove}
-                    onMouseUp={handleMouseUp}
-                    onMouseLeave={handleMouseUp}
                 >
-                    <img
-                        src={imageUrl}
-                        alt="Slide Preview"
-                        className={cn("h-full w-full object-contain pointer-events-none transition-opacity bg-black rounded-sm", isSubmitting && "opacity-50")}
-                    />
-
-                    {isSubmitting && (
-                        <div className="absolute inset-0 flex items-center justify-center text-white z-40 bg-black/40 backdrop-blur-sm">
-                            <Loader2 className="h-10 w-10 animate-spin text-primary" />
-                        </div>
+                    {isEditing ? (
+                        <InpaintCanvas
+                            imageUrl={imageUrl}
+                            onSubmit={handleInpaintSubmit}
+                            onCancel={() => setIsEditing(false)}
+                        />
+                    ) : (
+                        <img
+                            src={imageUrl}
+                            alt="Slide Preview"
+                            className={cn("h-full w-full object-contain pointer-events-none transition-opacity bg-black rounded-sm")}
+                        />
                     )}
 
-                    {/* Selection Overlay */}
-                    {selection && !isSubmitting && (
-                        <div
-                            className="absolute border-2 border-primary bg-primary/20 z-20 shadow-[0_0_15px_rgba(124,58,237,0.5)]"
-                            style={{
-                                left: `${selection.x}%`,
-                                top: `${selection.y}%`,
-                                width: `${selection.w}%`,
-                                height: `${selection.h}%`,
-                            }}
+                    <div className="absolute top-2 right-2 z-10 flex items-center gap-2 bg-black/50 border border-white/10 rounded-full px-2 py-1">
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 text-white/80 hover:text-white hover:bg-white/10"
+                            onClick={() => handleVersionChange(versionState.currentIndex - 1)}
+                            disabled={isEditing || versionState.currentIndex <= 0}
                         >
-                            {/* Prompt Bubble */}
-                            {!isDrawing && (
-                                <div className="absolute top-full left-0 mt-3 bg-black/80 backdrop-blur-md border border-white/10 rounded-xl shadow-2xl p-2 w-[300px] flex gap-2 animate-in fade-in zoom-in-95 z-30 slide-in-from-top-2">
-                                    <Input
-                                        autoFocus
-                                        placeholder="How to change this area?"
-                                        className="h-9 text-xs bg-white/5 border-white/5 focus-visible:ring-primary/50 text-white"
-                                        value={prompt}
-                                        onChange={(e) => setPrompt(e.target.value)}
-                                        onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
-                                    />
-                                    <Button size="icon" className="h-9 w-9 shrink-0 bg-primary hover:bg-primary/90" onClick={handleSubmit}>
-                                        <Check className="h-4 w-4" />
-                                    </Button>
-                                    <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 hover:bg-white/10 text-muted-foreground" onClick={handleClear}>
-                                        <X className="h-4 w-4" />
-                                    </Button>
-                                </div>
-                            )}
-                        </div>
-                    )}
+                            <ChevronLeft className="h-4 w-4" />
+                        </Button>
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 text-white/80 hover:text-white hover:bg-white/10"
+                            onClick={() => handleVersionChange(versionState.currentIndex + 1)}
+                            disabled={isEditing || versionState.currentIndex >= versionState.versions.length - 1}
+                        >
+                            <ChevronRight className="h-4 w-4" />
+                        </Button>
+                        <div className="w-px h-4 bg-white/10 mx-1" />
+                        <Button
+                            size="sm"
+                            className="h-6 px-2 text-xs bg-primary/90 hover:bg-primary text-white"
+                            onClick={() => setIsEditing(true)}
+                            disabled={isEditing || !imageId}
+                        >
+                            <Pencil className="h-3 w-3 mr-1" />
+                            部分修正
+                        </Button>
+                    </div>
                 </div>
             </div>
 
-            {/* Toolbar / Status - Floating Glass */}
-            <div className="absolute bottom-6 left-1/2 -translate-x-1/2 min-w-[300px] h-12 border border-white/10 rounded-full glass-panel flex items-center px-6 justify-between shrink-0 shadow-lg text-white/80 transition-all duration-300 hover:bg-black/40">
-                <span className="text-xs font-medium tracking-wide">
-                    {selection ? "AREA SELECTED" : "DRAG TO EDIT"}
-                </span>
-                {selection && (
-                    <Button variant="ghost" size="sm" onClick={handleClear} className="text-xs h-7 ml-4 hover:bg-white/10 hover:text-white rounded-full px-3">
-                        Cancel
-                    </Button>
-                )}
-            </div>
+            {!isEditing && (
+                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 min-w-[300px] h-12 border border-white/10 rounded-full glass-panel flex items-center px-6 justify-between shrink-0 shadow-lg text-white/80 transition-all duration-300 hover:bg-black/40">
+                    <span className="text-xs font-medium tracking-wide">
+                        部分修正で指示入力
+                    </span>
+                </div>
+            )}
         </div>
     )
 }

@@ -1,19 +1,40 @@
 import type { Metadata } from "next";
-import { Noto_Serif_JP, Courier_Prime } from "next/font/google";
+import { DM_Sans, Noto_Sans_JP, JetBrains_Mono, Libre_Baskerville, Noto_Serif_JP } from "next/font/google";
+
 import "./globals.css";
 import { ThemeProvider } from "@/providers/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { AuthProvider } from "@/providers/auth-provider";
 
-const notoSerifJP = Noto_Serif_JP({
-  weight: ["200", "300", "400", "500", "600", "700", "900"],
+const dmSans = DM_Sans({
+  weight: ["400", "500", "600", "700"],
   subsets: ["latin"],
-  variable: "--font-noto-serif",
+  variable: "--font-dm-sans",
 });
 
-const courierPrime = Courier_Prime({
+const notoSansJP = Noto_Sans_JP({
+  weight: ["400", "500", "600", "700"],
+  preload: false,
+  variable: "--font-noto-sans-jp",
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  weight: ["400", "500", "600", "700"],
+  subsets: ["latin"],
+  variable: "--font-jetbrains-mono",
+});
+
+const libreBaskerville = Libre_Baskerville({
   weight: ["400", "700"],
   subsets: ["latin"],
-  variable: "--font-courier-prime",
+  style: ["normal", "italic"],
+  variable: "--font-libre-baskerville",
+});
+
+const notoSerifJP = Noto_Serif_JP({
+  weight: ["400", "500", "600", "700"],
+  preload: false,
+  variable: "--font-noto-serif-jp",
 });
 
 export const metadata: Metadata = {
@@ -29,19 +50,21 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${notoSerifJP.variable} ${courierPrime.variable} antialiased font-serif`}
+        className={`${dmSans.variable} ${notoSansJP.variable} ${jetbrainsMono.variable} ${libreBaskerville.variable} ${notoSerifJP.variable} antialiased font-sans`}
         suppressHydrationWarning
       >
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="system"
-          enableSystem
-          disableTransitionOnChange
-        >
-          <TooltipProvider>
-            {children}
-          </TooltipProvider>
-        </ThemeProvider>
+        <AuthProvider>
+          <ThemeProvider
+            attribute="class"
+            defaultTheme="system"
+            enableSystem
+            disableTransitionOnChange
+          >
+            <TooltipProvider>
+              {children}
+            </TooltipProvider>
+          </ThemeProvider>
+        </AuthProvider>
       </body>
     </html>
   );

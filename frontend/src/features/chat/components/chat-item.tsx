@@ -81,8 +81,8 @@ export function ChatItem({ role, content, parts, avatar, name, className, isStre
                 {name && <span className="text-sm text-muted-foreground mb-1 ml-1">{name}</span>}
                 <div className={cn(
                     isUser
-                        ? "rounded-2xl rounded-tr-sm px-6 py-4 bg-white text-foreground border border-gray-200 shadow-none text-base"
-                        : "text-foreground p-0 bg-transparent border-none shadow-none w-full text-left font-typewriter text-base"
+                        ? "rounded-2xl rounded-tr-sm px-6 py-4 bg-white text-foreground border border-gray-200 shadow-none text-base font-medium"
+                        : "text-foreground p-0 bg-transparent border-none shadow-none w-full text-left font-typewriter text-base font-medium"
                 )}>
                     {shouldShowLoader ? (
                         <div className="flex items-center py-2">
@@ -105,11 +105,11 @@ export function ChatItem({ role, content, parts, avatar, name, className, isStre
                                 parts.map((part, idx) => {
                                     if (part.type === 'text' && part.text) {
                                         return (
-                                            <div key={idx} className="mb-3 last:mb-0">
+                                            <div key={idx} className="mb-0 last:mb-0">
                                                 <Markdown className={cn(
-                                                    "prose prose-base max-w-none text-gray-800 leading-relaxed font-normal",
+                                                    "prose prose-base prose-tight max-w-none text-gray-800 leading-normal font-medium",
                                                     !isUser && "font-sans",
-                                                    "prose-p:text-gray-800 prose-headings:text-gray-900 prose-strong:text-gray-900 prose-li:text-gray-800 prose-code:text-blue-600 prose-code:bg-blue-50 prose-code:px-1 prose-code:rounded prose-code:before:content-none prose-code:after:content-none"
+                                                    "prose-p:text-gray-800 prose-p:leading-normal prose-p:font-medium prose-headings:text-gray-900 prose-strong:text-gray-900 prose-li:text-gray-800 prose-li:font-medium prose-code:text-blue-600 prose-code:bg-blue-50 prose-code:px-1 prose-code:rounded prose-code:before:content-none prose-code:after:content-none"
                                                 )}>{part.text}</Markdown>
                                             </div>
                                         );
@@ -133,9 +133,9 @@ export function ChatItem({ role, content, parts, avatar, name, className, isStre
                                 })
                             ) : (
                                 <Markdown className={cn(
-                                    "prose prose-base max-w-none text-gray-800 leading-relaxed font-normal",
+                                    "prose prose-base prose-tight max-w-none text-gray-800 leading-normal font-medium",
                                     !isUser && "font-sans",
-                                    "prose-p:text-gray-800 prose-headings:text-gray-900 prose-strong:text-gray-900 prose-li:text-gray-800 prose-code:text-blue-600 prose-code:bg-blue-50 prose-code:px-1 prose-code:rounded prose-code:before:content-none prose-code:after:content-none"
+                                    "prose-p:text-gray-800 prose-p:leading-normal prose-p:font-medium prose-headings:text-gray-900 prose-strong:text-gray-900 prose-li:text-gray-800 prose-li:font-medium prose-code:text-blue-600 prose-code:bg-blue-50 prose-code:px-1 prose-code:rounded prose-code:before:content-none prose-code:after:content-none"
                                 )}>{content}</Markdown>
                             )}
 

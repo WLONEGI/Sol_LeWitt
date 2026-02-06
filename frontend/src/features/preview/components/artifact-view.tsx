@@ -17,7 +17,7 @@ function ReportViewer({ content, citations = [] }: { content: string, citations?
     return (
         <div className="flex flex-col flex-1 min-h-0 bg-background relative">
             {/* Report Content */}
-            <ScrollArea className="flex-1 p-6">
+            <ScrollArea className="flex-1 min-h-0 p-6">
                 <div className="prose dark:prose-invert max-w-none pb-32"> {/* Move padding here */}
                     <Markdown>{content}</Markdown>
                 </div>
@@ -101,7 +101,7 @@ export function ArtifactView() {
             case 'slide':
                 return <SlideViewer content={displayArtifact.content} imageId={displayArtifact.id} />
             case 'slide_deck':
-                return <SlideDeckViewer content={displayArtifact.content} />
+                return <SlideDeckViewer content={displayArtifact.content} artifactId={displayArtifact.id} />
             case 'data_analyst':
                 return <DataAnalystViewer content={displayArtifact.content} status={displayArtifact.status} />
             default:

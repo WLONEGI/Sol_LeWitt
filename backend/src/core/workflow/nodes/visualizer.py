@@ -47,8 +47,8 @@ def _sanitize_filename(title: str) -> str:
     safe = re.sub(r"\s+", " ", safe)
     return safe or "Untitled"
 
-async def _get_thread_title(thread_id: str | None) -> str | None:
-    if not thread_id:
+async def _get_thread_title(thread_id: str | None, owner_uid: str | None) -> str | None:
+    if not thread_id or not owner_uid:
         return None
     try:
         from src.core.workflow.service import _manager
@@ -56,7 +56,10 @@ async def _get_thread_title(thread_id: str | None) -> str | None:
             return None
         async with _manager.pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT title FROM threads WHERE thread_id = %s", (thread_id,))
+                await cur.execute(
+                    "SELECT title FROM threads WHERE thread_id = %s AND owner_uid = %s",
+                    (thread_id, owner_uid),
+                )
                 row = await cur.fetchone()
                 if row and row[0]:
                     return row[0]
@@ -381,7 +384,8 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         # Notify plan
         artifact_id = f"step_{current_step['id']}_visual"
         thread_id = config.get("configurable", {}).get("thread_id")
-        deck_title = await _get_thread_title(thread_id) or "Untitled"
+        user_uid = config.get("configurable", {}).get("user_uid")
+        deck_title = await _get_thread_title(thread_id, user_uid) or "Untitled"
         await adispatch_custom_event(
             "data-visual-plan",
             {

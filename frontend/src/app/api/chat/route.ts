@@ -11,6 +11,10 @@ export const maxDuration = 300;
 export async function POST(req: NextRequest) {
     try {
         const { messages, thread_id, pptx_template_base64 } = await req.json();
+        const authHeader = req.headers.get("authorization") || req.headers.get("Authorization");
+        if (!authHeader || !authHeader.toLowerCase().startsWith("bearer ")) {
+            return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
+        }
 
         const lastMessage = messages[messages.length - 1];
 
@@ -36,6 +40,7 @@ export async function POST(req: NextRequest) {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
+                'Authorization': authHeader,
                 ...(thread_id ? { 'X-Thread-Id': thread_id } : {})
             },
             body: JSON.stringify(backendBody),
@@ -203,16 +208,28 @@ export async function POST(req: NextRequest) {
                                             const checkpoint = meta.langgraph_checkpoint_ns || meta.checkpoint_ns || '';
                                             const isResearcherSubgraph = typeof checkpoint === 'string' && checkpoint.includes('researcher:');
                                             const runName = meta.run_name || eventData.name || '';
+
                                             const isPlannerNode = node === 'planner' || (typeof checkpoint === 'string' && checkpoint.includes('planner:'));
                                             const isStorywriterNode = node === 'storywriter' || (typeof checkpoint === 'string' && checkpoint.includes('storywriter:'));
                                             const isCoordinatorNode = node === 'coordinator' || (typeof checkpoint === 'string' && checkpoint.includes('coordinator:'));
                                             const isSupervisorNode = node === 'supervisor' || (typeof checkpoint === 'string' && checkpoint.includes('supervisor:'));
+                                            const isVisualizerNode = node === 'visualizer' || (typeof checkpoint === 'string' && checkpoint.includes('visualizer:'));
+                                            const isAnalystNode = node === 'data_analyst' || (typeof checkpoint === 'string' && checkpoint.includes('data_analyst:'));
+
                                             const isPlannerOrStorywriter = runName === 'planner' || runName === 'storywriter' || isPlannerNode || isStorywriterNode;
                                             const isCoordinator = runName === 'coordinator' || isCoordinatorNode;
                                             const isSupervisor = runName === 'supervisor' || isSupervisorNode;
+
                                             if (isResearcherSubgraph && (node === 'manager' || node === 'research_worker')) {
                                                 break;
                                             }
+
+                                            if (isVisualizerNode || isAnalystNode) {
+                                                // These nodes emit structured JSON or thinking logs already handled via on_custom_event
+                                                // or should be suppressed from the main chat text stream.
+                                                break;
+                                            }
+
                                             const runId = eventData.run_id;
                                             currentRunId = runId;
 

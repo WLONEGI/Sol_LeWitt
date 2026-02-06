@@ -10,14 +10,16 @@ import { cn } from '@/lib/utils'; // Assumes utils.ts exists from shadcn
 interface MarkdownProps {
     children: string;
     className?: string;
+    components?: React.ComponentProps<typeof ReactMarkdown>['components'];
 }
 
-export const Markdown = memo(({ children, className }: MarkdownProps) => {
+export const Markdown = memo(({ children, className, components }: MarkdownProps) => {
     return (
         <div className={cn("prose dark:prose-invert max-w-none break-words", className)}>
             <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={{
+                    ...components,
                     code({ node, className, children, ...props }) {
                         const match = /language-(\w+)/.exec(className || '');
                         const isInline = !match;

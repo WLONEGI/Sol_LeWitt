@@ -2,9 +2,11 @@
 import { useEffect, useState } from "react"
 import { useChatStore } from "../stores/chat"
 import { useShallow } from 'zustand/react/shallow'
-import { Plus, MessageSquare } from "lucide-react"
+import { Loader2, MessageSquare } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useRouter } from "next/navigation"
+import { UserAccountMenu } from "@/features/chat/components/user-account-menu"
+import { useAuth } from "@/providers/auth-provider"
 import {
     Sidebar,
     SidebarContent,
@@ -12,6 +14,7 @@ import {
     SidebarGroupContent,
     SidebarGroupLabel,
     SidebarHeader,
+    SidebarFooter,
     SidebarMenu,
     SidebarMenuButton,
     SidebarMenuItem,
@@ -24,28 +27,47 @@ export function ChatSidebar() {
     const router = useRouter()
     const {
         threads,
+        historyLoading,
+        historyError,
         currentThreadId,
         setCurrentThreadId,
         fetchHistory,
         createSession,
+        resetForAuthBoundary,
     } = useChatStore(
         useShallow((state) => ({
             threads: state.threads,
+            historyLoading: state.historyLoading,
+            historyError: state.historyError,
             currentThreadId: state.currentThreadId,
             setCurrentThreadId: state.setCurrentThreadId,
             fetchHistory: state.fetchHistory,
             createSession: state.createSession,
+            resetForAuthBoundary: state.resetForAuthBoundary,
         }))
     )
+    const { token, loading: authLoading } = useAuth()
     const { state } = useSidebar()
     const isCollapsed = state === "collapsed"
 
     const [hasMounted, setHasMounted] = useState(false)
-
     useEffect(() => {
         setHasMounted(true)
-        fetchHistory()
-    }, [fetchHistory])
+    }, [])
+
+    useEffect(() => {
+        if (authLoading) return
+        if (!token) {
+            resetForAuthBoundary()
+            return
+        }
+        void fetchHistory(token)
+    }, [authLoading, fetchHistory, resetForAuthBoundary, token])
+
+    const handleRetryHistory = () => {
+        if (!token || authLoading) return
+        void fetchHistory(token)
+    }
 
     if (!hasMounted) return null
 
@@ -54,8 +76,10 @@ export function ChatSidebar() {
             {/* 1. Header Area: Toggle & New Chat */}
             <SidebarHeader className={cn("px-2 pt-4", isCollapsed && "px-0 items-center")}>
                 <div className="flex flex-col gap-2">
-                    {/* Toggle Button - Using shadcn's Trigger for accessibility */}
-                    <div className={cn("flex items-center h-9 w-full", isCollapsed ? "justify-center" : "justify-start px-0")}>
+                    <div className={cn("flex items-center h-9 w-full", isCollapsed ? "justify-center" : "justify-between px-1")}>
+                        {!isCollapsed ? (
+                            <span className="text-sm font-semibold tracking-[0.2em] text-foreground">SPELL</span>
+                        ) : null}
                         <SidebarTrigger className={cn("h-9 w-9 text-muted-foreground hover:text-foreground hover:bg-black/5 rounded-lg transition-colors flex items-center justify-center", isCollapsed && "mx-auto")}>
                             <img
                                 src="/menu_48dp_1F1F1F_FILL0_wght400_GRAD0_opsz48.svg"
@@ -119,7 +143,23 @@ export function ChatSidebar() {
                                                 History
                                             </div>
                                             <div className="flex flex-col gap-1 p-2 pt-1 max-h-[60vh] overflow-auto">
-                                                {threads.length > 0 ? (
+                                                {historyLoading ? (
+                                                    <div className="px-2 py-3 text-[12px] text-muted-foreground inline-flex items-center gap-2">
+                                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                        Loading history...
+                                                    </div>
+                                                ) : historyError ? (
+                                                    <div className="px-2 py-2 flex flex-col gap-2">
+                                                        <div className="text-[12px] text-rose-600">{historyError}</div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={handleRetryHistory}
+                                                            className="w-fit rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] text-rose-700 hover:bg-rose-100"
+                                                        >
+                                                            Retry
+                                                        </button>
+                                                    </div>
+                                                ) : threads.length > 0 ? (
                                                     threads.map((thread) => (
                                                         <button
                                                             key={thread.id}
@@ -148,7 +188,23 @@ export function ChatSidebar() {
                             </SidebarMenu>
                         ) : (
                             <SidebarMenu className="gap-0.5">
-                                {threads.length > 0 ? (
+                                {historyLoading ? (
+                                    <div className="px-4 py-4 text-[12px] text-muted-foreground inline-flex items-center gap-2">
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                        Loading history...
+                                    </div>
+                                ) : historyError ? (
+                                    <div className="px-4 py-3 flex flex-col gap-2">
+                                        <div className="text-[12px] text-rose-600">{historyError}</div>
+                                        <button
+                                            type="button"
+                                            onClick={handleRetryHistory}
+                                            className="w-fit rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] text-rose-700 hover:bg-rose-100"
+                                        >
+                                            Retry
+                                        </button>
+                                    </div>
+                                ) : threads.length > 0 ? (
                                     threads.map((thread) => (
                                         <SidebarMenuItem key={thread.id}>
                                             <SidebarMenuButton
@@ -178,6 +234,10 @@ export function ChatSidebar() {
                     </SidebarGroupContent>
                 </SidebarGroup>
             </SidebarContent>
+
+            <SidebarFooter className={cn("relative px-2 pb-4", isCollapsed && "px-0 items-center")}>
+                <UserAccountMenu collapsed={isCollapsed} />
+            </SidebarFooter>
 
             <SidebarRail />
         </Sidebar>

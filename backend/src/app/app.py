@@ -7,9 +7,11 @@ import json
 import os
 import logging
 import asyncio
+import re
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
@@ -51,6 +53,8 @@ def _patch_langserve_serialization():
 _patch_langserve_serialization()
 
 DEFAULT_RECURSION_LIMIT = 50
+_THREADS_TABLE_READY = False
+_THREADS_TABLE_LOCK = asyncio.Lock()
 
 # === LangServe Input/Output Schemas ===
 
@@ -78,6 +82,164 @@ class ChatOutput(BaseModel):
     artifacts: dict[str, Any] = Field(default_factory=dict)
 
 
+def _extract_uid(decoded: dict[str, Any]) -> str:
+    uid = decoded.get("uid") or decoded.get("user_id") or decoded.get("sub")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    return str(uid)
+
+
+async def _authenticate_request(request: Request) -> tuple[dict[str, Any], str]:
+    auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+    if not auth_header or not auth_header.lower().startswith("bearer "):
+        logger.warning("Auth failed: missing Authorization bearer token.")
+        raise HTTPException(status_code=401, detail="Missing Authorization bearer token")
+
+    id_token = auth_header.split(" ", 1)[1].strip()
+    if not id_token:
+        logger.warning("Auth failed: empty bearer token.")
+        raise HTTPException(status_code=401, detail="Missing Authorization bearer token")
+
+    try:
+        decoded = verify_firebase_token(id_token)
+    except Exception as e:
+        logger.warning(f"Auth failed: invalid or expired token. {e}")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    uid = _extract_uid(decoded)
+
+    try:
+        await upsert_user(_manager.pool, decoded)
+    except Exception as e:
+        logger.error(f"Failed to upsert user: {e}")
+        raise HTTPException(status_code=500, detail="Failed to persist user")
+
+    request.state.user_uid = uid
+    request.state.user_decoded = decoded
+    return decoded, uid
+
+
+async def _ensure_threads_table(pool) -> None:
+    global _THREADS_TABLE_READY
+    if _THREADS_TABLE_READY:
+        return
+
+    async with _THREADS_TABLE_LOCK:
+        if _THREADS_TABLE_READY:
+            return
+
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS threads (
+                        thread_id TEXT PRIMARY KEY,
+                        owner_uid TEXT,
+                        title TEXT,
+                        summary TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    """
+                )
+                await cur.execute("ALTER TABLE threads ADD COLUMN IF NOT EXISTS owner_uid TEXT;")
+                await cur.execute(
+                    """
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1
+                            FROM pg_constraint
+                            WHERE conname = 'threads_owner_uid_fkey'
+                        ) THEN
+                            ALTER TABLE threads
+                            ADD CONSTRAINT threads_owner_uid_fkey
+                            FOREIGN KEY (owner_uid) REFERENCES users(uid) ON DELETE CASCADE;
+                        END IF;
+                    END $$;
+                    """
+                )
+                await cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_threads_owner_updated_at
+                    ON threads(owner_uid, updated_at DESC);
+                    """
+                )
+                await conn.commit()
+        _THREADS_TABLE_READY = True
+
+
+def _build_graph_config(thread_id: str, uid: str) -> dict[str, Any]:
+    return {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": uid,
+            "user_uid": uid,
+        }
+    }
+
+
+async def _ensure_thread_access(
+    pool,
+    *,
+    thread_id: str,
+    uid: str,
+    create_if_missing: bool,
+) -> None:
+    if not thread_id:
+        raise HTTPException(status_code=400, detail="thread_id is required")
+    if not pool:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+
+    await _ensure_threads_table(pool)
+
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT owner_uid FROM threads WHERE thread_id = %s",
+                (thread_id,),
+            )
+            row = await cur.fetchone()
+            if row:
+                owner_uid = row[0]
+                if owner_uid and owner_uid != uid:
+                    raise HTTPException(status_code=404, detail="Thread not found")
+                if not owner_uid:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Thread ownership is not initialized for this thread",
+                    )
+                if create_if_missing:
+                    await cur.execute(
+                        "UPDATE threads SET updated_at = NOW() WHERE thread_id = %s",
+                        (thread_id,),
+                    )
+                    await conn.commit()
+                return
+
+            if not create_if_missing:
+                raise HTTPException(status_code=404, detail="Thread not found")
+
+            await cur.execute(
+                """
+                INSERT INTO threads (thread_id, owner_uid, title, summary, created_at, updated_at)
+                VALUES (%s, %s, NULL, '', NOW(), NOW())
+                ON CONFLICT (thread_id) DO NOTHING;
+                """,
+                (thread_id, uid),
+            )
+            if cur.rowcount == 0:
+                await cur.execute(
+                    "SELECT owner_uid FROM threads WHERE thread_id = %s",
+                    (thread_id,),
+                )
+                conflict_row = await cur.fetchone()
+                conflict_owner = conflict_row[0] if conflict_row else None
+                if conflict_owner != uid:
+                    raise HTTPException(status_code=404, detail="Thread not found")
+            await conn.commit()
+
+
 # === Application Lifecycle ===
 
 @asynccontextmanager
@@ -100,6 +262,10 @@ async def lifespan(app: FastAPI):
             thread_id = request.headers.get("X-Thread-Id")
             if thread_id:
                 config.setdefault("configurable", {})["thread_id"] = thread_id
+            uid = getattr(request.state, "user_uid", None)
+            if uid:
+                config.setdefault("configurable", {})["checkpoint_ns"] = uid
+                config.setdefault("configurable", {})["user_uid"] = uid
             config.setdefault("recursion_limit", DEFAULT_RECURSION_LIMIT)
             return config
 
@@ -146,6 +312,35 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 
+def _is_protected_path(path: str) -> bool:
+    if path.startswith("/api/chat"):
+        return True
+    if path == "/api/history":
+        return True
+    if path.startswith("/api/threads/"):
+        return True
+    return False
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    if not _is_protected_path(request.url.path):
+        return await call_next(request)
+
+    try:
+        await _authenticate_request(request)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    except Exception as exc:
+        logger.exception(f"Auth middleware failed: {exc}")
+        return JSONResponse(status_code=500, content={"detail": "Authentication failed"})
+
+    return await call_next(request)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     logger.error(f"Validation Error: {exc.errors()}")
@@ -183,27 +378,9 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
     - on_custom_event (excluding citation_metadata)
     """
     try:
-        # Authenticate (Firebase ID token)
-        auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
-        if not auth_header or not auth_header.lower().startswith("bearer "):
-            logger.warning("Auth failed: missing Authorization bearer token.")
-            raise HTTPException(status_code=401, detail="Missing Authorization bearer token")
-        id_token = auth_header.split(" ", 1)[1].strip()
-        if not id_token:
-            logger.warning("Auth failed: empty bearer token.")
-            raise HTTPException(status_code=401, detail="Missing Authorization bearer token")
-
-        try:
-            decoded = verify_firebase_token(id_token)
-        except Exception as e:
-            logger.warning(f"Auth failed: invalid or expired token. {e}")
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-        try:
-            await upsert_user(_manager.pool, decoded)
-        except Exception as e:
-            logger.error(f"Failed to upsert user: {e}")
-            raise HTTPException(status_code=500, detail="Failed to persist user")
+        uid = getattr(request.state, "user_uid", None)
+        if not isinstance(uid, str) or not uid:
+            raise HTTPException(status_code=401, detail="Unauthorized")
 
         # Re-fetch graph with types to ensure it's available
         graph = _manager.get_graph()
@@ -214,9 +391,15 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
 
         # 1. Prepare Config (Thread ID)
         thread_id = request.headers.get("X-Thread-Id")
-        config = {}
-        if thread_id:
-            config.setdefault("configurable", {})["thread_id"] = thread_id
+        if not thread_id:
+            raise HTTPException(status_code=400, detail="Missing X-Thread-Id header")
+
+        await _ensure_thread_access(
+            _manager.pool,
+            thread_id=thread_id,
+            uid=uid,
+            create_if_missing=True,
+        )
         
         # 2. Define Generator
         async def event_generator():
@@ -227,8 +410,10 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
                 
                 # Merge request-level config (Thread ID) with payload config
                 merged_config = input_data.config or {}
-                if thread_id:
-                    merged_config.setdefault("configurable", {})["thread_id"] = thread_id
+                merged_config.setdefault("configurable", {})
+                merged_config["configurable"]["thread_id"] = thread_id
+                merged_config["configurable"]["checkpoint_ns"] = uid
+                merged_config["configurable"]["user_uid"] = uid
                 merged_config.setdefault("recursion_limit", DEFAULT_RECURSION_LIMIT)
                 
                 # Stream events from the graph
@@ -282,14 +467,424 @@ async def health_check():
 
 # === History Endpoints ===
 
+_STEP_ARTIFACT_KEY_PATTERN = re.compile(r"^step_(\d+)_(\w+)$")
+
+
+def _safe_json_loads(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
+
+
+def _normalize_plan(plan: Any) -> list[dict[str, Any]]:
+    if not isinstance(plan, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for index, step in enumerate(plan):
+        if not isinstance(step, dict):
+            continue
+        row = dict(step)
+        status = row.get("status")
+        if status == "complete":
+            status = "completed"
+        elif status == "todo":
+            status = "pending"
+        elif status not in ("pending", "in_progress", "completed"):
+            status = "pending"
+        row["status"] = status
+        row.setdefault("id", index + 1)
+        normalized.append(jsonable_encoder(row))
+    return normalized
+
+
+def _extract_step_artifact_meta(artifact_id: str) -> tuple[int, str]:
+    match = _STEP_ARTIFACT_KEY_PATTERN.match(artifact_id)
+    if not match:
+        return (10**9, artifact_id)
+    return (int(match.group(1)), match.group(2))
+
+
+def _serialize_message(msg: Any) -> dict[str, Any] | None:
+    msg_type = getattr(msg, "type", None)
+    if msg_type == "tool":
+        return None
+
+    role = "assistant"
+    if msg_type == "human":
+        role = "user"
+    elif msg_type == "system":
+        role = "system"
+
+    content = getattr(msg, "content", "")
+    parts: list[dict[str, Any]] = []
+    text_chunks: list[str] = []
+
+    def append_text(text: str) -> None:
+        if not text:
+            return
+        parts.append({"type": "text", "text": text})
+        text_chunks.append(text)
+
+    def append_reasoning(text: str) -> None:
+        if not text:
+            return
+        parts.append({"type": "reasoning", "text": text})
+
+    if isinstance(content, str):
+        append_text(content)
+    elif isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                part_text = part.get("text")
+                if not isinstance(part_text, str):
+                    continue
+                if part_type in ("thinking", "reasoning"):
+                    append_reasoning(part_text)
+                else:
+                    append_text(part_text)
+            elif isinstance(part, str):
+                append_text(part)
+    elif isinstance(content, dict):
+        part_type = content.get("type")
+        part_text = content.get("text")
+        if isinstance(part_text, str):
+            if part_type in ("thinking", "reasoning"):
+                append_reasoning(part_text)
+            else:
+                append_text(part_text)
+
+    additional_kwargs = getattr(msg, "additional_kwargs", {}) or {}
+    reasoning = additional_kwargs.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning.strip():
+        if not any(part.get("type") == "reasoning" for part in parts):
+            parts.insert(0, {"type": "reasoning", "text": reasoning})
+
+    if additional_kwargs.get("ui_type") == "plan_update":
+        plan_data = additional_kwargs.get("plan")
+        if isinstance(plan_data, list):
+            parts.append({
+                "type": "data-plan_update",
+                "data": {
+                    "plan": plan_data,
+                    "title": additional_kwargs.get("title"),
+                    "description": additional_kwargs.get("description"),
+                    "ui_type": "plan_update",
+                }
+            })
+
+    return {
+        "role": role,
+        "content": "".join(text_chunks),
+        "parts": parts,
+        "name": getattr(msg, "name", None),
+        "id": getattr(msg, "id", None),
+        "metadata": jsonable_encoder(additional_kwargs),
+        "sources": additional_kwargs.get("sources", []),
+    }
+
+
+def _serialize_messages(messages: Any) -> list[dict[str, Any]]:
+    if not isinstance(messages, list):
+        return []
+    serialized: list[dict[str, Any]] = []
+    for msg in messages:
+        item = _serialize_message(msg)
+        if item is not None:
+            serialized.append(item)
+    return serialized
+
+
+def _build_story_outline(slides: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for slide in slides:
+        number = slide.get("slide_number", "?")
+        title = slide.get("title", "")
+        lines.append(f"## Slide {number}: {title}")
+        bullet_points = slide.get("bullet_points")
+        if isinstance(bullet_points, list):
+            for point in bullet_points:
+                if isinstance(point, str):
+                    lines.append(f"- {point}")
+        description = slide.get("description")
+        if isinstance(description, str) and description.strip():
+            lines.append(description)
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _build_visual_artifact(artifact_id: str, value: Any) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    data = _safe_json_loads(value)
+    if not isinstance(data, dict):
+        return None, []
+
+    prompts = data.get("prompts")
+    if not isinstance(prompts, list):
+        return None, []
+
+    events: list[dict[str, Any]] = []
+    slides: list[dict[str, Any]] = []
+
+    for prompt in sorted(prompts, key=lambda item: item.get("slide_number", 0) if isinstance(item, dict) else 0):
+        if not isinstance(prompt, dict):
+            continue
+        slide_number = prompt.get("slide_number")
+        if not isinstance(slide_number, int):
+            continue
+
+        structured_prompt = prompt.get("structured_prompt")
+        structured_title = (
+            structured_prompt.get("main_title")
+            if isinstance(structured_prompt, dict)
+            else None
+        )
+        title = prompt.get("title") or structured_title or f"Slide {slide_number}"
+        image_url = prompt.get("generated_image_url")
+        prompt_text = prompt.get("compiled_prompt") or prompt.get("image_generation_prompt")
+        status = "completed" if isinstance(image_url, str) and image_url else "streaming"
+
+        slide: dict[str, Any] = {
+            "slide_number": slide_number,
+            "title": title,
+            "status": status,
+        }
+        if isinstance(image_url, str) and image_url:
+            slide["image_url"] = image_url
+        if isinstance(prompt_text, str) and prompt_text:
+            slide["prompt_text"] = prompt_text
+        if structured_prompt is not None:
+            slide["structured_prompt"] = structured_prompt
+        if prompt.get("rationale") is not None:
+            slide["rationale"] = prompt.get("rationale")
+        if prompt.get("layout_type") is not None:
+            slide["layout_type"] = prompt.get("layout_type")
+        if prompt.get("selected_inputs") is not None:
+            slide["selected_inputs"] = prompt.get("selected_inputs")
+        slides.append(slide)
+
+        events.append({
+            "type": "data-visual-image",
+            "data": {
+                "artifact_id": artifact_id,
+                "deck_title": "Generated Slides",
+                "slide_number": slide_number,
+                "title": title,
+                "image_url": image_url,
+                "prompt_text": prompt_text,
+                "structured_prompt": structured_prompt,
+                "rationale": prompt.get("rationale"),
+                "layout_type": prompt.get("layout_type"),
+                "selected_inputs": prompt.get("selected_inputs"),
+                "status": status,
+            }
+        })
+
+    pdf_url = data.get("combined_pdf_url")
+    if isinstance(pdf_url, str) and pdf_url:
+        events.append({
+            "type": "data-visual-pdf",
+            "data": {
+                "artifact_id": artifact_id,
+                "deck_title": "Generated Slides",
+                "pdf_url": pdf_url,
+                "status": "completed",
+            }
+        })
+
+    if not slides:
+        return None, events
+
+    is_completed = all(bool(slide.get("image_url")) for slide in slides)
+    artifact = {
+        "id": artifact_id,
+        "type": "slide_deck",
+        "title": "Generated Slides",
+        "content": {
+            "slides": slides,
+            "pdf_url": pdf_url,
+        },
+        "version": 1,
+        "status": "completed" if is_completed else "streaming",
+    }
+    return artifact, events
+
+
+def _build_story_artifact(artifact_id: str, value: Any) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    data = _safe_json_loads(value)
+    if not isinstance(data, dict):
+        return None, []
+    slides = data.get("slides")
+    if not isinstance(slides, list):
+        return None, []
+
+    normalized_slides = [jsonable_encoder(slide) for slide in slides if isinstance(slide, dict)]
+    event = {
+        "type": "data-outline",
+        "data": {
+            "artifact_id": artifact_id,
+            "slides": normalized_slides,
+            "title": "Slide Outline",
+        }
+    }
+
+    artifact = {
+        "id": artifact_id,
+        "type": "outline",
+        "title": "Slide Outline",
+        "content": _build_story_outline(normalized_slides),
+        "version": 1,
+        "status": "completed",
+    }
+    return artifact, [event]
+
+
+def _build_data_analyst_artifact(artifact_id: str, value: Any) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    data = _safe_json_loads(value)
+    if not isinstance(data, dict):
+        return None, []
+
+    if "analysis_report" not in data and "execution_summary" not in data:
+        return None, []
+
+    summary = str(data.get("execution_summary") or "")
+    lowered_summary = summary.lower()
+    is_failed = "error" in lowered_summary or "失敗" in summary or "エラー" in summary
+    status = "failed" if is_failed else "completed"
+
+    artifact = {
+        "id": artifact_id,
+        "type": "data_analyst",
+        "title": "Data Analyst",
+        "content": {
+            "output": jsonable_encoder(data),
+        },
+        "version": 1,
+        "status": status,
+    }
+
+    events = [
+        {
+            "type": "data-analyst-start",
+            "data": {
+                "artifact_id": artifact_id,
+                "title": "Data Analyst",
+            }
+        },
+        {
+            "type": "data-analyst-output",
+            "data": {
+                "artifact_id": artifact_id,
+                "title": "Data Analyst",
+                "output": jsonable_encoder(data),
+                "status": status,
+            }
+        },
+        {
+            "type": "data-analyst-complete",
+            "data": {
+                "artifact_id": artifact_id,
+                "status": status,
+            }
+        }
+    ]
+    return artifact, events
+
+
+def _build_fallback_artifact(artifact_id: str, value: Any) -> dict[str, Any]:
+    parsed = _safe_json_loads(value)
+    if isinstance(parsed, (dict, list)):
+        content = json.dumps(parsed, ensure_ascii=False, indent=2)
+    else:
+        content = str(parsed)
+    return {
+        "id": artifact_id,
+        "type": "report",
+        "title": artifact_id,
+        "content": content,
+        "version": 1,
+        "status": "completed",
+    }
+
+
+def _build_snapshot_payload(thread_id: str, state_values: dict[str, Any]) -> dict[str, Any]:
+    messages = _serialize_messages(state_values.get("messages", []))
+    plan = _normalize_plan(state_values.get("plan", []))
+    raw_artifacts = state_values.get("artifacts") or {}
+    ui_events: list[dict[str, Any]] = []
+    artifacts: dict[str, Any] = {}
+
+    if plan:
+        ui_events.append({
+            "type": "data-plan_update",
+            "data": {
+                "plan": plan,
+                "ui_type": "plan_update",
+                "title": "Execution Plan",
+                "description": "The updated execution plan.",
+            }
+        })
+
+    if isinstance(raw_artifacts, dict):
+        ordered_artifact_ids = sorted(raw_artifacts.keys(), key=_extract_step_artifact_meta)
+        for artifact_id in ordered_artifact_ids:
+            value = raw_artifacts.get(artifact_id)
+            if value is None:
+                continue
+
+            _, suffix = _extract_step_artifact_meta(artifact_id)
+            artifact: dict[str, Any] | None = None
+            events: list[dict[str, Any]] = []
+
+            if suffix == "visual":
+                artifact, events = _build_visual_artifact(artifact_id, value)
+            elif suffix == "story":
+                artifact, events = _build_story_artifact(artifact_id, value)
+            elif suffix == "data":
+                artifact, events = _build_data_analyst_artifact(artifact_id, value)
+            else:
+                parsed = _safe_json_loads(value)
+                if isinstance(parsed, dict) and "prompts" in parsed:
+                    artifact, events = _build_visual_artifact(artifact_id, parsed)
+                elif isinstance(parsed, dict) and "slides" in parsed:
+                    artifact, events = _build_story_artifact(artifact_id, parsed)
+                elif isinstance(parsed, dict) and (
+                    "analysis_report" in parsed or "execution_summary" in parsed
+                ):
+                    artifact, events = _build_data_analyst_artifact(artifact_id, parsed)
+
+            if artifact is None:
+                artifact = _build_fallback_artifact(artifact_id, value)
+
+            artifacts[artifact_id] = jsonable_encoder(artifact)
+            if events:
+                ui_events.extend(events)
+
+    return {
+        "thread_id": thread_id,
+        "messages": messages,
+        "plan": plan,
+        "artifacts": artifacts,
+        "ui_events": ui_events,
+    }
+
 @app.get("/api/history")
-async def get_history(uid: str | None = None):
+async def get_history(request: Request):
     """
     Get conversation history from the threads table.
     """
     try:
+        uid = getattr(request.state, "user_uid", None)
+        if not isinstance(uid, str) or not uid:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
         if not _manager.pool:
             return []
+
+        await _ensure_threads_table(_manager.pool)
 
         async with _manager.pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -298,11 +893,12 @@ async def get_history(uid: str | None = None):
                         thread_id,
                         title,
                         summary,
-                        created_at
+                        updated_at
                     FROM threads 
+                    WHERE owner_uid = %s
                     ORDER BY updated_at DESC
                     LIMIT 20; 
-                """)
+                """, (uid,))
                 
                 rows = await cur.fetchall()
                 
@@ -311,76 +907,93 @@ async def get_history(uid: str | None = None):
                     thread_id = row[0]
                     title = row[1]
                     summary = row[2]
-                    created_at = row[3]
+                    updated_at = row[3]
                     
                     history.append({
                         "id": thread_id,
                         "title": title or f"Session {thread_id[:8]}",
-                        "timestamp": created_at.isoformat() if created_at else None,
+                        "updatedAt": updated_at.isoformat() if updated_at else None,
+                        "timestamp": updated_at.isoformat() if updated_at else None,
                         "summary": summary
                     })
                 
                 return history
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to fetch history: {e}")
         return []
 
 
 @app.get("/api/threads/{thread_id}/messages")
-async def get_thread_messages(thread_id: str):
+async def get_thread_messages(thread_id: str, request: Request):
     """
     Retrieve message history for a specific thread.
     """
     try:
+        uid = getattr(request.state, "user_uid", None)
+        if not isinstance(uid, str) or not uid:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        await _ensure_thread_access(
+            _manager.pool,
+            thread_id=thread_id,
+            uid=uid,
+            create_if_missing=False,
+        )
+
         graph = _manager.get_graph()
-        
-        config = {"configurable": {"thread_id": thread_id}}
+
+        config = _build_graph_config(thread_id, uid)
         state = await graph.aget_state(config)
         
         if not state.values:
             return []
-            
-        messages = state.values.get("messages", [])
+        return _serialize_messages(state.values.get("messages", []))
         
-        # Convert LangChain messages to our API format
-        formatted_messages = []
-        for msg in messages:
-            role = "user"
-            if msg.type == "ai":
-                role = "assistant"
-            elif msg.type == "human":
-                role = "user"
-            elif msg.type == "system":
-                role = "system"
-            elif msg.type == "tool":
-                continue 
-            
-            content = msg.content
-            if isinstance(content, list):
-                text_parts = [c["text"] for c in content if "text" in c]
-                content = "".join(text_parts)
-            
-            additional_kwargs = msg.additional_kwargs or {}
-            sources = additional_kwargs.get("sources", [])
-            ui_type = additional_kwargs.get("ui_type") 
-            reasoning = additional_kwargs.get("reasoning_content")
-
-            formatted_messages.append({
-                "role": role,
-                "content": content,
-                "sources": sources,
-                "name": msg.name,
-                "id": msg.id if hasattr(msg, "id") else None,
-                "ui_type": ui_type,
-                "metadata": additional_kwargs, 
-                "reasoning": reasoning 
-            })
-            
-        return formatted_messages
-        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to fetch thread messages: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/threads/{thread_id}/snapshot")
+async def get_thread_snapshot(thread_id: str, request: Request):
+    """
+    Retrieve a deterministic UI snapshot for a specific thread.
+    """
+    try:
+        uid = getattr(request.state, "user_uid", None)
+        if not isinstance(uid, str) or not uid:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+        await _ensure_thread_access(
+            _manager.pool,
+            thread_id=thread_id,
+            uid=uid,
+            create_if_missing=False,
+        )
+
+        graph = _manager.get_graph()
+        config = _build_graph_config(thread_id, uid)
+        state = await graph.aget_state(config)
+
+        if not state.values:
+            return {
+                "thread_id": thread_id,
+                "messages": [],
+                "plan": [],
+                "artifacts": {},
+                "ui_events": [],
+            }
+
+        return _build_snapshot_payload(thread_id, state.values)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch thread snapshot: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

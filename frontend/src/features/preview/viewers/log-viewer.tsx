@@ -23,7 +23,7 @@ export function LogViewer({ content, title, status }: LogViewerProps) {
             </div>
 
             {/* Log Content */}
-            <ScrollArea className="flex-1 p-4">
+            <ScrollArea className="flex-1 min-h-0 p-4">
                 <pre className="whitespace-pre-wrap break-all">{content}</pre>
             </ScrollArea>
         </div>
