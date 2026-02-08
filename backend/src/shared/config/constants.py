@@ -3,7 +3,7 @@
 TEAM_MEMBERS = [
     "researcher",
     "planner",
-    "storywriter",
+    "writer",
     "visualizer",
     "data_analyst",
 ]
@@ -13,7 +13,7 @@ AGENT_LLM_MAP = {
     "coordinator": "basic",
     "planner": "high_reasoning",
     "researcher": "reasoning",
-    "storywriter": "high_reasoning",
+    "writer": "high_reasoning",
     "visualizer": "basic",
     "data_analyst": "reasoning",
 }

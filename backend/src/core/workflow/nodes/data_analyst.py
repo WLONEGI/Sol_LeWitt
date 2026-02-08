@@ -14,38 +14,138 @@ from src.infrastructure.llm.llm import get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
 from src.shared.schemas import DataAnalystOutput
 from src.core.workflow.state import State
-from .common import create_worker_response, extract_first_json, split_content_parts
+from .common import (
+    build_worker_error_payload,
+    create_worker_response,
+    extract_first_json,
+    split_content_parts,
+)
 from langchain_core.runnables import RunnableConfig
 
 logger = logging.getLogger(__name__)
 MAX_DATA_ANALYST_ROUNDS = 3
+VALID_DATA_ANALYST_MODES = {"python_pipeline", "asset_packaging"}
+STANDARD_FAILED_CHECKS = {
+    "worker_execution",
+    "tool_execution",
+    "schema_validation",
+    "missing_dependency",
+    "missing_research",
+    "mode_violation",
+}
+
+
+def _resolve_data_analyst_mode(step: dict) -> str:
+    mode = str(step.get("mode") or "").strip()
+    if mode in VALID_DATA_ANALYST_MODES:
+        return mode
+    return "python_pipeline"
+
+
+def _data_analyst_failed_checks(
+    *,
+    kind: str,
+    extras: list[str] | None = None,
+) -> list[str]:
+    mapping = {
+        "worker": ["worker_execution"],
+        "schema_validation": ["worker_execution", "schema_validation"],
+        "tool_execution": ["worker_execution", "tool_execution"],
+        "missing_dependency": ["worker_execution", "missing_dependency"],
+        "mode_violation": ["worker_execution", "mode_violation"],
+    }
+    checks = list(mapping.get(kind, ["worker_execution"]))
+    if extras:
+        checks.extend(str(item) for item in extras if isinstance(item, str))
+    return _normalize_failed_checks(checks)
+
+
+def _normalize_failed_checks(checks: object) -> list[str]:
+    if not isinstance(checks, list):
+        return []
+    normalized: list[str] = []
+    has_unknown = False
+    for item in checks:
+        if not isinstance(item, str):
+            continue
+        code = item.strip()
+        if not code:
+            continue
+        if code not in STANDARD_FAILED_CHECKS:
+            has_unknown = True
+            continue
+        if code not in normalized:
+            normalized.append(code)
+
+    if has_unknown:
+        for code in ("worker_execution", "schema_validation"):
+            if code not in normalized:
+                normalized.append(code)
+
+    return normalized
+
+
+def _looks_like_error_text(text: str | None) -> bool:
+    if not isinstance(text, str):
+        return False
+    lowered = text.lower()
+    return "error" in lowered or "失敗" in text or "エラー" in text or "failed" in lowered
+
+
+def _truncate_line(text: str, max_length: int = 300) -> str:
+    cleaned = text.replace("\n", " ").strip()
+    if len(cleaned) <= max_length:
+        return cleaned
+    return cleaned[: max_length - 3] + "..."
+
+
+def _build_fixed_analysis_report(
+    *,
+    mode: str,
+    instruction: str,
+    artifact_keys: list[str],
+    tool_trace: list[str],
+    llm_report: str | None,
+    is_error: bool,
+    error_summary: str | None,
+    output_count: int,
+) -> str:
+    input_lines = [
+        f"- mode: `{mode}`",
+        f"- instruction: {instruction or '（未指定）'}",
+        f"- artifacts: {', '.join(artifact_keys) if artifact_keys else 'なし'}",
+    ]
+
+    process_lines = [f"- python_repl実行ログ件数: {len(tool_trace)}"]
+    if tool_trace:
+        process_lines.extend(f"- {_truncate_line(line)}" for line in tool_trace[-5:])
+    else:
+        process_lines.append("- ツール実行なし")
+    if llm_report and llm_report.strip():
+        process_lines.append(f"- LLM報告: {_truncate_line(llm_report, max_length=500)}")
+
+    result_lines = [
+        f"- status: {'failed' if is_error else 'completed'}",
+        f"- output_files: {output_count}",
+    ]
+
+    unresolved_lines = [f"- {error_summary}"] if is_error and error_summary else ["- なし"]
+
+    return (
+        "## 入力\n"
+        + "\n".join(input_lines)
+        + "\n\n## 処理\n"
+        + "\n".join(process_lines)
+        + "\n\n## 結果\n"
+        + "\n".join(result_lines)
+        + "\n\n## 未解決\n"
+        + "\n".join(unresolved_lines)
+    )
 
 def _sanitize_filename(title: str) -> str:
     safe = re.sub(r"[\\\\/:*?\"<>|]", "_", title).strip()
     safe = re.sub(r"\s+", " ", safe)
     return safe or "Untitled"
-
-def _safe_json_loads(value: object) -> dict | None:
-    if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except Exception:
-            return None
-    if isinstance(value, dict):
-        return value
-    return None
-
-def _get_latest_artifact_by_suffix(artifacts: dict, suffix: str) -> dict | None:
-    candidates: list[tuple[int, str]] = []
-    for key in artifacts.keys():
-        if key.endswith(suffix):
-            match = re.search(r"step_(\d+)_", key)
-            step_id = int(match.group(1)) if match else -1
-            candidates.append((step_id, key))
-    if not candidates:
-        return None
-    _, key = sorted(candidates, key=lambda x: x[0])[-1]
-    return _safe_json_loads(artifacts.get(key))
 
 async def _get_thread_title(thread_id: str | None, owner_uid: str | None) -> str | None:
     if not thread_id or not owner_uid:
@@ -128,17 +228,26 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     try:
         step_index, current_step = next(
             (i, step) for i, step in enumerate(state["plan"]) 
-            if step["status"] == "in_progress" and step["role"] == "data_analyst"
+            if step.get("status") == "in_progress"
+            and step.get("capability") == "data_analyst"
         )
     except StopIteration:
         logger.error("Data Analyst called but no in_progress step found.")
         return Command(goto="supervisor", update={})
 
     artifacts = state.get("artifacts", {}) or {}
+    selected_image_inputs = state.get("selected_image_inputs") or []
+    attachments = state.get("attachments") or []
+    pptx_context = state.get("pptx_context")
     instruction = current_step.get("instruction", "")
+    execution_mode = _resolve_data_analyst_mode(current_step)
     context = (
+        f"Execution Mode: {execution_mode}\n\n"
         f"Instruction: {instruction}\n\n"
-        f"Available Artifacts: {json.dumps(artifacts, default=str)}"
+        f"Available Artifacts: {json.dumps(artifacts, default=str)}\n\n"
+        f"Selected Image Inputs: {json.dumps(selected_image_inputs, ensure_ascii=False, default=str)}\n\n"
+        f"Attachments: {json.dumps(attachments, ensure_ascii=False, default=str)}\n\n"
+        f"PPTX Context: {json.dumps(pptx_context, ensure_ascii=False, default=str)}"
     )
 
     thread_id = config.get("configurable", {}).get("thread_id")
@@ -147,37 +256,24 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     session_id = thread_id or str(uuid.uuid4())
     safe_title = _sanitize_filename(str(deck_title))
     output_prefix = f"generated_assets/{session_id}/{safe_title}"
-
-    visual_data = _get_latest_artifact_by_suffix(artifacts, "_visual") or {}
-    visual_prompts = visual_data.get("prompts", []) if isinstance(visual_data, dict) else []
-    visual_image_urls = [
-        p.get("generated_image_url")
-        for p in visual_prompts
-        if isinstance(p, dict) and p.get("generated_image_url")
-    ]
-
-    if visual_image_urls:
-        context += (
-            "\n\nAUTO_TASK: Visualizer outputs detected. You MUST generate a PDF and a TAR "
-            "from the image URLs and upload them to GCS. Use the output_prefix and deck_title "
-            "for object naming.\n"
-            f"- deck_title: {deck_title}\n"
-            f"- session_id: {session_id}\n"
-            f"- output_prefix: {output_prefix}\n"
-            f"- image_urls: {json.dumps(visual_image_urls, ensure_ascii=False)}\n"
-        )
+    context += (
+        "\n\nMode Policy:\n"
+        "- python_pipeline: execute general python processing only.\n"
+        "- asset_packaging: execute packaging tasks explicitly requested by Planner.\n"
+        "- Never auto-insert packaging tasks from available artifacts.\n"
+    )
 
     artifact_id = f"step_{current_step['id']}_data"
     input_summary = {
+        "mode": execution_mode,
         "instruction": instruction,
         "artifact_keys": list(artifacts.keys()),
+        "selected_image_inputs": selected_image_inputs,
+        "attachments": attachments,
+        "pptx_context": pptx_context,
         "output_prefix": output_prefix,
         "deck_title": deck_title,
         "session_id": session_id,
-        "auto_task": {
-            "type": "visualizer_package",
-            "image_urls": visual_image_urls
-        } if visual_image_urls else None
     }
 
     try:
@@ -211,7 +307,8 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
         messages[-1].content += (
             "\n\nIMPORTANT: Only output the final result as valid JSON matching DataAnalystOutput "
             "when the Planner instruction is fully completed. If more processing is needed, "
-            "call the python_repl tool."
+            "call the python_repl tool.\n"
+            f"Current mode is `{execution_mode}` and must be respected strictly."
         )
 
         # Add run_name for better visibility in events
@@ -223,6 +320,7 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
         is_error = False
         error_summary = ""
         tool_trace: list[str] = []
+        tool_error_occurred = False
 
         for round_index in range(MAX_DATA_ANALYST_ROUNDS):
             response = await llm_with_code_exec.ainvoke(messages, config=stream_config)
@@ -259,6 +357,7 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
                         except Exception as e:
                             logger.error(f"Tool execution failed: {e}")
                             output = f"Error executing python_repl: {e}"
+                            tool_error_occurred = True
                     else:
                         output = f"Unsupported tool: {tool_name}"
 
@@ -308,12 +407,45 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
                 )
 
         if result:
+            failed_checks = _normalize_failed_checks(result.failed_checks)
+            if tool_error_occurred and "tool_execution" not in failed_checks:
+                failed_checks = _normalize_failed_checks(failed_checks + ["tool_execution"])
+
+            if execution_mode == "asset_packaging" and not result.output_files:
+                failed_checks = _normalize_failed_checks(failed_checks + ["missing_dependency"])
+
+            summary_is_error = _looks_like_error_text(result.execution_summary)
+            is_error = summary_is_error or bool(failed_checks)
+
+            if is_error and not failed_checks:
+                failed_checks = _data_analyst_failed_checks(kind="worker")
+
+            if is_error and not _looks_like_error_text(result.execution_summary):
+                result.execution_summary = f"Error: {result.execution_summary or 'Data analyst task failed.'}"
+
+            if is_error:
+                # Policy B: partial success is treated as full failure.
+                result.output_files = []
+                result.blueprints = []
+                result.visualization_code = None
+                artifact_preview_urls = []
+            else:
+                artifact_preview_urls = _extract_preview_urls(result)
+
+            result.failed_checks = failed_checks
+            error_details = ", ".join(failed_checks) if failed_checks else None
+            result.analysis_report = _build_fixed_analysis_report(
+                mode=execution_mode,
+                instruction=instruction,
+                artifact_keys=list(artifacts.keys()),
+                tool_trace=tool_trace,
+                llm_report=result.analysis_report,
+                is_error=is_error,
+                error_summary=error_details,
+                output_count=len(result.output_files),
+            )
             content_json = result.model_dump_json()
             result_summary = result.execution_summary
-            # Mark as error if summary suggests failure
-            lowered = (result_summary or "").lower()
-            is_error = "error" in lowered or "失敗" in lowered or "エラー" in lowered
-            artifact_preview_urls = _extract_preview_urls(result)
             try:
                 await adispatch_custom_event(
                     "data-analyst-output",
@@ -328,17 +460,24 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
                 logger.warning(f"Failed to dispatch data-analyst-output: {e}")
         else:
             logger.warning(f"Data Analyst failed to return valid JSON: {error_summary}")
-            analysis_report = "## 実行ログ\n"
-            if tool_trace:
-                analysis_report += "\n".join([f"- {line}" for line in tool_trace])
-            else:
-                analysis_report += "- ツール実行なし\n"
-            analysis_report += "\n\n## エラー概要\n"
-            analysis_report += error_summary or "不明なエラーが発生しました。"
+            checks = _data_analyst_failed_checks(
+                kind="tool_execution" if tool_error_occurred else "schema_validation"
+            )
+            analysis_report = _build_fixed_analysis_report(
+                mode=execution_mode,
+                instruction=instruction,
+                artifact_keys=list(artifacts.keys()),
+                tool_trace=tool_trace,
+                llm_report=None,
+                is_error=True,
+                error_summary=error_summary or "不明なエラーが発生しました。",
+                output_count=0,
+            )
 
             fallback = DataAnalystOutput(
                 execution_summary=f"Error: {error_summary or 'Invalid output'}",
                 analysis_report=analysis_report,
+                failed_checks=checks,
                 output_files=[],
                 blueprints=[],
                 visualization_code=None,
@@ -363,7 +502,18 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
                  
     except Exception as e:
         logger.error(f"Data Analyst failed: {e}")
-        content_json = json.dumps({"error": str(e)}, ensure_ascii=False)
+        checks = _data_analyst_failed_checks(kind="worker")
+        analysis_report = _build_fixed_analysis_report(
+            mode=execution_mode,
+            instruction=instruction,
+            artifact_keys=list(artifacts.keys()),
+            tool_trace=[],
+            llm_report=None,
+            is_error=True,
+            error_summary=str(e),
+            output_count=0,
+        )
+        content_json = build_worker_error_payload(error_text=analysis_report, failed_checks=checks)
         result_summary = f"Error: {str(e)}"
         is_error = True
         artifact_preview_urls = []
@@ -374,7 +524,8 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
                     "artifact_id": artifact_id,
                     "output": {
                         "execution_summary": result_summary,
-                        "analysis_report": str(e),
+                        "analysis_report": analysis_report,
+                        "failed_checks": checks,
                         "output_files": [],
                         "blueprints": [],
                         "visualization_code": None,

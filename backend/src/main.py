@@ -1,7 +1,6 @@
 import logging
 from typing import Any
 
-from src.shared.config import TEAM_MEMBERS
 from src.core.workflow import build_graph
 
 # Configure logging

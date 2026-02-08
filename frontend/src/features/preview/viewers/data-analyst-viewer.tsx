@@ -3,20 +3,19 @@
 import { useMemo, useState } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Markdown } from "@/components/ui/markdown"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Check, Copy } from "lucide-react"
+
 
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 
 interface DataAnalystViewerProps {
     content: any
-    status?: string
 }
 
-export function DataAnalystViewer({ content, status }: DataAnalystViewerProps) {
+export function DataAnalystViewer({ content }: DataAnalystViewerProps) {
     const [activeTab, setActiveTab] = useState<"code" | "log">("code")
     const [copied, setCopied] = useState<"code" | "log" | null>(null)
 
@@ -46,45 +45,66 @@ export function DataAnalystViewer({ content, status }: DataAnalystViewerProps) {
 
     return (
         <div className="flex flex-col flex-1 min-h-0 bg-background">
-            <ScrollArea className="flex-1 min-h-0 p-6">
-                <div className="flex flex-col gap-6 pb-12">
+            <ScrollArea className="flex-1 min-h-0 p-3">
+                <div className="flex flex-col gap-4 pb-6">
                     <Card>
                         <CardHeader>
-                            <CardTitle className="text-sm">インプット情報</CardTitle>
+                            <CardTitle className="text-sm">インプット</CardTitle>
                         </CardHeader>
-                        <CardContent className="space-y-3 text-sm">
-                            {input?.instruction ? (
-                                <div>
-                                    <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Instruction</div>
-                                    <div className="whitespace-pre-wrap">{input.instruction}</div>
-                                </div>
+                        <CardContent className="space-y-4">
+                            {!input?.instruction && imageUrls.length === 0 && artifactKeys.length === 0 ? (
+                                <div className="text-muted-foreground text-xs italic">インプットデータがありません。</div>
                             ) : (
-                                <div className="text-muted-foreground text-xs">インプット情報がまだありません。</div>
-                            )}
+                                <>
+                                    {input?.instruction && (
+                                        <div>
+                                            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2">実行指示</div>
+                                            <div className="text-sm bg-muted/30 rounded-md p-3 border border-border">{input.instruction}</div>
+                                        </div>
+                                    )}
 
-                            {artifactKeys.length > 0 && (
-                                <div>
-                                    <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Artifacts</div>
-                                    <ul className="list-disc pl-5 space-y-1">
-                                        {artifactKeys.map((key) => (
-                                            <li key={key} className="break-all">{key}</li>
-                                        ))}
-                                    </ul>
-                                </div>
-                            )}
+                                    {imageUrls.length > 0 && (
+                                        <div>
+                                            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2">画像インプット</div>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                {imageUrls.map((url, idx) => (
+                                                    <a
+                                                        key={`img-${idx}`}
+                                                        href={url}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="relative group aspect-video rounded-md overflow-hidden border border-border hover:border-primary/50 transition-colors"
+                                                    >
+                                                        <img
+                                                            src={url}
+                                                            alt={`Input ${idx + 1}`}
+                                                            className="h-full w-full object-cover transition-transform group-hover:scale-105"
+                                                        />
+                                                        <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                                                            <span className="text-white text-xs">クリックで拡大</span>
+                                                        </div>
+                                                    </a>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
 
-                            {input?.output_prefix && (
-                                <div>
-                                    <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Output Prefix</div>
-                                    <div className="font-mono text-xs break-all">{input.output_prefix}</div>
-                                </div>
-                            )}
-
-                            {imageUrls.length > 0 && (
-                                <div>
-                                    <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Visualizer Inputs</div>
-                                    <div className="text-xs">{imageUrls.length}件の画像URLを検出しました。</div>
-                                </div>
+                                    {artifactKeys.length > 0 && (
+                                        <div>
+                                            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2">使用アーティファクト</div>
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {artifactKeys.map((key) => (
+                                                    <span
+                                                        key={key}
+                                                        className="inline-flex items-center px-2 py-1 rounded-md bg-primary/10 text-primary border border-primary/20 text-xs font-mono"
+                                                    >
+                                                        {key}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </>
                             )}
                         </CardContent>
                     </Card>
@@ -93,11 +113,6 @@ export function DataAnalystViewer({ content, status }: DataAnalystViewerProps) {
                         <CardHeader className="flex flex-row items-center justify-between gap-4">
                             <CardTitle className="text-sm">実装コード</CardTitle>
                             <div className="flex items-center gap-2">
-                                {status === "streaming" && (
-                                    <span className="text-[10px] uppercase tracking-widest text-emerald-600 font-semibold">
-                                        Streaming
-                                    </span>
-                                )}
                                 <div className="inline-flex rounded-md border border-border overflow-hidden">
                                     <button
                                         type="button"
@@ -171,36 +186,85 @@ export function DataAnalystViewer({ content, status }: DataAnalystViewerProps) {
                         <CardHeader>
                             <CardTitle className="text-sm">アウトプット</CardTitle>
                         </CardHeader>
-                        <CardContent className="space-y-4 text-sm">
-                            {output?.execution_summary ? (
-                                <div>
-                                    <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Summary</div>
-                                    <div className="whitespace-pre-wrap">{output.execution_summary}</div>
-                                </div>
+                        <CardContent className="space-y-4">
+                            {!output?.execution_summary && outputFiles.length === 0 ? (
+                                <div className="text-muted-foreground text-xs italic">アウトプットはまだ生成されていません。</div>
                             ) : (
-                                <div className="text-muted-foreground text-xs">アウトプットはまだ作成されていません。</div>
-                            )}
+                                <>
+                                    {output?.execution_summary && (
+                                        <div>
+                                            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2">実行結果</div>
+                                            <div className="text-sm bg-muted/30 rounded-md p-3 border border-border">{output.execution_summary}</div>
+                                        </div>
+                                    )}
 
-                            {outputFiles.length > 0 && (
-                                <div>
-                                    <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Files</div>
-                                    <ul className="list-disc pl-5 space-y-1">
-                                        {outputFiles.map((file: any, index: number) => (
-                                            <li key={`${file?.url || "file"}-${index}`} className="text-xs break-all">
-                                                {file?.title || file?.url || "Untitled"}
-                                            </li>
-                                        ))}
-                                    </ul>
-                                </div>
-                            )}
+                                    {outputFiles.length > 0 && (
+                                        <div>
+                                            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2">生成ファイル</div>
+                                            <div className="space-y-2">
+                                                {outputFiles.map((file: any, index: number) => {
+                                                    const url = file?.url || ""
+                                                    const title = file?.title || `ファイル ${index + 1}`
+                                                    const mimeType = file?.mime_type || ""
+                                                    const isImage = mimeType.startsWith("image/") || /\.(png|jpg|jpeg|webp|gif)$/i.test(url)
 
-                            {output?.analysis_report && (
-                                <div>
-                                    <div className="text-xs text-muted-foreground uppercase tracking-wider mb-1">Report</div>
-                                    <div className="prose dark:prose-invert max-w-none text-sm">
-                                        <Markdown>{output.analysis_report}</Markdown>
-                                    </div>
-                                </div>
+                                                    if (isImage) {
+                                                        return (
+                                                            <a
+                                                                key={`output-${index}`}
+                                                                href={url}
+                                                                target="_blank"
+                                                                rel="noopener noreferrer"
+                                                                className="block group"
+                                                            >
+                                                                <div className="relative aspect-video rounded-md overflow-hidden border border-border hover:border-primary/50 transition-colors">
+                                                                    <img
+                                                                        src={url}
+                                                                        alt={title}
+                                                                        className="h-full w-full object-cover transition-transform group-hover:scale-105"
+                                                                    />
+                                                                    <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                                                                        <span className="text-white text-xs">クリックで拡大</span>
+                                                                    </div>
+                                                                </div>
+                                                                {title && (
+                                                                    <div className="text-xs text-muted-foreground mt-1 px-1">{title}</div>
+                                                                )}
+                                                            </a>
+                                                        )
+                                                    }
+
+                                                    return (
+                                                        <a
+                                                            key={`output-${index}`}
+                                                            href={url}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="flex items-center gap-3 p-3 rounded-md border border-border hover:border-primary/50 hover:bg-muted/30 transition-colors group"
+                                                        >
+                                                            <div className="flex-shrink-0 w-10 h-10 rounded-md bg-primary/10 flex items-center justify-center">
+                                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                                                                </svg>
+                                                            </div>
+                                                            <div className="flex-1 min-w-0">
+                                                                <div className="text-sm font-medium truncate group-hover:text-primary transition-colors">{title}</div>
+                                                                {mimeType && (
+                                                                    <div className="text-xs text-muted-foreground">{mimeType}</div>
+                                                                )}
+                                                            </div>
+                                                            <div className="flex-shrink-0">
+                                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                                                                </svg>
+                                                            </div>
+                                                        </a>
+                                                    )
+                                                })}
+                                            </div>
+                                        </div>
+                                    )}
+                                </>
                             )}
                         </CardContent>
                     </Card>

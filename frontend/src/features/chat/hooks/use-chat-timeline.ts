@@ -3,6 +3,8 @@
 import { useMemo } from 'react'
 import type { UIMessage } from 'ai'
 import { TimelineEvent, MessageTimelineItem, ResearchReportTimelineItem } from "../types/timeline"
+import type { PlanUpdateData } from "../types/plan"
+import { normalizePlanUpdateData } from "../types/plan"
 
 /**
  * Extracts text content from UIMessage parts array
@@ -59,16 +61,16 @@ export function useChatTimeline(
 
     // Extract the latest plan from data stream
     const latestPlan = useMemo(() => {
-        if (!data || data.length === 0) return null;
+        if (!data || data.length === 0) return null as PlanUpdateData | null;
 
         // Find the latest plan_update
         for (let i = data.length - 1; i >= 0; i--) {
             const event = data[i];
             if (event && typeof event === 'object' && event.type === 'data-plan_update') {
-                return event.data;
+                return normalizePlanUpdateData(event.data);
             }
         }
-        return null;
+        return null as PlanUpdateData | null;
     }, [data])
 
     // Convert messages to timeline items
@@ -235,6 +237,9 @@ export function useChatTimeline(
         // Data events from stream
         if (data && data.length > 0) {
             const analystMap = new Map<string, { item: any; lastTimestamp: number }>();
+            const outlineMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
+            const writerArtifactMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
+            const imageSearchMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
 
             data.forEach((event, idx) => {
                 if (!event || typeof event !== 'object') return;
@@ -247,10 +252,12 @@ export function useChatTimeline(
                     const stepTitle = typeof payload.title === 'string' ? payload.title.trim() : '';
                     if (!stepTitle) return;
 
+                    // Use the natural timestamp from the event
+                    // This ensures plan steps appear in the order they were generated
                     items.push({
                         id: `plan-step-start-${idx}`,
                         type: 'plan_step_marker',
-                        timestamp: timestamp + 0.1,
+                        timestamp,
                         stepId: String(payload.step_id ?? idx),
                         title: stepTitle,
                     });
@@ -261,7 +268,7 @@ export function useChatTimeline(
                     items.push({
                         id: `plan-step-end-${idx}`,
                         type: 'plan_step_end_marker',
-                        timestamp: timestamp + 0.2,
+                        timestamp,
                         stepId: String(payload.step_id ?? idx),
                     });
                     return;
@@ -290,37 +297,133 @@ export function useChatTimeline(
                     });
                 }
 
-                // 2. Slide Outline (append-only for timeline stacking)
+                // 2. Slide Outline (keep one per artifact, with latest state)
                 else if (type === 'data-outline') {
-                    items.push({
-                        id: `outline-${idx}`,
-                        type: 'slide_outline',
-                        timestamp,
-                        slides: Array.isArray(payload.slides) ? payload.slides : [],
-                        title: payload.title || 'Slide Outline',
+                    const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id : '';
+                    const mapKey = artifactId.trim().length > 0 ? `artifact:${artifactId}` : 'default';
+                    const existing = outlineMap.get(mapKey);
+
+                    if (existing) {
+                        existing.lastTimestamp = timestamp;
+                        existing.item = {
+                            ...(existing.item as any),
+                            timestamp,
+                            slides: Array.isArray(payload.slides) ? payload.slides : [],
+                            title: payload.title || 'Slide Outline',
+                        } as TimelineEvent;
+                        return;
+                    }
+
+                    outlineMap.set(mapKey, {
+                        item: {
+                            id: `outline-${mapKey}`,
+                            type: 'slide_outline',
+                            timestamp,
+                            slides: Array.isArray(payload.slides) ? payload.slides : [],
+                            title: payload.title || 'Slide Outline',
+                        } as TimelineEvent,
+                        lastTimestamp: timestamp,
                     });
                     return;
                 }
 
-                // 3. Visual image result (append-only for timeline stacking)
+                // 3. Visual image result
                 else if (type === 'data-visual-image') {
-                    const imageUrl = typeof payload.image_url === 'string' ? payload.image_url : '';
-                    if (!imageUrl) return;
+                    // Suppress per-image timeline cards to reduce cognitive load.
+                    // A unified slide deck UI is rendered from `latestSlideDeck`.
+                    return;
+                }
 
-                    items.push({
-                        id: `visual-image-${idx}`,
-                        type: 'artifact',
-                        timestamp,
-                        artifactId: `visual-image-${payload.slide_number ?? idx}`,
-                        title: payload.title || `Slide ${payload.slide_number ?? ''}`.trim() || 'Generated Slide',
-                        icon: 'Image',
-                        previewUrls: [imageUrl],
+                // 4. Image Search results
+                else if (type === 'data-image-search-results') {
+                    const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+                    const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id : undefined;
+                    const taskId = String(payload.task_id ?? idx);
+                    const query = typeof payload.query === 'string' ? payload.query : '';
+                    const mapKey = artifactId?.trim()
+                        ? `artifact:${artifactId}`
+                        : `task:${taskId}`;
+                    const existing = imageSearchMap.get(mapKey);
+
+                    if (existing) {
+                        existing.lastTimestamp = timestamp;
+                        existing.item = {
+                            ...(existing.item as any),
+                            timestamp,
+                            taskId,
+                            artifactId,
+                            query,
+                            perspective: typeof payload.perspective === 'string' ? payload.perspective : undefined,
+                            candidates,
+                        } as any;
+                        return;
+                    }
+
+                    imageSearchMap.set(mapKey, {
+                        item: {
+                            id: `image-search-${mapKey}`,
+                            type: 'image_search_results',
+                            timestamp,
+                            taskId,
+                            artifactId,
+                            query,
+                            perspective: typeof payload.perspective === 'string' ? payload.perspective : undefined,
+                            candidates,
+                        } as any,
+                        lastTimestamp: timestamp,
+                    });
+                    return;
+                }
+
+                // 5. Writer outputs (keep one per artifact, with latest state)
+                else if (type === 'data-writer-output') {
+                    const artifactType = typeof payload.artifact_type === 'string' ? payload.artifact_type : 'report';
+                    if (artifactType === 'outline') return;
+
+                    const artifactId = payload.artifact_id || `writer-${idx}`;
+                    const existing = writerArtifactMap.get(artifactId);
+                    if (existing) {
+                        existing.lastTimestamp = timestamp;
+                        existing.item = {
+                            ...(existing.item as any),
+                            timestamp,
+                            artifactId,
+                            title: payload.title || 'Writer Output',
+                            icon: 'BookOpen',
+                            kind: artifactType,
+                        } as any;
+                        return;
+                    }
+
+                    writerArtifactMap.set(artifactId, {
+                        item: {
+                            id: `writer-${artifactId}`,
+                            type: 'artifact',
+                            timestamp,
+                            artifactId,
+                            title: payload.title || 'Writer Output',
+                            icon: 'BookOpen',
+                            kind: artifactType,
+                        } as any,
+                        lastTimestamp: timestamp,
                     });
                     return;
                 }
             });
 
             analystMap.forEach(({ item, lastTimestamp }) => {
+                item.timestamp = lastTimestamp;
+                items.push(item);
+            });
+            outlineMap.forEach(({ item, lastTimestamp }) => {
+                item.timestamp = lastTimestamp;
+                items.push(item);
+            });
+            imageSearchMap.forEach(({ item, lastTimestamp }) => {
+                item.timestamp = lastTimestamp;
+                items.push(item);
+            });
+            writerArtifactMap.forEach(({ item, lastTimestamp }) => {
                 item.timestamp = lastTimestamp;
                 items.push(item);
             });

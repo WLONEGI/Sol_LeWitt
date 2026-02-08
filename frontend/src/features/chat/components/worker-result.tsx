@@ -10,6 +10,11 @@ interface WorkerResultProps {
 
 export function WorkerResult({ role, summary, status }: WorkerResultProps) {
     const formatRole = (r: string) => {
+        const normalized = r.toLowerCase();
+        if (normalized === "writer") return "Writer";
+        if (normalized === "researcher") return "Researcher";
+        if (normalized === "visualizer") return "Visualizer";
+        if (normalized === "data_analyst") return "Data Analyst";
         return r.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
     }
 

@@ -26,9 +26,9 @@ Spell バックエンドの技術ドキュメントへようこそ。本シス�
 | **planner** | `plan_update`, `on_chat_model_stream` | `plan_update`, `tool-approval-request`, `reasoning-delta` |
 | **supervisor** | `on_chat_model_stream` | `text-delta` |
 | **researcher** | `on_chat_model_stream`, `on_chain_end` | `text-delta`, (Artifacts) |
-| **storywriter** | `slide_outline_updated`, `on_chat_model_stream` | `data-outline`, `tool-approval-request`, `reasoning-delta` |
-| **visualizer** | `on_chat_model_stream`, `on_chain_end` | `reasoning-delta`, (Artifacts) |
-| **data_analyst** | `on_chat_model_stream` | `reasoning-delta`, `text-delta` |
+| **writer** | `writer-output`, `on_chat_model_stream` | `data-writer-output`, `reasoning-delta` |
+| **visualizer** | `data-visual-*`, `on_chat_model_stream` | `data-visual-*`, `reasoning-delta` |
+| **data_analyst** | `data-analyst-*`, `on_chat_model_stream` | `data-analyst-*`, `reasoning-delta`, `text-delta` |
 
 ---
 

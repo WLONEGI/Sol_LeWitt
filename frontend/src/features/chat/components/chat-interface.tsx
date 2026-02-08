@@ -11,13 +11,15 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { v4 as uuidv4 } from 'uuid'
 import { QUICK_ACTIONS } from "@/features/chat/constants/quick-actions"
+import { type AspectRatio } from "./aspect-ratio-selector"
 
 
 import { useChatTimeline } from "../hooks/use-chat-timeline"
 import { FixedPlanOverlay } from "./fixed-plan-overlay"
-import { Button } from "@/components/ui/button"
 import { useAuth } from "@/providers/auth-provider"
 import { AuthRequiredDialog } from "@/features/auth/components/auth-required-dialog"
+import type { PlanUpdateData } from "@/features/chat/types/plan"
+import { resolveDataEventMessageCount } from "@/features/chat/lib/data-event-order"
 
 // Custom data events from backend
 interface CustomDataEvent {
@@ -32,6 +34,21 @@ interface ChatSnapshot {
     messages?: any[]
     artifacts?: Record<string, any>
     ui_events?: CustomDataEvent[]
+    product_type?: string
+}
+
+interface QueuedInterrupt {
+    text: string
+    selectedImageInputs: Array<Record<string, any>>
+}
+
+interface UploadedAttachment {
+    id: string
+    filename: string
+    mime_type: string
+    size_bytes: number
+    url: string
+    kind: 'image' | 'pptx' | 'pdf' | 'csv' | 'json' | 'text' | 'other'
 }
 
 const MAX_DATA_EVENTS = 200
@@ -49,7 +66,18 @@ const DATA_EVENTS_TO_STORE = new Set([
     'data-analyst-log-delta',
     'data-analyst-output',
     'data-analyst-complete',
+    'data-writer-output',
+    'data-image-search-results',
 ])
+
+const WRITER_ARTIFACT_TITLES: Record<string, string> = {
+    outline: 'Slide Outline',
+    writer_story_framework: 'Story Framework',
+    writer_character_sheet: 'Character Sheet',
+    writer_infographic_spec: 'Infographic Spec',
+    writer_document_blueprint: 'Document Blueprint',
+    writer_comic_script: 'Comic Script',
+}
 
 const normalizeMessageParts = (msg: any): any[] => {
     const parts: any[] = []
@@ -120,10 +148,63 @@ const mapHistoryMessageToUIMessage = (msg: any): UIMessage => {
     } as UIMessage
 }
 
+const buildOutlineMarkdown = (slides: any[]): string => {
+    if (!Array.isArray(slides) || slides.length === 0) return ''
+    const lines: string[] = []
+    for (const slide of slides) {
+        if (!slide || typeof slide !== 'object') continue
+        const slideNo = slide.slide_number ?? '?'
+        const title = typeof slide.title === 'string' ? slide.title : ''
+        lines.push(`## Slide ${slideNo}: ${title}`)
+        const bulletPoints = Array.isArray(slide.bullet_points) ? slide.bullet_points : []
+        for (const point of bulletPoints) {
+            if (typeof point === 'string' && point.trim()) {
+                lines.push(`- ${point}`)
+            }
+        }
+        if (typeof slide.description === 'string' && slide.description.trim()) {
+            lines.push(slide.description.trim())
+        }
+        lines.push('')
+    }
+    return lines.join('\n').trim()
+}
+
 export function ChatInterface({ threadId }: { threadId?: string | null }) {
     const [input, setInput] = useState("")
-    const [pendingFile, setPendingFile] = useState<File | null>(null)
-    const [pendingFileBase64, setPendingFileBase64] = useState<string | null>(null)
+    const [pendingFiles, setPendingFiles] = useState<File[]>([])
+    const [isUploadingAttachments, setIsUploadingAttachments] = useState(false)
+    const [attachmentError, setAttachmentError] = useState<string | null>(null)
+
+    const {
+        consumePendingAspectRatio,
+        consumePendingProductType,
+        pendingAspectRatio,
+        pendingProductType
+    } = useChatStore(
+        useShallow((state) => ({
+            consumePendingAspectRatio: state.consumePendingAspectRatio,
+            consumePendingProductType: state.consumePendingProductType,
+            pendingAspectRatio: state.pendingAspectRatio,
+            pendingProductType: state.pendingProductType,
+        }))
+    )
+
+    const [aspectRatio, setAspectRatio] = useState<AspectRatio>(() => {
+        // Initialize from store if available (passed from home)
+        // Casting mainly because AspectRatio type alias might not exactly match string | undefined | null in store definition
+        return (pendingAspectRatio as AspectRatio) || undefined
+    })
+
+    // Clear pending aspect ratio after mount if it was used
+    useEffect(() => {
+        if (pendingAspectRatio) {
+            consumePendingAspectRatio()
+        }
+    }, [pendingAspectRatio, consumePendingAspectRatio])
+
+    const [selectedImageInputs, setSelectedImageInputs] = useState<Array<Record<string, any>>>([])
+    const [queuedInterrupt, setQueuedInterrupt] = useState<QueuedInterrupt | null>(null)
     const [historyReady, setHistoryReady] = useState(false)
 
     const { registerTask, appendContent, completeTask } = useResearchStore(
@@ -164,9 +245,9 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
     const [data, setData] = useState<CustomDataEvent[]>([])
     const dataRef = useRef<CustomDataEvent[]>([])
     const dataFlushRef = useRef<number | null>(null)
-    const activePlanStepRef = useRef<{ stepId: string | number; title: string; key: string } | null>(null)
     const dataSequenceRef = useRef(0)
     const messageCountRef = useRef(0)
+    const streamEventMessageCountRef = useRef<number | null>(null)
 
     const flushData = useCallback(() => {
         dataFlushRef.current = null
@@ -175,9 +256,11 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
 
     const stampDataEvent = useCallback((event: CustomDataEvent, messageCountOverride?: number): CustomDataEvent => {
         const seq = dataSequenceRef.current++
-        const msgCount = (typeof messageCountOverride === 'number' && Number.isFinite(messageCountOverride))
-            ? messageCountOverride
-            : messageCountRef.current
+        const msgCount = resolveDataEventMessageCount({
+            messageCountOverride,
+            streamMessageCount: streamEventMessageCountRef.current,
+            currentMessageCount: messageCountRef.current,
+        })
         return {
             ...event,
             __seq: seq,
@@ -304,10 +387,40 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         })
     }, [stableId, upsertArtifact])
 
+    const upsertWriterArtifact = useCallback((payload: any) => {
+        if (!payload) return
+
+        const artifactId = typeof payload.artifact_id === 'string'
+            ? payload.artifact_id
+            : `writer_${stableId}`
+        const artifactType = typeof payload.artifact_type === 'string'
+            ? payload.artifact_type
+            : 'report'
+
+        const state = useArtifactStore.getState()
+        const existing = state.artifacts[artifactId]
+        const rawOutput = (payload.output && typeof payload.output === 'object') ? payload.output : {}
+
+        let nextContent: any = rawOutput
+        if (artifactType === 'outline') {
+            const outlineText = buildOutlineMarkdown(Array.isArray(rawOutput.slides) ? rawOutput.slides : [])
+            nextContent = outlineText || JSON.stringify(rawOutput, null, 2)
+        }
+
+        upsertArtifact({
+            id: artifactId,
+            type: artifactType,
+            title: payload.title || existing?.title || WRITER_ARTIFACT_TITLES[artifactType] || 'Writer Output',
+            content: nextContent,
+            version: (existing?.version ?? 0) + 1,
+        })
+    }, [stableId, upsertArtifact])
+
     const {
         messages,
         setMessages,
         sendMessage,
+        stop,
         addToolResult,
         status,
         error,
@@ -323,45 +436,6 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                 const title = directTitle || nestedTitle
                 if (title) {
                     updateThreadTitle(stableId, title)
-                }
-            }
-
-            if (data?.type === 'data-plan_update') {
-                const payload = data.data as { plan?: Array<{ id?: string | number; title?: string; status?: string }> } | undefined
-                const steps = Array.isArray(payload?.plan) ? payload.plan : []
-                const inProgressIndex = steps.findIndex((step) => step?.status === 'in_progress')
-
-                if (inProgressIndex >= 0) {
-                    const step = steps[inProgressIndex]
-                    const stepTitle = typeof step?.title === 'string' && step.title.trim().length > 0
-                        ? step.title.trim()
-                        : `Step ${inProgressIndex + 1}`
-                    const stepId = step?.id ?? inProgressIndex
-                    const nextStepKey = `${String(stepId)}:${stepTitle}`
-                    const currentStep = activePlanStepRef.current
-
-                    if (nextStepKey !== currentStep?.key) {
-                        if (currentStep) {
-                            enqueueData({
-                                type: 'data-plan_step_ended',
-                                data: { step_id: currentStep.stepId },
-                            })
-                        }
-                        activePlanStepRef.current = { stepId, title: stepTitle, key: nextStepKey }
-                        enqueueData({
-                            type: 'data-plan_step_started',
-                            data: { step_id: stepId, title: stepTitle },
-                        })
-                    }
-                } else {
-                    const currentStep = activePlanStepRef.current
-                    if (currentStep) {
-                        enqueueData({
-                            type: 'data-plan_step_ended',
-                            data: { step_id: currentStep.stepId },
-                        })
-                    }
-                    activePlanStepRef.current = null
                 }
             }
 
@@ -404,6 +478,9 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
             if (data?.type === 'data-analyst-complete') {
                 upsertDataAnalystArtifact(data.data, 'complete')
             }
+            if (data?.type === 'data-writer-output') {
+                upsertWriterArtifact(data.data)
+            }
         },
         onError: (error: Error) => {
             console.error("Chat error:", error)
@@ -414,9 +491,32 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         messageCountRef.current = messages.length
     }, [messages.length])
 
+    useEffect(() => {
+        if (status === 'ready' || status === 'error') {
+            streamEventMessageCountRef.current = null
+        }
+    }, [status])
+
     const { timeline, latestOutline, latestPlan, latestSlideDeck } = useChatTimeline(messages, data, stableId)
 
     const selectedAction = QUICK_ACTIONS.find((action) => action.id === selectedActionId) ?? null
+
+    // Initialize product type from pending store (passed from home)
+    // We use a ref or state because consume is one-time
+    const [initialProductType] = useState<string | undefined | null>(() => {
+        return pendingProductType || (messages.length === 0 ? selectedAction?.productType : undefined)
+    })
+
+    // Clear pending product type after mount if it was used
+    useEffect(() => {
+        if (pendingProductType) {
+            consumePendingProductType()
+        }
+    }, [pendingProductType, consumePendingProductType])
+
+    useEffect(() => {
+        console.log(`[ChatInterface] selectedActionId: ${selectedActionId}, initialProductType: ${initialProductType}, messages.length: ${messages.length}`);
+    }, [selectedActionId, initialProductType, messages.length]);
 
     useEffect(() => {
         let isCancelled = false
@@ -429,8 +529,12 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                 dataRef.current = []
                 dataSequenceRef.current = 0
                 messageCountRef.current = 0
+                streamEventMessageCountRef.current = null
                 setData([])
-                activePlanStepRef.current = null
+                setSelectedImageInputs([])
+                setPendingFiles([])
+                setAttachmentError(null)
+                setQueuedInterrupt(null)
                 const artifactState = useArtifactStore.getState()
                 artifactState.setArtifacts({})
                 artifactState.setActiveContextId(null)
@@ -444,8 +548,12 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
             dataRef.current = []
             dataSequenceRef.current = 0
             messageCountRef.current = 0
+            streamEventMessageCountRef.current = null
             setData([])
-            activePlanStepRef.current = null
+            setSelectedImageInputs([])
+            setPendingFiles([])
+            setAttachmentError(null)
+            setQueuedInterrupt(null)
             const artifactState = useArtifactStore.getState()
             artifactState.setArtifacts({})
             artifactState.setActiveContextId(null)
@@ -462,6 +570,23 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                 if (res.ok) {
                     const snapshot = await res.json() as ChatSnapshot
                     if (isCancelled) return
+
+                    // Set background gradient based on product type
+                    if (snapshot.product_type) {
+                        const action = QUICK_ACTIONS.find(a => a.productType === snapshot.product_type)
+                        if (action) {
+                            setSelectedActionId(action.id)
+                        } else {
+                            setSelectedActionId(null)
+                        }
+                    } else if (Array.isArray(snapshot.messages) && snapshot.messages.length > 0) {
+                        // Existing chat with content but no type -> Generic default
+                        setSelectedActionId(null)
+                    } else if (!initialProductType && (!snapshot.messages || snapshot.messages.length === 0)) {
+                        // Empty chat, no pending product type -> Ensure generic
+                        setSelectedActionId(null)
+                    }
+
                     const historyMessages = Array.isArray(snapshot?.messages) ? snapshot.messages : []
                     const mappedMessages: UIMessage[] = historyMessages.map(mapHistoryMessageToUIMessage)
                     setMessages(mappedMessages)
@@ -483,22 +608,6 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                     return
                 }
 
-                const fallbackRes = await fetch(`/api/threads/${stableId}/messages`, {
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                    },
-                    cache: 'no-store',
-                })
-                if (isCancelled) return
-                if (fallbackRes.ok) {
-                    const history = await fallbackRes.json()
-                    if (isCancelled) return
-                    const mappedMessages: UIMessage[] = Array.isArray(history)
-                        ? history.map(mapHistoryMessageToUIMessage)
-                        : []
-                    setMessages(mappedMessages)
-                    return
-                }
             } catch (err) {
                 if (!isCancelled) {
                     console.error("Failed to load history:", err)
@@ -511,7 +620,7 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         }
         loadHistory()
         return () => { isCancelled = true }
-    }, [stableId, setMessages, authLoading, token, setData, stampDataEvent])
+    }, [stableId, setMessages, authLoading, token, setData, stampDataEvent, initialProductType])
 
     useEffect(() => {
         if (!stableId || !historyReady) return
@@ -526,10 +635,12 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                 },
                 body: {
                     thread_id: stableId,
+                    selected_image_inputs: [],
+                    ...(initialProductType ? { product_type: initialProductType } : {}),
                 },
             }
         )
-    }, [stableId, historyReady, authLoading, token, consumePendingMessage, sendMessage])
+    }, [stableId, historyReady, authLoading, token, consumePendingMessage, sendMessage, initialProductType])
 
     useEffect(() => {
         return () => {
@@ -540,29 +651,123 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
     }, [])
 
     const isLoading = status === 'streaming' || status === 'submitted'
+    const isBusy = isLoading || isUploadingAttachments
 
     const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
         setInput(e.target.value)
     }, [])
 
-    const handleFileSelect = useCallback((file: File) => {
-        setPendingFile(file)
-        const reader = new FileReader()
-        reader.onloadend = () => {
-            const base64 = reader.result as string
-            const base64Clean = base64.split(',')[1] || base64
-            setPendingFileBase64(base64Clean)
-        }
-        reader.readAsDataURL(file)
+    const handleFilesSelect = useCallback((files: File[]) => {
+        setAttachmentError(null)
+        setPendingFiles((prev) => {
+            const merged = [...prev]
+            for (const file of files) {
+                const exists = merged.some((item) =>
+                    item.name === file.name &&
+                    item.size === file.size &&
+                    item.lastModified === file.lastModified
+                )
+                if (!exists) merged.push(file)
+            }
+            return merged
+        })
     }, [])
 
+    const handleRemovePendingFile = useCallback((index: number) => {
+        setPendingFiles((prev) => prev.filter((_, i) => i !== index))
+    }, [])
 
-    const submitMessage = useCallback((value: string) => {
-        if (!value.trim()) return
+    const uploadPendingFiles = useCallback(async (): Promise<UploadedAttachment[]> => {
+        if (pendingFiles.length === 0) return []
+        if (!token) throw new Error("認証情報がありません。再ログインしてください。")
+
+        const formData = new FormData()
+        for (const file of pendingFiles) {
+            formData.append('files', file)
+        }
+        formData.append('thread_id', stableId)
+
+        const response = await fetch('/api/uploads', {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${token}`,
+            },
+            body: formData,
+        })
+
+        const payload = await response.json().catch(() => ({}))
+        if (!response.ok) {
+            const detail = typeof payload?.detail === 'string'
+                ? payload.detail
+                : (typeof payload?.error === 'string' ? payload.error : `添付アップロードに失敗しました (${response.status})`)
+            throw new Error(detail)
+        }
+
+        return Array.isArray(payload?.attachments) ? payload.attachments as UploadedAttachment[] : []
+    }, [pendingFiles, stableId, token])
+
+    const mapAttachmentToSelectedInput = useCallback((item: UploadedAttachment): Record<string, any> => {
+        return {
+            image_url: item.url,
+            source_url: item.url,
+            license_note: 'User uploaded',
+            provider: 'user_upload',
+            caption: item.filename,
+        }
+    }, [])
+
+    const submitMessage = useCallback(async (
+        value: string,
+        options?: {
+            interruptIntent?: boolean
+            selectedImageInputsOverride?: Array<Record<string, any>>
+        }
+    ): Promise<boolean> => {
+        if (!value.trim()) return false
         if (!threadId && stableId !== currentThreadId) {
             setCurrentThreadId(stableId)
             window.history.replaceState(null, '', `/chat/${stableId}`)
         }
+
+        const payloadSelectedImageInputs = options?.selectedImageInputsOverride ?? selectedImageInputs
+        setAttachmentError(null)
+
+        let uploadedAttachments: UploadedAttachment[] = []
+        if (pendingFiles.length > 0) {
+            setIsUploadingAttachments(true)
+            try {
+                uploadedAttachments = await uploadPendingFiles()
+            } catch (error) {
+                console.error("Attachment upload failed:", error)
+                setAttachmentError(error instanceof Error ? error.message : "添付アップロードに失敗しました。")
+                return false
+            } finally {
+                setIsUploadingAttachments(false)
+            }
+        }
+
+        const mergedSelectedImageInputs: Array<Record<string, any>> = [
+            ...payloadSelectedImageInputs,
+            ...uploadedAttachments
+                .filter((item) => item.kind === 'image')
+                .map((item) => mapAttachmentToSelectedInput(item)),
+        ]
+
+        const dedupedImageInputs = Array.from(
+            new Map(
+                mergedSelectedImageInputs
+                    .filter((item) => typeof item?.image_url === 'string' && item.image_url.length > 0)
+                    .map((item) => [String(item.image_url), item])
+            ).values()
+        )
+
+        // Optimistically update message count to current + 1 (user message)
+        // This ensures early data events (like plan start) are stamped with the correct
+        // message index (i.e., associated with the upcoming assistant response).
+        const streamAnchorMessageCount = messages.length + 1
+        messageCountRef.current = streamAnchorMessageCount
+        streamEventMessageCountRef.current = streamAnchorMessageCount
+
         sendMessage(
             { text: value },
             {
@@ -573,33 +778,83 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                     : undefined,
                 body: {
                     thread_id: stableId,
-                    ...(pendingFileBase64 && { pptx_template_base64: pendingFileBase64 }),
+                    attachments: uploadedAttachments,
+                    selected_image_inputs: dedupedImageInputs,
+                    interrupt_intent: Boolean(options?.interruptIntent),
+                    aspect_ratio: aspectRatio,
+                    ...(initialProductType ? { product_type: initialProductType } : {}),
                 }
             }
         )
-        setPendingFile(null)
-        setPendingFileBase64(null)
+        setSelectedImageInputs([])
+        setPendingFiles([])
         setInput("")
-    }, [sendMessage, threadId, stableId, currentThreadId, setCurrentThreadId, pendingFileBase64, token])
+        return true
+    }, [
+        sendMessage,
+        threadId,
+        stableId,
+        currentThreadId,
+        setCurrentThreadId,
+        token,
+        selectedImageInputs,
+        initialProductType,
+        messages.length,
+        pendingFiles,
+        uploadPendingFiles,
+        mapAttachmentToSelectedInput,
+        aspectRatio,
+    ])
+
+    const handleToggleImageCandidate = useCallback((candidate: Record<string, any>) => {
+        const imageUrl = typeof candidate?.image_url === 'string' ? candidate.image_url : ''
+        if (!imageUrl) return
+        setSelectedImageInputs((prev) => {
+            const exists = prev.some((item) => item?.image_url === imageUrl)
+            if (exists) return prev.filter((item) => item?.image_url !== imageUrl)
+            return [...prev, candidate]
+        })
+    }, [])
+
+    const selectedImageUrls = selectedImageInputs
+        .map((item) => (typeof item?.image_url === 'string' ? item.image_url : ''))
+        .filter((url) => url.length > 0)
 
     const handleSend = useCallback((value: string) => {
         if (!value.trim()) return
-        if (authLoading || !historyReady || isLoading) return
+        if (authLoading || !historyReady) return
         if (!user || !token) {
             setPendingAuthMessage(value)
             setShowAuthDialog(true)
             return
         }
-        submitMessage(value)
-    }, [authLoading, historyReady, isLoading, user, token, submitMessage])
+        if (isBusy) {
+            setQueuedInterrupt({
+                text: value,
+                selectedImageInputs: [...selectedImageInputs],
+            })
+            setSelectedImageInputs([])
+            setInput("")
+            return
+        }
+        void submitMessage(value)
+    }, [authLoading, historyReady, isBusy, user, token, submitMessage, selectedImageInputs])
+
+    const handleStop = useCallback(() => {
+        if (!isBusy) return
+        stop()
+    }, [isBusy, stop])
 
     useEffect(() => {
         if (!showAuthDialog || !pendingAuthMessage) return
-        if (authLoading || !user || !token || !historyReady || isLoading) return
-        submitMessage(pendingAuthMessage)
-        setPendingAuthMessage(null)
-        setShowAuthDialog(false)
-    }, [authLoading, historyReady, isLoading, pendingAuthMessage, showAuthDialog, submitMessage, token, user])
+        if (authLoading || !user || !token || !historyReady || isBusy) return
+        void (async () => {
+            const sent = await submitMessage(pendingAuthMessage)
+            if (!sent) return
+            setPendingAuthMessage(null)
+            setShowAuthDialog(false)
+        })()
+    }, [authLoading, historyReady, isBusy, pendingAuthMessage, showAuthDialog, submitMessage, token, user])
 
     useEffect(() => {
         if (!showAuthDialog) {
@@ -607,13 +862,20 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         }
     }, [showAuthDialog])
 
-    const inputDisabledReason = authLoading
-        ? "Checking authentication..."
-        : !historyReady
-            ? null
-            : isLoading
-                ? "Generating response..."
-                : null
+    useEffect(() => {
+        if (!queuedInterrupt) return
+        if (authLoading || !historyReady || isBusy) return
+        if (!user || !token) return
+
+        void (async () => {
+            const sent = await submitMessage(queuedInterrupt.text, {
+                interruptIntent: true,
+                selectedImageInputsOverride: queuedInterrupt.selectedImageInputs,
+            })
+            if (!sent) return
+            setQueuedInterrupt(null)
+        })()
+    }, [queuedInterrupt, authLoading, historyReady, isBusy, user, token, submitMessage])
 
     return (
         <div className="flex w-full h-full relative">
@@ -624,6 +886,9 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                         latestPlan={latestPlan}
                         latestOutline={latestOutline}
                         latestSlideDeck={latestSlideDeck}
+                        selectedImageUrls={selectedImageUrls}
+                        onToggleImageCandidate={handleToggleImageCandidate}
+                        queuedUserMessage={queuedInterrupt?.text || null}
                         isLoading={isLoading}
                         status={status}
                         className="h-full"
@@ -635,9 +900,9 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
 
                     {/* Agent Status Indicator - Removed legacy ui_step_update support */}
 
-                    {error && (
+                    {(error || attachmentError) && (
                         <div className="w-full max-w-5xl pointer-events-auto mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm">
-                            {error.message || "An error occurred during the chat session."}
+                            {attachmentError || error?.message || "An error occurred during the chat session."}
                         </div>
                     )}
 
@@ -654,17 +919,21 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                             value={input}
                             onChange={handleInputChange}
                             onSend={handleSend}
-                            isLoading={isLoading || authLoading || !historyReady}
-                            disabledReason={inputDisabledReason}
-                            onFileSelect={handleFileSelect}
-                            selectedFile={pendingFile}
-                            onClearFile={() => { setPendingFile(null); setPendingFileBase64(null) }}
+                            onStop={handleStop}
+                            isLoading={authLoading || !historyReady || isUploadingAttachments}
+                            isProcessing={isLoading}
+                            allowSendWhileLoading={!isUploadingAttachments}
+                            onFilesSelect={handleFilesSelect}
+                            selectedFiles={pendingFiles}
+                            onRemoveFile={handleRemovePendingFile}
                             actionPill={
                                 selectedAction
-                                    ? { label: selectedAction.pillLabel, icon: selectedAction.icon }
+                                    ? { label: selectedAction.pillLabel, icon: selectedAction.icon, className: selectedAction.pillClassName }
                                     : undefined
                             }
                             onClearAction={() => setSelectedActionId(null)}
+                            aspectRatio={aspectRatio}
+                            onAspectRatioChange={setAspectRatio}
                         />
                     </div>
 

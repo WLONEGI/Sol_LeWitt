@@ -46,9 +46,9 @@ lsof -ti:8000 | xargs kill -9 2>/dev/null && echo "  - Stopped process on port 8
 
 # Clean up log files
 mkdir -p "$LOG_DIR"
-rm -f "$BACKEND_DIR/backend.log" "$BACKEND_DIR/proxy.log" "$LOG_DIR/frontend.log" "$LOG_DIR/frontend_event.log"
-touch "$BACKEND_DIR/backend.log" "$BACKEND_DIR/proxy.log" "$LOG_DIR/frontend.log" "$LOG_DIR/frontend_event.log"
-echo "  - Cleaned up and recreated log files (backend.log, proxy.log, logs/frontend.log, logs/frontend_event.log)"
+rm -f "$LOG_DIR/backend.log" "$LOG_DIR/proxy.log" "$LOG_DIR/frontend.log" "$LOG_DIR/frontend_event.log"
+touch "$LOG_DIR/backend.log" "$LOG_DIR/proxy.log" "$LOG_DIR/frontend.log" "$LOG_DIR/frontend_event.log"
+echo "  - Cleaned up and recreated log files (logs/backend.log, logs/proxy.log, logs/frontend.log, logs/frontend_event.log)"
 
 sleep 2
 
@@ -58,8 +58,8 @@ echo "[2/2] Starting services in background..."
 # Start Cloud SQL Proxy
 cd "$BACKEND_DIR"
 if [ -f "./cloud-sql-proxy" ]; then
-    nohup ./cloud-sql-proxy "$CONNECTION_NAME" --debug-logs > proxy.log 2>&1 &
-    echo "  - Cloud SQL Proxy started (PID: $!). Logs: backend/proxy.log"
+    nohup ./cloud-sql-proxy "$CONNECTION_NAME" --debug-logs > "$LOG_DIR/proxy.log" 2>&1 &
+    echo "  - Cloud SQL Proxy started (PID: $!). Logs: logs/proxy.log"
 else
     echo "  - ⚠️ Error: cloud-sql-proxy binary not found in $BACKEND_DIR"
 fi
@@ -67,8 +67,8 @@ fi
 # Start Backend
 if [ -d ".venv" ]; then
     # Start uvicorn via uv in background
-    nohup uv run uvicorn src.app.app:app --reload --port 8000 --log-level debug > backend.log 2>&1 &
-    echo "  - Backend started (PID: $!). Logs: backend/backend.log"
+    nohup uv run uvicorn src.app.app:app --reload --port 8000 --log-level debug > "$LOG_DIR/backend.log" 2>&1 &
+    echo "  - Backend started (PID: $!). Logs: logs/backend.log"
 else
     echo "  - ⚠️ Error: .venv not found in $BACKEND_DIR. Run uv sync first."
 fi
@@ -101,8 +101,8 @@ fi
 echo "===================================================="
 echo "All services have been triggered to restart."
 echo "Use the following commands to check logs:"
-echo "  tail -f $BACKEND_DIR/backend.log"
+echo "  tail -f $LOG_DIR/backend.log"
 echo "  tail -f $LOG_DIR/frontend.log"
 echo "  tail -f $LOG_DIR/frontend_event.log"
-echo "  tail -f $BACKEND_DIR/proxy.log"
+echo "  tail -f $LOG_DIR/proxy.log"
 echo "===================================================="

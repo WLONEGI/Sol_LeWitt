@@ -32,7 +32,7 @@ async def test_researcher_events():
         "internal_research_tasks": tasks,
         "internal_research_results": [],
         "is_decomposed": True,
-        "plan": [{"id": "test_step", "role": "researcher", "status": "in_progress", "instruction": "Test research"}],
+        "plan": [{"id": "test_step", "capability": "researcher", "status": "in_progress", "instruction": "Test research"}],
         "messages": [],
         "artifacts": {}
     }

@@ -1,60 +1,76 @@
 # 02. LangGraph ワークフロー・エンジン
 
-本システムの中核である LangGraph によるエージェント・オーケストレーションの詳細について記述します。
+本システムの LangGraph 実装は、**Frozen Plan + Patch** を基盤にしています。  
+命名と入出力は canonical 形式（`capability` / `instruction` / `writer`）に統一されています。
 
 ## 1. ノード定義と責務
 
-グラフは以下のノードで構成され、各ノードは特定の `tags` を持ちます。これらのタグは SSE ストリーミングのルーティングに使用されます。
-
-| ノード名 | タグ | 責務 |
+| ノード名 | ラン名/識別 | 責務 |
 | :--- | :--- | :--- |
-| **Coordinator** | `coordinator` | ユーザー入力の解析、対話の継続、またはプランナーへのハンドオフ。 |
-| **Planner** | `planner` | タスク分解と実行プラン（`plan`）の作成。 |
-| **Supervisor** | `supervisor` | プランの進捗監視と Worker への動的ルーティング。 |
-| **Storywriter** | `storywriter` | スライドのアウトライン、セクション、本文（Markdown）の執筆。 |
-| **Visualizer** | `visualizer` | 画像生成プロンプトの設計と `google-genai` SDK による画像生成。 |
-| **Data Analyst** | `data_analyst` | Python コードの生成・実行によるデータ分析と可視化案の作成。 |
-| **Researcher** | `researcher` | **Subgraph** として実装。Google Search (Native Grounding) による調査。 |
+| **Coordinator** | `coordinator` | 会話継続か制作開始かを判定し、制作時は `plan_manager` へ。 |
+| **Plan Manager** | `plan_manager` | 初回計画生成（`planner`）か、修正系（`patch_planner` / `patch_gate`）かを分岐。 |
+| **Planner** | `planner` | canonical な実行計画を JSON で生成。 |
+| **Patch Planner** | `patch_planner` | 追加指示を `PlanPatchOp` に変換。 |
+| **Patch Gate** | `patch_gate` | パッチ適用（型崩れのみ hard reject / それ以外 warning）。 |
+| **Supervisor** | `supervisor` | `plan` の `pending/in_progress` を管理し、Workerへルーティング。 |
+| **Writer** | `writer` | 構成・脚本・設定などの文章系成果物を JSON 生成。 |
+| **Researcher** | `researcher` | サブグラフで調査タスクを分解・実行。画像検索結果も返却。 |
+| **Visualizer** | `visualizer` | 画像生成計画と画像生成実行。 |
+| **Data Analyst** | `data_analyst` | Python実行やパッケージングなどの後処理。 |
+| **Retry/Alt Mode** | `retry_or_alt_mode` | blocked ステップの再試行・代替タスク追加。 |
 
 ## 2. 状態管理（State Schema）
 
-システムの状態は `MessagesState` を拡張した `State` クラスで管理されます。
+`State` は `MessagesState` を拡張し、主要フィールドは以下です。
 
 ```python
-class TaskStep(TypedDict):
+class TaskStep(TypedDict, total=False):
     id: int
-    role: str                       # 担当 Worker
-    instruction: str                # 指示内容
-    description: str                # ステップ概要
-    status: Literal["pending", "in_progress", "complete"]
-    result_summary: str | None      # 実行結果の要約
+    capability: Literal["writer", "researcher", "visualizer", "data_analyst"]
+    mode: str
+    instruction: str
+    title: str
+    description: str
+    inputs: list[str]
+    outputs: list[str]
+    preconditions: list[str]
+    validation: list[str]
+    success_criteria: list[str]
+    fallback: list[str]
+    depends_on: list[int]
+    target_scope: TargetScope
+    status: Literal["pending", "in_progress", "completed", "blocked"]
+    result_summary: str | None
 
 class State(MessagesState):
-    plan: list[TaskStep]            # 実行計画
-    artifacts: dict[str, Any]       # 生成された成果物（JSON/URL等）
-    design_context: DesignContext   # テンプレート（PPTX）から解析されたデザイン情報
+    plan: list[TaskStep]
+    artifacts: dict[str, Any]
+    plan_patch_log: list[PlanPatchOp]
+    selected_image_inputs: list[dict[str, Any]]
+    target_scope: TargetScope
 ```
 
 ## 3. オーケストレーション・ロジック
 
-### 3.1 計画駆動型ルーティング
-`Supervisor` は、`state.plan` 内のステップを順次スキャンします。
-1.  `pending` 状態のステップを見つけ、その `role` に基づいて Worker ノードへ分岐します。
-2.  Worker から戻ると、`in_progress` だったステップを `complete` に更新します。
-3.  すべてのステップが `complete` になるまでループを継続します。
+### 3.1 Frozen Plan + Patch
+1. 初回は `planner` が `plan` を作成。  
+2. 実行中の追加指示は `patch_planner` が `edit_pending/split_pending/append_tail` に変換。  
+3. `patch_gate` が `plan` に反映し、`supervisor` が再開。
 
-### 3.2 Subgraph (Researcher)
-調査タスクは `Researcher` サブグラフで処理されます。
-- `Manager` ノードが調査リクエストを複数のサブタスクに分解。
-- `Send` オブジェクトを使用して複数の `Worker` ノードを並列起動（Fan-out）。
-- 全結果を `Manager` が集約し、メイングラフに返却（Reduce）。
+### 3.2 ルーティング単位
+- Worker 選択は `step.capability` のみを使用。  
+- `role/objective` などの旧互換キーは使用しない。
 
-## 4. 認証と LLM ファクトリ
-`src/infrastructure/llm/llm.py` で定義されるファクトリにより、用途に応じたモデルが選択されます。
+### 3.3 Researcher Subgraph
+- `research_manager` がタスク分解。  
+- `research_worker` が順次実行し、必要に応じて画像候補（URL/出典/ライセンス）を返却。
 
-- **Reasoning**: `gemini-2.0-flash-thinking-exp-1219` (Planner, Researcher)
-- **Basic**: `gemini-1.5-flash-002` (Coordinator, Storywriter)
-- **Vision**: `gemini-3-pro-image-preview` (Visualizer)
+## 4. ストリーミング契約（要点）
 
-> [!NOTE]
-> すべてのモデルは `project` パラメータを指定することで、ADC (Application Default Credentials) を使用して Vertex AI バックエンドに接続されます。
+- Plan: `data-plan_update`
+- Writer成果物: `data-writer-output`
+- Image Search候補: `data-image-search-results`
+- Visualizer成果物: `data-visual-*`
+- Data Analyst成果物: `data-analyst-*`
+
+フロントは `data-*` パートを UI の単一ソースとして扱います。

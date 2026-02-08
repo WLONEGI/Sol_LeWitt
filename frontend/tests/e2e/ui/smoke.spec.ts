@@ -1,10 +1,27 @@
 import { test, expect } from '@playwright/test';
 
 test('chat interface smoke test', async ({ page }) => {
+    await page.route('/api/chat', async route => {
+        const responseBody = `data: ${JSON.stringify({
+            type: 'data-plan_update',
+            data: {
+                title: 'Smoke Plan',
+                description: 'Smoke test stream',
+                plan: [{ id: 1, capability: 'writer', title: 'Step 1', status: 'in_progress' }],
+            },
+        })}\n\n`;
+
+        await route.fulfill({
+            status: 200,
+            contentType: 'text/event-stream',
+            body: responseBody,
+        });
+    });
+
     await page.goto('/');
 
     // Verify chat input is present
-    const input = page.getByPlaceholder('Type a message...');
+    const input = page.getByRole('textbox').first();
     await expect(input).toBeVisible();
 
     // Try sending a message

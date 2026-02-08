@@ -1,0 +1,21 @@
+.git
+.gitignore
+node_modules/
+**/node_modules/
+.next/
+**/ .next/
+__pycache__/
+**/*.pyc
+.venv/
+**/ .venv/
+venv/
+**/ venv/
+.env
+**/.env
+.DS_Store
+logs/
+*.log
+backend/backend.log
+frontend/frontend_event.log
+frontend/test-results/
+frontend/playwright-report/

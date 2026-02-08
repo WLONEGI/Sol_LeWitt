@@ -71,16 +71,10 @@ export function TimelineReasoning({ content, isLastInSequence, isStreaming = fal
                         <div className="absolute left-1 top-0 bottom-0 w-0.5 bg-muted-foreground/20 rounded-full" />
 
                         <div className="py-1">
-                            {/* 思考ログ全体を斜体にし、Markdown内のボールドを通常のウェイト（斜体）に上書き */}
-                            <div className="text-sm italic text-muted-foreground leading-relaxed font-serif">
+                            {/* 思考ログのフォントを本文に合わせる（斜体・Serif削除） */}
+                            <div className="text-sm text-muted-foreground leading-relaxed">
                                 <Markdown
-                                    className="prose prose-sm dark:prose-invert max-w-none text-muted-foreground/90 italic border-none shadow-none prose-p:my-1"
-                                    components={{
-                                        // 全体を斜体にするため、太字（**）を通常のフォントウェイト（斜体は適用済み）に上書き
-                                        strong: ({ children }) => (
-                                            <span className="font-normal">{children}</span>
-                                        ),
-                                    }}
+                                    className="prose prose-sm dark:prose-invert max-w-none text-muted-foreground/90 border-none shadow-none prose-p:my-1"
                                 >
                                     {content}
                                 </Markdown>

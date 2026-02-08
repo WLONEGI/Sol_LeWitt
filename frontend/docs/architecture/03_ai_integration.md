@@ -38,4 +38,4 @@ useEffect(() => {
 - **Bulk Swap**: `artifact_ready` を受信すると、スケルトンから実際の実データ（Markdown, Image等）へフェードインで切り替えます。
 
 > [!IMPORTANT]
-> ストリーミングデータは NDJSON 形式で送信されるため、`stream-transformer.ts` 等のユーティリティが不正な JSON 行の影響を防ぐためのガードレールとして機能します。
+> ストリーミングデータは NDJSON 形式で送信されるため、`src/app/api/chat/route.ts` 側のパーサで不正行を防御的に処理し、ストリーム全体の継続性を担保します。

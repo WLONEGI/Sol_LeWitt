@@ -8,26 +8,11 @@ import {
     CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-
-interface PlanStep {
-    id: number;
-    role: string;
-    instruction: string;
-    title: string;
-    description: string;
-    status: "pending" | "in_progress" | "completed";
-    result_summary?: string | null;
-}
-
-interface PlanData {
-    plan: PlanStep[];
-    title?: string;
-    description?: string;
-    ui_type?: string;
-}
+import type { PlanStep, PlanStepStatus, PlanUpdateData } from "@/features/chat/types/plan";
+import { getPlanStepActorLabel, normalizePlanUpdateData } from "@/features/chat/types/plan";
 
 interface PlanStatusChecklistProps {
-    data: PlanData;
+    data: PlanUpdateData;
     className?: string;
     approvalStatus?: 'loading' | 'idle';
 }
@@ -39,6 +24,8 @@ export function PlanStatusChecklist({
 }: PlanStatusChecklistProps) {
     // Determine overall status based on steps? 
     // Usually the last plan update reflects current state.
+
+    const normalizedPlan = normalizePlanUpdateData(data).plan as Array<PlanStep & { status: PlanStepStatus }>;
 
     return (
         <Card className={cn(
@@ -65,7 +52,7 @@ export function PlanStatusChecklist({
                 )}
             </CardHeader>
             <CardContent className="grid gap-1 px-2 pb-2 pt-0">
-                {data.plan.map((step) => (
+                {normalizedPlan.map((step) => (
                     <PlanStepItem key={step.id} step={step} />
                 ))}
             </CardContent>
@@ -73,7 +60,7 @@ export function PlanStatusChecklist({
     );
 }
 
-function PlanStepItem({ step }: { step: PlanStep }) {
+function PlanStepItem({ step }: { step: PlanStep & { status: PlanStepStatus } }) {
     const [isOpen, setIsOpen] = useState(false);
 
     const isCompleted = step.status === "completed";
@@ -113,10 +100,10 @@ function PlanStepItem({ step }: { step: PlanStep }) {
                             "text-sm font-sans font-medium leading-none truncate",
                             isCompleted ? "text-slate-600 dark:text-slate-400 decoration-slate-400" : "text-slate-900 dark:text-slate-200"
                         )}>
-                            {step.title}
+                            {step.title || "タスク"}
                         </h4>
                         <p className="text-xs font-sans text-slate-500 mt-0.5 truncate">
-                            {step.role} • {step.description}
+                            {getPlanStepActorLabel(step)} • {step.description || "タスク"}
                         </p>
 
                     </div>
@@ -132,7 +119,7 @@ function PlanStepItem({ step }: { step: PlanStep }) {
                 <div className="px-8 pb-2 pt-0.5 text-xs text-slate-600 dark:text-slate-400 space-y-1.5">
                     <div className="p-2 rounded bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800">
                         <span className="font-semibold block mb-0.5">Instruction:</span>
-                        {step.instruction}
+                        {step.instruction || "（指示なし）"}
                     </div>
                     {step.result_summary && (
                         <div className="p-2 rounded bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/50">

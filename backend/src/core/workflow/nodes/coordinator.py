@@ -11,11 +11,26 @@ from src.infrastructure.llm.llm import get_llm_by_type
 from src.shared.config import AGENT_LLM_MAP
 from src.resources.prompts.template import apply_prompt_template
 from src.core.workflow.state import State
+from src.core.workflow.nodes.orchestration import (
+    _detect_intent,
+    _detect_target_scope,
+    _extract_latest_user_text,
+    _hydrate_target_scope_from_ledger,
+)
 
 logger = logging.getLogger(__name__)
+SUPPORTED_PRODUCT_TYPES = ("slide_infographic", "document_design", "comic")
 
 class CoordinatorOutput(BaseModel):
     """Structured output for coordinator in a single LLM call."""
+    product_type: Literal["slide_infographic", "document_design", "comic", "unsupported"] = Field(
+        ...,
+        description=(
+            "Classified product category. "
+            "Use slide_infographic/document_design/comic for supported requests; "
+            "use unsupported for out-of-scope categories."
+        ),
+    )
     response: str = Field(
         ...,
         description="User-facing response in Japanese. Must be polite and actionable."
@@ -29,14 +44,17 @@ class CoordinatorOutput(BaseModel):
         description="Short title (<=20 chars) only when goto is 'planner'. Use null otherwise."
     )
 
-async def coordinator_node(state: State, config: RunnableConfig) -> Command[Literal["planner", "supervisor", "__end__"]]:
+async def coordinator_node(state: State, config: RunnableConfig) -> Command[Literal["plan_manager", "__end__"]]:
     """
-    Coordinator Node: Gatekeeper & UX Manager (Unified).
-    Uses structured output to decide execution flow while streaming JSON to the frontend.
+    Coordinator Node: Unified scope + intent pre-processing and UX gatekeeper.
+    Uses structured output to classify category and decide execution flow.
     """
     logger.info("Coordinator processing request (Unified Mode)")
+    latest_user_text = _extract_latest_user_text(state)
     
-    messages = apply_prompt_template("coordinator", state)
+    prompt_state = dict(state)
+    prompt_state.setdefault("product_type", None)
+    messages = apply_prompt_template("coordinator", prompt_state)
     logger.debug(f"Coordinator Messages: {messages}")
     
     # 1. Setup LLM with structured output
@@ -55,16 +73,46 @@ async def coordinator_node(state: State, config: RunnableConfig) -> Command[Lite
     result: CoordinatorOutput = await structured_llm.ainvoke(messages, config=stream_config)
 
     logger.debug(
-        "Coordinator Structured Response: goto='%s', title='%s', response_len=%s",
+        "Coordinator Structured Response: product_type='%s', goto='%s', title='%s', response_len=%s",
+        result.product_type,
         result.goto,
         result.title,
         len(result.response or "")
     )
 
     # 4. Decision Logic
-    goto_destination = "planner" if result.goto == "planner" else "__end__"
+    existing_product_type = state.get("product_type")
+    if existing_product_type in SUPPORTED_PRODUCT_TYPES:
+        if result.product_type != existing_product_type:
+            logger.info(
+                "Coordinator product_type overridden by lock: model=%s -> locked=%s",
+                result.product_type,
+                existing_product_type,
+            )
+        effective_product_type = existing_product_type
+    else:
+        effective_product_type = result.product_type
 
-    if goto_destination == "planner":
+    goto_destination = "plan_manager" if result.goto == "planner" else "__end__"
+    if effective_product_type == "unsupported" or effective_product_type not in SUPPORTED_PRODUCT_TYPES:
+        goto_destination = "__end__"
+
+    updates: dict = {
+        "messages": [AIMessage(content=result.response)],
+    }
+    if effective_product_type in SUPPORTED_PRODUCT_TYPES:
+        updates["product_type"] = effective_product_type
+    if not state.get("request_intent"):
+        updates["request_intent"] = _detect_intent(latest_user_text)
+    if not state.get("target_scope"):
+        detected_scope = _detect_target_scope(latest_user_text)
+        if detected_scope:
+            updates["target_scope"] = _hydrate_target_scope_from_ledger(
+                detected_scope,
+                state.get("asset_unit_ledger"),
+            )
+
+    if goto_destination == "plan_manager":
         thread_id = config.get("configurable", {}).get("thread_id")
         user_uid = config.get("configurable", {}).get("user_uid")
         title = result.title or _derive_fallback_title(state)  # CHANGED: deterministic fallback
@@ -77,9 +125,8 @@ async def coordinator_node(state: State, config: RunnableConfig) -> Command[Lite
             )
     
     # 5. Return Command
-    # We return the message so it's added to history.
     return Command(
-        update={"messages": [AIMessage(content=result.response)]},
+        update=updates,
         goto=goto_destination
     )
 

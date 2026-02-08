@@ -45,7 +45,7 @@ def mock_settings():
         mock_settings.AGENT_LLM_MAP = {
             "coordinator": "gemini-2.0-flash-exp",
             "planner": "reasoning",
-            "storywriter": "gemini-2.0-flash-thinking-exp",
+            "writer": "gemini-2.0-flash-thinking-exp",
             "visualizer": "gemini-2.0-flash-exp",
             "data_analyst": "gemini-2.0-flash-exp"
         }

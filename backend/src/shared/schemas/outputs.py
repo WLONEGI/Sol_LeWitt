@@ -1,23 +1,115 @@
 # Pydanticスキーマ: LangGraphノードの構造化出力定義
-from typing import List, Literal, Optional
-from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, Field, model_validator
 
 
 
+
+
+# === Orchestration Contracts (v1) ===
+ProductType = Literal["slide_infographic", "document_design", "comic"]
+IntentType = Literal["new", "refine", "regenerate"]
+TaskCapability = Literal["writer", "visualizer", "researcher", "data_analyst"]
+TaskStatus = Literal["pending", "in_progress", "completed", "blocked"]
+ArtifactStatus = Literal["streaming", "completed", "failed"]
+PlanPatchOpType = Literal["edit_pending", "split_pending", "append_tail"]
+
+
+class TargetScope(BaseModel):
+    """部分修正の対象範囲."""
+    asset_unit_ids: List[str] = Field(default_factory=list, description="最小更新単位のID（例: slide:3）")
+    asset_units: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="最小更新単位の詳細（unit_kind/unit_index/artifact_id等）"
+    )
+    slide_numbers: List[int] = Field(default_factory=list)
+    page_numbers: List[int] = Field(default_factory=list)
+    panel_numbers: List[int] = Field(default_factory=list)
+    character_ids: List[str] = Field(default_factory=list)
+    artifact_ids: List[str] = Field(default_factory=list)
+
+
+class PlanPatchOp(BaseModel):
+    """Frozen Planに対する許可済み差分操作."""
+    op: PlanPatchOpType
+    target_step_id: Optional[int] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class OrchestrationTaskStep(BaseModel):
+    """実行時のTask Card."""
+    id: int = Field(description="ステップ番号（1から始まる）")
+    capability: TaskCapability = Field(description="実行担当のCapability")
+    mode: str = Field(description="Workerの実行モード")
+    instruction: str = Field(description="このステップの実行指示")
+    title: str = Field(default="タスク", description="ステップタイトル")
+    description: str = Field(default="タスク", description="ステップ説明")
+    inputs: List[str] = Field(default_factory=list, description="入力成果物・前提条件")
+    success_criteria: List[str] = Field(default_factory=list, description="受け入れ条件")
+    target_scope: Optional[TargetScope] = Field(default=None, description="部分修正の対象範囲")
+    status: TaskStatus = Field(default="pending", description="実行ステータス")
+    result_summary: Optional[str] = Field(default=None, description="実行結果の要約")
+    retries_used: int = Field(default=0, ge=0, description="当ステップで消費した再思考回数")
+
+
+class TaskBoard(BaseModel):
+    """実行キューの状態."""
+    pending: List[int] = Field(default_factory=list)
+    in_progress: List[int] = Field(default_factory=list)
+    completed: List[int] = Field(default_factory=list)
+    blocked: List[int] = Field(default_factory=list)
+
+
+class QualityReport(BaseModel):
+    """ステップ評価レポート."""
+    step_id: int
+    passed: bool
+    score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    failed_checks: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
+class ArtifactEnvelope(BaseModel):
+    """全成果物の共通エンベロープ."""
+    artifact_id: str
+    artifact_type: str
+    producer: TaskCapability
+    product_type: ProductType
+    schema_version: Literal[1] = 1
+    version: int = Field(default=1, ge=1)
+    status: ArtifactStatus = "completed"
+    depends_on: List[str] = Field(default_factory=list)
+    content: Dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[str] = Field(default=None, description="ISO8601")
+    updated_at: Optional[str] = Field(default=None, description="ISO8601")
+
+
+class ResearchImageCandidate(BaseModel):
+    """Researcherが返す画像候補（UI表示用）."""
+    image_url: str = Field(description="画像URL")
+    source_url: str = Field(description="出典URL")
+    license_note: str = Field(description="ライセンス・利用条件メモ")
+    provider: str = Field(description="取得元プロバイダー名")
+    caption: Optional[str] = Field(default=None, description="補足説明")
+    relevance_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 # === Planner Output ===
 class TaskStep(BaseModel):
     """実行計画の1ステップ"""
     id: int = Field(description="ステップ番号（1から始まる）")
-    role: Literal["researcher", "storywriter", "visualizer", "data_analyst"] = Field(
-        description="担当エージェント名"
+    capability: TaskCapability = Field(
+        description="担当Capability（正規フォーマット）"
+    )
+    mode: Optional[str] = Field(
+        default=None,
+        description="Capability内の実行モード"
     )
     instruction: str = Field(
         description="エージェントへの詳細な指示（トーン、対象読者、具体的な要件を含む）"
     )
-    title: str = Field(description="このステップの短いタイトル（例：競合調査、構成案作成）")
-    description: str = Field(description="このステップの概要説明")
+    title: Optional[str] = Field(default=None, description="このステップの短いタイトル（例：競合調査、構成案作成）")
+    description: Optional[str] = Field(default=None, description="このステップの概要説明")
     inputs: List[str] = Field(
         default_factory=list,
         description="このステップで必要な入力（参照する成果物や前提）"
@@ -38,15 +130,23 @@ class TaskStep(BaseModel):
         default_factory=list,
         description="失敗時の代替手段や再試行方針"
     )
+    success_criteria: List[str] = Field(
+        default_factory=list,
+        description="受け入れ条件（新フォーマット）"
+    )
+    target_scope: Optional[TargetScope] = Field(
+        default=None,
+        description="部分修正対象"
+    )
     depends_on: List[int] = Field(
         default_factory=list,
         description="依存するステップID（順序・参照関係）"
     )
     design_direction: Optional[str] = Field(
         default=None,
-        description="Visualizerへのデザイン指示（トーン、スタイル、モチーフなど）。Storywriterの場合はNoneでよい。"
+        description="Visualizerへのデザイン指示（トーン、スタイル、モチーフなど）。Writerの場合はNoneでよい。"
     )
-    status: Literal["pending", "in_progress", "completed"] = Field(
+    status: TaskStatus = Field(
         default="pending",
         description="ステップの実行ステータス"
     )
@@ -54,6 +154,23 @@ class TaskStep(BaseModel):
         default=None,
         description="実行結果の要約"
     )
+
+    @model_validator(mode="after")
+    def _normalize_step_shape(self) -> "TaskStep":
+        if not self.instruction.strip():
+            self.instruction = "タスクを実行する"
+
+        if not self.description:
+            self.description = self.title or self.instruction or "タスク"
+        if not self.title:
+            self.title = self.description or "タスク"
+
+        if not self.validation and self.success_criteria:
+            self.validation = list(self.success_criteria)
+        if not self.success_criteria and self.validation:
+            self.success_criteria = list(self.validation)
+
+        return self
 
 
 
@@ -64,7 +181,7 @@ class PlannerOutput(BaseModel):
 
 
 
-# === Storywriter Output ===
+# === Writer Output ===
 class SlideContent(BaseModel):
     """スライド1枚分のコンテンツ"""
     slide_number: int = Field(description="スライド番号")
@@ -84,10 +201,126 @@ class SlideContent(BaseModel):
 
 
 
-class StorywriterOutput(BaseModel):
-    """Storywriterノードの出力"""
+class WriterSlideOutlineOutput(BaseModel):
+    """Writer(mode=slide_outline) の出力。"""
     execution_summary: str = Field(description="実行結果の要約（例：『◯◯に関するスライド構成を5枚作成しました』）")
+    user_message: str = Field(description="ユーザー向けの簡潔な進捗・成果メッセージ")
     slides: List[SlideContent] = Field(description="スライドコンテンツのリスト")
+
+
+class StoryBeat(BaseModel):
+    """物語フレームワークのビート定義。"""
+    beat_id: str = Field(description="ビートID（例: setup, inciting_incident）")
+    summary: str = Field(description="ビートの要約")
+    purpose: str = Field(description="このビートの役割")
+    tone: Optional[str] = Field(default=None, description="感情トーン")
+
+
+class WriterStoryFrameworkOutput(BaseModel):
+    """Writer(mode=story_framework) の出力。"""
+    execution_summary: str = Field(description="実行結果の要約")
+    user_message: str = Field(description="ユーザー向けの簡潔な進捗・成果メッセージ")
+    logline: str = Field(description="一文で要約した物語の核")
+    world_setting: str = Field(description="世界観")
+    background_context: str = Field(description="時代背景・前提状況")
+    tone_and_temperature: str = Field(description="温度感・文体トーン")
+    narrative_arc: List[str] = Field(default_factory=list, description="全体の起承転結")
+    key_beats: List[StoryBeat] = Field(default_factory=list, description="主要ビート")
+    constraints: List[str] = Field(default_factory=list, description="制作上の制約")
+
+
+class CharacterProfile(BaseModel):
+    """キャラクター設定。"""
+    character_id: str = Field(description="キャラクターID")
+    name: str = Field(description="表示名")
+    role: str = Field(description="物語上の役割")
+    appearance_core: str = Field(description="外見の核となる特徴（体型・顔立ち・髪型など）")
+    costume_core: str = Field(description="衣装・装身具の核となる特徴")
+    personality: str = Field(description="性格")
+    backstory: str = Field(description="背景")
+    motivation: str = Field(description="動機")
+    relationships: List[str] = Field(default_factory=list, description="主要な関係性（人物名: 関係）")
+    color_palette: List[str] = Field(default_factory=list, description="推奨配色")
+    signature_items: List[str] = Field(default_factory=list, description="象徴的な持ち物・意匠")
+    forbidden_elements: List[str] = Field(default_factory=list, description="避けるべき要素")
+    visual_keywords: List[str] = Field(default_factory=list, description="画像生成向けキーワード")
+
+
+class WriterCharacterSheetOutput(BaseModel):
+    """Writer(mode=character_sheet) の出力。"""
+    execution_summary: str = Field(description="実行結果の要約")
+    user_message: str = Field(description="ユーザー向けの簡潔な進捗・成果メッセージ")
+    setting_notes: Optional[str] = Field(default=None, description="キャラ共通の設定メモ")
+    characters: List[CharacterProfile] = Field(description="キャラクター一覧")
+
+
+class InfographicBlock(BaseModel):
+    """インフォグラフィック構成ブロック。"""
+    block_id: str = Field(description="ブロックID")
+    heading: str = Field(description="見出し")
+    body: str = Field(description="本文")
+    visual_hint: str = Field(description="図表・アイコン等の指示")
+    data_points: List[str] = Field(default_factory=list, description="表示すべきデータ点")
+
+
+class WriterInfographicSpecOutput(BaseModel):
+    """Writer(mode=infographic_spec) の出力。"""
+    execution_summary: str = Field(description="実行結果の要約")
+    user_message: str = Field(description="ユーザー向けの簡潔な進捗・成果メッセージ")
+    title: str = Field(description="全体タイトル")
+    audience: str = Field(description="想定読者")
+    key_message: str = Field(description="中心メッセージ")
+    blocks: List[InfographicBlock] = Field(description="構成ブロック")
+
+
+class DocumentSection(BaseModel):
+    """ドキュメントページ内のセクション。"""
+    section_id: str = Field(description="セクションID")
+    heading: str = Field(description="見出し")
+    body: str = Field(description="本文")
+    visual_hint: Optional[str] = Field(default=None, description="図版指示")
+
+
+class DocumentPage(BaseModel):
+    """ドキュメント設計のページ定義。"""
+    page_number: int = Field(description="ページ番号")
+    page_title: str = Field(description="ページタイトル")
+    purpose: str = Field(description="ページ目的")
+    sections: List[DocumentSection] = Field(default_factory=list, description="ページセクション")
+
+
+class WriterDocumentBlueprintOutput(BaseModel):
+    """Writer(mode=document_blueprint) の出力。"""
+    execution_summary: str = Field(description="実行結果の要約")
+    user_message: str = Field(description="ユーザー向けの簡潔な進捗・成果メッセージ")
+    document_type: Literal["magazine", "manual"] = Field(description="ドキュメント種別")
+    style_direction: str = Field(description="スタイル方針")
+    pages: List[DocumentPage] = Field(description="ページ設計")
+
+
+class ComicPanel(BaseModel):
+    """漫画コマ定義。"""
+    panel_number: int = Field(description="コマ番号")
+    scene_description: str = Field(description="コマの状況説明")
+    camera: Optional[str] = Field(default=None, description="カメラ指示")
+    dialogue: List[str] = Field(default_factory=list, description="セリフ")
+    sfx: List[str] = Field(default_factory=list, description="効果音")
+
+
+class ComicPageScript(BaseModel):
+    """漫画1ページ分の脚本。"""
+    page_number: int = Field(description="ページ番号")
+    page_goal: str = Field(description="このページの目的")
+    panels: List[ComicPanel] = Field(description="コマ一覧")
+
+
+class WriterComicScriptOutput(BaseModel):
+    """Writer(mode=comic_script) の出力。"""
+    execution_summary: str = Field(description="実行結果の要約")
+    user_message: str = Field(description="ユーザー向けの簡潔な進捗・成果メッセージ")
+    title: str = Field(description="作品タイトル")
+    genre: str = Field(description="ジャンル")
+    pages: List[ComicPageScript] = Field(description="ページ構成")
 
 
 
@@ -147,6 +380,14 @@ class StructuredImagePrompt(BaseModel):
     visual_style: str = Field(
         description="ビジュアルスタイルの詳細な説明（英語）。デザイン、色、構図、モチーフなどを自由に記述。"
     )
+    text_policy: Literal["render_all_text", "render_title_only", "no_text"] = Field(
+        default="render_all_text",
+        description="画像内テキストのレンダリング方針。通常はrender_all_text。"
+    )
+    negative_constraints: List[str] = Field(
+        default_factory=list,
+        description="避けるべきアーティファクトや構図崩れ等のネガティブ制約。"
+    )
 
 
 
@@ -204,7 +445,7 @@ class GenerationConfig(BaseModel):
         default="high",
         description="解像度設定 (High: スライド用, Medium: プレビュー用)"
     )
-    aspect_ratio: Literal["16:9", "4:3", "1:1"] = Field(
+    aspect_ratio: Literal["16:9", "4:3", "1:1", "4:5", "3:4", "9:16", "2:3", "21:9"] = Field(
         default="16:9",
         description="強制アスペクト比"
     )
@@ -273,6 +514,10 @@ class ResearchTask(BaseModel):
     """調査タスク（Plannerが生成）"""
     id: int = Field(description="タスクID")
     perspective: str = Field(description="調査観点（例: 市場規模、技術動向）")
+    search_mode: Optional[Literal["text_search", "image_search", "hybrid_search"]] = Field(
+        default="text_search",
+        description="調査モード"
+    )
     query_hints: List[str] = Field(description="検索クエリのヒント（最大3つ）")
     priority: Literal["high", "medium", "low"] = Field(default="medium")
     expected_output: str = Field(description="期待する出力形式の説明")
@@ -284,6 +529,10 @@ class ResearchResult(BaseModel):
     perspective: str = Field(description="調査観点")
     report: str = Field(description="Markdown形式のレポート（引用付き）")
     sources: List[str] = Field(description="参照URL一覧")
+    image_candidates: List[ResearchImageCandidate] = Field(
+        default_factory=list,
+        description="画像候補一覧（image/hybrid search時）"
+    )
     confidence: float = Field(description="信頼度スコア (0.0-1.0)")
 
 
@@ -314,6 +563,10 @@ class DataAnalystOutput(BaseModel):
     """DataAnalystノードの出力"""
     execution_summary: str = Field(description="実行結果の要約")
     analysis_report: str = Field(description="Markdown形式の分析レポート")
+    failed_checks: List[str] = Field(
+        default_factory=list,
+        description="失敗時の明示チェックコード（例: missing_research）"
+    )
     output_files: List[OutputFile] = Field(
         default_factory=list,
         description="生成された成果物ファイルのリスト"

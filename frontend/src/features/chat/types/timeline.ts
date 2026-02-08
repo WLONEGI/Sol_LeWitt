@@ -1,5 +1,6 @@
 import { UIMessage } from "ai";
 import { ProcessStep } from "../../preview/types/process";
+import type { PlanUpdateData } from "./plan";
 
 /**
  * AI SDKのUIMessageを拡張し、カスタムプロパティをサポート
@@ -17,7 +18,7 @@ export interface ExtendedMessage extends UIMessage {
     toolInvocations?: any[]; // AI SDK toolInvocations
 }
 
-export type TimelineItemType = 'message' | 'process_step' | 'worker_result' | 'artifact' | 'plan_update' | 'code_execution' | 'slide_outline' | 'research_report' | 'plan_step_marker' | 'plan_step_end_marker';
+export type TimelineItemType = 'message' | 'process_step' | 'worker_result' | 'artifact' | 'plan_update' | 'code_execution' | 'slide_outline' | 'research_report' | 'image_search_results' | 'plan_step_marker' | 'plan_step_end_marker';
 
 export interface TimelineItem {
     id: string;
@@ -37,7 +38,7 @@ export interface ProcessTimelineItem extends TimelineItem {
 
 export interface WorkerResultTimelineItem extends TimelineItem {
     type: 'worker_result';
-    role: string;
+    capability?: string;
     summary: string;
     status: string;
 }
@@ -56,9 +57,9 @@ export interface ArtifactTimelineItem extends TimelineItem {
 
 export interface PlanUpdateTimelineItem extends TimelineItem {
     type: 'plan_update';
-    plan: any; // Using any for now to match loose metadata typing locally, ideally strictly typed
-    title?: string;
-    description?: string;
+    plan: PlanUpdateData["plan"];
+    title?: PlanUpdateData["title"];
+    description?: PlanUpdateData["description"];
 }
 
 export interface CodeExecutionTimelineItem extends TimelineItem {
@@ -89,6 +90,24 @@ export interface ResearchReportTimelineItem extends TimelineItem {
     status: 'running' | 'completed';
 }
 
+export interface ImageSearchCandidate {
+    image_url: string;
+    source_url: string;
+    license_note: string;
+    provider?: string;
+    caption?: string | null;
+    relevance_score?: number | null;
+}
+
+export interface ImageSearchResultsTimelineItem extends TimelineItem {
+    type: 'image_search_results';
+    taskId: string;
+    artifactId?: string;
+    query: string;
+    perspective?: string;
+    candidates: ImageSearchCandidate[];
+}
+
 export interface PlanStepMarkerTimelineItem extends TimelineItem {
     type: 'plan_step_marker';
     stepId: string;
@@ -109,5 +128,6 @@ export type TimelineEvent =
     | CodeExecutionTimelineItem
     | SlideOutlineTimelineItem
     | ResearchReportTimelineItem
+    | ImageSearchResultsTimelineItem
     | PlanStepMarkerTimelineItem
     | PlanStepEndMarkerTimelineItem;

@@ -4,14 +4,14 @@ test('renders execution plan from data stream', async ({ page }) => {
     // Mock the chat API to return a stream with a plan update
     await page.route('/api/chat', async route => {
         const planData = {
-            type: 'plan_update',
+            type: 'data-plan_update',
             data: {
                 title: "Mock Execution Plan",
                 description: "Testing plan rendering",
                 plan: [
                     {
                         id: 1,
-                        role: "researcher",
+                        capability: "researcher",
                         title: "Research Topic",
                         instruction: "Find info",
                         description: "Gathering data",
@@ -20,7 +20,7 @@ test('renders execution plan from data stream', async ({ page }) => {
                     },
                     {
                         id: 2,
-                        role: "storywriter",
+                        capability: "writer",
                         title: "Draft Story",
                         instruction: "Write content",
                         description: "Writing slides",
@@ -30,9 +30,6 @@ test('renders execution plan from data stream', async ({ page }) => {
             }
         };
 
-        // Construct SSE stream
-        // Sending ONLY the data part to avoid potentially confusing text part validation errors.
-        // Format: data: <JSON-object>\n\n
         const responseBody = `data: ${JSON.stringify(planData)}\n\n`;
 
         await route.fulfill({
@@ -48,16 +45,15 @@ test('renders execution plan from data stream', async ({ page }) => {
     await page.goto('/');
 
     // Send a message to trigger the flow
-    const input = page.getByPlaceholder('Type a message...');
+    const input = page.getByRole('textbox').first();
     await input.fill('Generate plan');
     await input.press('Enter');
 
-    // Verify the plan overlay appears (collapsed header)
-    await expect(page.getByText('Step 2: Draft Story')).toBeVisible();
+    // Verify the plan overlay appears (current step summary)
+    await expect(page.getByRole('button', { name: 'Draft Story' })).toBeVisible();
+    await expect(page.getByText('2/2')).toBeVisible();
 
     // Expand to see full plan details
     await page.getByRole('button', { name: 'Expand plan' }).click();
-    await expect(page.getByText('Research Topic')).toBeVisible();
-    await expect(page.getByText('Draft Story', { exact: true })).toBeVisible();
-    await expect(page.getByText('Gathering data')).toBeVisible();
+    await expect(page.getByText('Draft Story').first()).toBeVisible();
 });

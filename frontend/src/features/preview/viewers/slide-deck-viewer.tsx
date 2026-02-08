@@ -22,6 +22,7 @@ interface SlideDeckViewerProps {
             rationale?: string
             layout_type?: string
             selected_inputs?: string[]
+            compiled_prompt?: string
         }>
         pdf_url?: string
     }
@@ -51,9 +52,11 @@ export function SlideDeckViewer({ content, artifactId }: SlideDeckViewerProps) {
     const { updateArtifactContent } = useArtifactStore()
 
     const slides = useMemo(() => {
-        const list = Array.isArray(content?.slides) ? content.slides : []
-        return [...list].sort((a, b) => a.slide_number - b.slide_number)
-    }, [content?.slides])
+        const list = Array.isArray(content?.slides)
+            ? content.slides
+            : (Array.isArray((content as any)?.prompts) ? (content as any).prompts : [])
+        return [...list].sort((a: any, b: any) => a.slide_number - b.slide_number)
+    }, [content?.slides, (content as any)?.prompts])
 
     useEffect(() => {
         if (tab !== "image" && editingSlideNumber !== null) {
@@ -257,12 +260,15 @@ export function SlideDeckViewer({ content, artifactId }: SlideDeckViewerProps) {
                                             </div>
                                         ) : (
                                             <div className="flex flex-col gap-3">
-                                                {slide.structured_prompt && (
+                                                {slide.compiled_prompt || slide.prompt_text ? (
                                                     <div className="rounded-md border border-border bg-muted/20 p-3">
-                                                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">Structured Prompt</div>
-                                                        <pre className="text-xs whitespace-pre-wrap break-words font-mono">
-                                                            {JSON.stringify(slide.structured_prompt, null, 2)}
+                                                        <pre className="text-xs whitespace-pre-wrap break-words font-mono text-foreground/80">
+                                                            {slide.compiled_prompt || slide.prompt_text}
                                                         </pre>
+                                                    </div>
+                                                ) : (
+                                                    <div className="text-sm text-muted-foreground italic">
+                                                        No compiled prompt information available.
                                                     </div>
                                                 )}
                                             </div>

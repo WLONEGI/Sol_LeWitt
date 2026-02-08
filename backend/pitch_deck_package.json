@@ -1,0 +1,101 @@
+{
+  "slides": [
+    {
+      "slide_number": 1,
+      "title": "Title Slide",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_01_cb4ab5cd-cb92-4eae-b785-57844d7987cb.png",
+      "speaker_notes": "私たちは、AIで企業の生産性を再定義します。 【デザイン】白背景にコーポレートブルーのロゴを中央に配置。余白を大きく取り、清潔感と自信を表現する。"
+    },
+    {
+      "slide_number": 2,
+      "title": "Vision & Mission",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_02_41deba60-5d39-40cb-b6f7-d2be4b1873ce.png",
+      "speaker_notes": "AIによる「補佐」から「自律実行」へ。働き方のOSを書き換える。 【デザイン】全面に薄い青のグラデーション. 太字のサンセリフ体でビジョンを強調。"
+    },
+    {
+      "slide_number": 3,
+      "title": "The Problem",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_03_41ee3e25-14f7-4b91-987f-c47d6cb17fcd.png",
+      "speaker_notes": "企業の成長を阻むのは、複雑化した「業務の摩擦」です。 【デザイン】左側に課題のリスト、右側に「複雑に絡み合った配線」や「積み上がった書類」のアイコンイラスト（警告色として控えめな赤やグレーを使用）。"
+    },
+    {
+      "slide_number": 4,
+      "title": "The Solution",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_04_fb532005-f078-4149-9d74-162b90535cf2.png",
+      "speaker_notes": "サイロを繋ぎ、タスクを完遂する。それが私たちのAIソリューションです。 【デザイン】中央に製品の概念図。複数のSaaSアイコンが中央のAIコアに接続され、整理された出力が生成されるフロー図。青と白ですっきりと表現。"
+    },
+    {
+      "slide_number": 5,
+      "title": "Product Demo",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_05_8a6bd757-963f-4653-a766-402fef0ba562.png",
+      "speaker_notes": "魔法のように見えますが、これが現実のワークフローです。 【デザイン】PCのモックアップ内に実際の画面を表示。重要なボタンや結果部分を青い枠で強調。"
+    },
+    {
+      "slide_number": 6,
+      "title": "Why Now?",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_06_2929b7dc-8de1-4b37-946c-39c53425d18e.png",
+      "speaker_notes": "技術、コスト、市場。全ての条件が今、整いました。 【デザイン】3つの円グラフやアイコンを横並びに配置。上昇トレンドを示す矢印を背景に薄く配置。"
+    },
+    {
+      "slide_number": 7,
+      "title": "Market Size",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_07_1924c099-f286-4fdf-850a-3b723546f451.png",
+      "speaker_notes": "私たちは、巨大な成長市場の「ど真ん中」に位置しています。 【デザイン】同心円のチャート。外側から薄い青→濃い青へと変化させ、SOMを強調。"
+    },
+    {
+      "slide_number": 8,
+      "title": "Business Model",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_08_220c9331-eac5-49d6-8081-eb989a2fdc41.png",
+      "speaker_notes": "安定したSaaS収益と、利用拡大に伴うアップサイドの両立。 【デザイン】料金体系のシンプルな図解。左に固定収益、右に従量収益の積み上げイメージ。"
+    },
+    {
+      "slide_number": 9,
+      "title": "Traction",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_09_c3a03f3f-ed06-43e2-87f7-e9aa2245eb62.png",
+      "speaker_notes": "PMFは達成済みです。数字がそれを証明しています。 【デザイン】主要KPIを大きく太字で表示したダッシュボード風レイアウト。右肩上がりの棒グラフを配置。"
+    },
+    {
+      "slide_number": 10,
+      "title": "Case Study",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_10_cabd096a-bf03-4e4c-987b-a97ea866b759.png",
+      "speaker_notes": "顧客は「実験」ではなく「実利」を得ています。 【デザイン】Before/Afterの比較グラフ。削減された時間/コストを青色でハイライト。顧客ロゴと担当者の顔写真を配置。"
+    },
+    {
+      "slide_number": 11,
+      "title": "Competitive Landscape",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_11_96a0235b-98a1-4d41-95e7-fe7fbf88b75d.png",
+      "speaker_notes": "汎用AIにはできない「深い業務理解」が私たちの強みです。 【デザイン】4象限のマトリクス図。自社ロゴを右上の「勝てるポジション」に配置し、青い光彩で強調。"
+    },
+    {
+      "slide_number": 12,
+      "title": "Competitive Advantage (Moat)",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_12_2554daac-10d8-4080-b76d-d7f5d01ddc21.png",
+      "speaker_notes": "使われるほど賢くなり、他社が模倣できない「防御壁」を築いています。 【デザイン】城壁やお堀を抽象化したアイコン。3つの強みを柱として表現。"
+    },
+    {
+      "slide_number": 13,
+      "title": "Go-to-Market Strategy",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_13_f64fc98f-64f5-48e3-a175-23acdf34155c.png",
+      "speaker_notes": "確実なエンタープライズ攻略から、爆発的な普及へ。 【デザイン】左から右へ進むロードマップ図。現在のフェーズを濃い青で強調。"
+    },
+    {
+      "slide_number": 14,
+      "title": "The Team",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_14_55c9d9c9-a374-42d0-b4b4-72f96b322f01.png",
+      "speaker_notes": "技術とビジネス、両輪を回せる最高のチームです。 【デザイン】メンバーの顔写真を横並びに配置。各メンバーの下に略歴とロゴ（出身企業）を表示。信頼感を重視。"
+    },
+    {
+      "slide_number": 15,
+      "title": "Financials & The Ask",
+      "image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/42a65a9e-a51f-44e5-97a9-5f72ab9a657a/slide_15_3dca5d26-0c0d-4890-94fb-f04c2723b693.png",
+      "speaker_notes": "次のステージへ進むために、パートナーを求めています。 【デザイン】右側に急成長を示す棒グラフ。左側に調達条件と使途の円グラフ。数字を大きく、クリアに表示。"
+    }
+  ],
+  "validation": {
+    "arr_check": "Slide 9 ($2.0M) matches Series A benchmark ($1M-$3M).",
+    "growth_check": "Slide 9 (300%) matches 'Triple' growth target.",
+    "efficiency_check": "Slide 8 (LTV/CAC 4.5x) exceeds 3.0x benchmark.",
+    "retention_check": "Slide 9 (NRR 125%) exceeds 120% benchmark.",
+    "funding_check": "Slide 15 ($15M) matches AI Series A average ($15M-$20M)."
+  }
+}

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { CheckCircle2, Circle, ChevronDown, ChevronUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -10,26 +10,17 @@ import {
     CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Card, CardContent } from "@/components/ui/card";
-
-interface PlanStep {
-    id: number;
-    role: string;
-    instruction: string;
-    title: string;
-    description: string;
-    status: "pending" | "in_progress" | "completed";
-    result_summary?: string | null;
-}
-
-interface PlanData {
-    plan: PlanStep[];
-    title?: string;
-    description?: string;
-    ui_type?: string;
-}
+import type { PlanStep, PlanStepStatus, PlanUpdateData } from "@/features/chat/types/plan";
+import { normalizePlanUpdateData } from "@/features/chat/types/plan";
+const PLAN_STATUS_LABEL: Record<PlanStepStatus, string> = {
+    pending: "待機",
+    in_progress: "実行中",
+    completed: "完了",
+    blocked: "要確認",
+};
 
 interface FixedPlanOverlayProps {
-    data: PlanData;
+    data: PlanUpdateData;
     className?: string;
     isInitialExpanded?: boolean;
 }
@@ -41,7 +32,7 @@ export function FixedPlanOverlay({
 }: FixedPlanOverlayProps) {
     const [isExpanded, setIsExpanded] = useState(isInitialExpanded);
 
-    const steps = data.plan;
+    const steps = normalizePlanUpdateData(data).plan as Array<PlanStep & { status: PlanStepStatus }>;
     const totalSteps = steps.length;
 
     // Find the relevant step to show in the header
@@ -56,50 +47,41 @@ export function FixedPlanOverlay({
 
     return (
         <div className={cn("w-full max-w-5xl mx-auto", className)}>
-            <Card className="overflow-hidden border-indigo-100/50 bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl shadow-sm transition-all duration-300 ease-in-out">
+            <Card className="overflow-hidden border-none shadow-2xl rounded-2xl bg-white dark:bg-slate-900 transition-all duration-300 ease-in-out">
                 <Collapsible open={isExpanded} onOpenChange={setIsExpanded} className="flex flex-col-reverse">
                     {/* Collapsed/Header View (Bottom position) */}
-                    <div className="flex items-center justify-between py-0.5 px-2 gap-2">
+                    <div className="flex items-center justify-between py-3 px-4 gap-4 bg-white dark:bg-slate-900">
                         {/* Status Icon Area */}
-                        <div className="flex items-center gap-2 flex-1 min-w-0">
-                            <div className="flex-shrink-0">
-                                {activeStep.status === "in_progress" ? (
-                                    <div className="relative flex items-center justify-center w-4 h-4">
-                                        <div className="absolute inset-0 rounded-full bg-indigo-500/20 animate-ping" />
-                                        <Circle className="h-3.5 w-3.5 text-indigo-600 animate-pulse fill-indigo-100" />
-                                    </div>
-                                ) : activeStep.status === "completed" ? (
-                                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                                ) : (
-                                    <Circle className="h-4 w-4 text-slate-300" />
-                                )}
-
-                            </div>
-
-                            {/* Unified Header Text: Just show Title */}
-                            <div className="min-w-0 flex items-center gap-2">
-                                <span className="text-sm font-sans font-semibold text-slate-700 dark:text-slate-200 truncate">
-                                    {activeStep.title}
+                        <div className="flex items-center gap-3 flex-1 min-w-0">
+                            {/* Unified Header Text */}
+                            <div className="flex flex-col">
+                                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                                    Task Progress
                                 </span>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
+                                        {activeStep.title || "Task"}
+                                    </span>
+                                </div>
                             </div>
                         </div>
 
                         {/* Progress and Toggle Area */}
-                        <div className="flex items-center gap-1.5 shrink-0">
-                            <span className="text-[10px] font-medium text-slate-500 dark:text-slate-400">
-                                {activeStepIndex}/{totalSteps}
+                        <div className="flex items-center gap-4 shrink-0">
+                            <span className="text-sm font-medium text-slate-500 dark:text-slate-400">
+                                {activeStepIndex} / {totalSteps}
                             </span>
                             <CollapsibleTrigger asChild>
                                 <Button
                                     variant="ghost"
                                     size="sm"
                                     aria-label={isExpanded ? "Collapse plan" : "Expand plan"}
-                                    className="h-4 w-4 p-0 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 transition-colors shrink-0"
+                                    className="h-8 w-8 p-0 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 transition-colors shrink-0"
                                 >
                                     {isExpanded ? (
-                                        <ChevronDown className="h-2.5 w-2.5" />
+                                        <ChevronDown className="h-4 w-4" />
                                     ) : (
-                                        <ChevronUp className="h-2.5 w-2.5" />
+                                        <ChevronUp className="h-4 w-4" />
                                     )}
                                 </Button>
                             </CollapsibleTrigger>
@@ -109,41 +91,42 @@ export function FixedPlanOverlay({
 
                     {/* Expanded Content (Top position) */}
                     <CollapsibleContent>
-                        <CardContent className="pb-0 pt-1 px-1.5 border-b border-indigo-50/50 dark:border-indigo-900/10 mb-0">
+                        <CardContent className="pb-2 pt-0 px-0">
                             {/* Normal Order List (Step 1 -> N) */}
-                            <div className="max-h-[24vh] overflow-y-auto space-y-0.5 mb-1 pr-1 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
-                                {steps.map((step) => (
+                            <div className="max-h-[30vh] overflow-y-auto px-4 pb-4 space-y-1 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
+                                {steps.map((step, index) => (
                                     <div
                                         key={step.id}
                                         className={cn(
-                                            "flex items-start gap-2 p-1 rounded-md transition-all",
-                                            step.status === "in_progress" && "bg-indigo-50/50 dark:bg-indigo-950/30",
-                                            step.status === "completed" && "opacity-60"
+                                            "flex items-start gap-3 p-2 rounded-lg transition-all",
+                                            step.status === "in_progress" && "bg-indigo-50/50 dark:bg-indigo-950/30"
                                         )}
                                     >
-                                        <div className="mt-0.5 flex-shrink-0">
+                                        <div className="mt-1 flex-shrink-0">
                                             {step.status === "completed" ? (
-                                                <CheckCircle2 className="h-2.5 w-2.5 text-emerald-500" />
+                                                <div className="h-5 w-5 rounded-full bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
+                                                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                                                </div>
                                             ) : step.status === "in_progress" ? (
-                                                <Circle className="h-2.5 w-2.5 text-indigo-500 animate-pulse fill-indigo-500/10" />
+                                                <div className="relative flex items-center justify-center h-5 w-5">
+                                                    <div className="absolute inset-0 rounded-full bg-indigo-500/20 animate-ping" />
+                                                    <div className="h-2.5 w-2.5 rounded-full bg-indigo-600 animate-pulse" />
+                                                </div>
                                             ) : (
-                                                <Circle className="h-2.5 w-2.5 text-slate-300 dark:text-slate-700" />
+                                                <div className="h-5 w-5 rounded-full border-2 border-slate-200 dark:border-slate-700 flex items-center justify-center text-[10px] font-medium text-slate-400">
+                                                    {index + 1}
+                                                </div>
                                             )}
                                         </div>
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-center justify-between gap-2">
                                                 <span className={cn(
-                                                    "text-sm font-sans font-medium",
-                                                    step.status === "completed" ? "text-slate-500" : "text-slate-800 dark:text-slate-200"
+                                                    "text-sm font-medium",
+                                                    step.status === "completed" ? "text-slate-500 line-through" : "text-slate-900 dark:text-slate-100"
                                                 )}>
-                                                    {step.title}
+                                                    {step.title || "Task"}
                                                 </span>
                                             </div>
-                                            <p className="text-xs font-sans text-slate-500 dark:text-slate-400 mt-0 line-clamp-1 leading-tight">
-                                                {step.description}
-                                            </p>
-
-
                                         </div>
                                     </div>
                                 ))}

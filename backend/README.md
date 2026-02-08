@@ -1,73 +1,131 @@
 # Spell Backend
 
-AI Slide generator backend powered by LangGraph and Gemini.
+![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)
+![Framework](https://img.shields.io/badge/FastAPI-0.109%2B-009688)
+![Orchestration](https://img.shields.io/badge/LangGraph-0.0.10%2B-orange)
+![Code Style](https://img.shields.io/badge/code%20style-black-000000.svg)
 
-## Architecture
+**Spell** は **AI Slide with Nano Banana** プロジェクトのためのインテリジェントなバックエンドエンジンです。**LangGraph** を活用してマルチエージェントワークフローをオーケストレーションし、ユーザーのプロンプトに基づいてリサーチ、構成作成、スライドデザイン、レンダリング（PPTX生成）を自律的に実行します。
 
-This project follows a layered architecture to ensure maintainability and testability.
+## 主な機能 (Key Features)
 
-### Directory Structure
+- **マルチエージェント オーケストレーション**: LangGraph を使用して、各タスクに特化したエージェントを協調動作させます。
+- **AI駆動ワークフロー**:
+  - **Researcher (リサーチャー)**: 検索クエリを用いてWeb検索を実行し、必要な情報を抽出します。
+  - **Storywriter (ストーリーライター)**: リサーチ結果に基づき、物語構造とスライドのコンテンツをドラフトします。
+  - **Designer (デザイナー)**: Google Vertex AI (Imagen) を使用して、高品質なビジュアルアセットを生成します。
+  - **Renderer (レンダラー)**: テキストと画像を統合し、洗練された `.pptx` ファイルを生成します。
+- **モダンな技術スタック**: **FastAPI** と **LangServe** を採用し、堅牢でスケーラブルなAPIエンドポイントを提供します。
+- **非同期アーキテクチャ**: 状態管理とチェックポイント機能のために **PostgreSQL** を使用した完全非同期のデータベース操作を実現しています。
+- **クラウド統合**: **Google Cloud Platform** (Vertex AI, Cloud Storage) および **Firebase Authentication** とシームレスに統合されています。
+
+## アーキテクチャ
+
+このプロジェクトは、関心の分離と保守性を確保するために、**ドメイン駆動設計 (DDD)** に影響を受けたレイヤードアーキテクチャを採用しています。
 
 ```text
 backend/
-├── pyproject.toml
-├── uv.lock
-├── Dockerfile
-├── main.py              # CLI Entrypoint
-├── server.py            # API Entrypoint
+├── main.py              # CLI エントリーポイント（対話的テスト用）
+├── server.py            # 本番用 API エントリーポイント (Uvicorn)
 ├── src/
-│   ├── app/             # API Layer (FastAPI)
-│   │   ├── app.py       # FastAPI initialization
-│   │   └── routers/     # API routes
-│   ├── core/            # Application Orchestration
-│   │   └── workflow/    # LangGraph definition
-│   │       ├── builder.py
-│   │       ├── nodes/   # Node implementations
-│   │       └── state.py # Graph state definition
-│   ├── domain/          # Business Logic (Domain Modules)
-│   │   ├── researcher/  # Web search & Information extraction
-│   │   ├── designer/    # Image generation & Visual assets
-│   │   ├── writer/      # Content drafting (Storywriter)
-│   │   └── renderer/    # PPTX generation & Template analysis
-│   ├── infrastructure/  # External Integrations
-│   │   ├── database/    # Persistence & Checkpointing
-│   │   ├── storage/     # GCS storage client
-│   │   └── llm/         # LLM client factory
-│   ├── shared/          # Shared Components
-│   │   ├── schemas/     # Pydantic models (IO/Design)
-│   │   ├── config/      # Settings & Constants
-│   │   └── utils/       # Common utilities (SSE, etc.)
-│   └── resources/       # Static assets
-│       └── prompts/     # Prompt templates (Markdown)
-└── tests/               # Test suite
+│   ├── app/             # インターフェース層 (FastAPI)
+│   │   ├── routers/     # API エンドポイント
+│   │   └── app.py       # アプリケーションファクトリ & ミドルウェア
+│   ├── core/            # アプリケーションコア
+│   │   └── workflow/    # LangGraph ステートマシン & オーケストレーション
+│   ├── domain/          # ビジネスロジック & 特化型エージェント
+│   │   ├── researcher/  # Web検索ロジック
+│   │   ├── designer/    # 画像生成ロジック
+│   │   ├── writer/      # コンテンツ生成ロジック
+│   │   └── renderer/    # スライドレンダリングロジック
+│   ├── infrastructure/  # インフラストラクチャ & 外部インターフェース
+│   │   ├── database/    # Postgres 接続 & チェックポイント
+│   │   ├── llm/         # Gemini モデル設定
+│   │   └── storage/     # GCS & ファイルシステム操作
+│   └── shared/          # 共有カーネル (Utils, Config, Schemas)
 ```
 
-## Getting Started
+## はじめに (Getting Started)
 
-### Prerequisites
-- Python 3.12+
-- [uv](https://github.com/astral-sh/uv) (Recommended)
+### 前提条件 (Prerequisites)
 
-### Setup
-1. Install dependencies:
-   ```bash
-   uv sync
-   ```
-2. Configure environment variables in `.env`.
+以下のツールがインストールされていることを確認してください:
 
-### Running the Server
+- **Python 3.12+**
+- **[uv](https://github.com/astral-sh/uv)**: 高速なPythonパッケージインストーラー兼リゾルバ。
+- **Docker**: ローカルでPostgreSQLインスタンスを実行するために使用（推奨）。
+- **Google Cloud SDK**: `gcloud auth application-default login` で認証済みであること。
+
+### インストール (Installation)
+
+1.  **リポジトリのクローン:**
+    ```bash
+    git clone <repository-url>
+    cd ai_slide_with_nano_banana/backend
+    ```
+
+2.  **依存関係のインストール:**
+    このプロジェクトでは依存関係の管理に `uv` を使用しています。
+    ```bash
+    uv sync
+    ```
+
+3.  **環境設定:**
+    サンプルの環境設定ファイルをコピーし、シークレット情報を設定してください。
+    ```bash
+    cp .env.example .env
+    ```
+    
+    **`.env` で設定すべき重要な変数:**
+    - `VERTEX_PROJECT_ID`: GCP プロジェクトID。
+    - `VERTEX_LOCATION`: リージョン (例: `asia-northeast1`)。
+    - `FIREBASE_SERVICE_ACCOUNT_JSON`: Firebase サービスアカウントJSONの内容。
+    - `POSTGRES_DB_URI`: PostgreSQL データベースへの接続文字列。
+    - `GCS_BUCKET_NAME`:生成されたアセットを保存するバケット名。
+
+### サーバーの起動 (Running the Server)
+
+ホットリロードを有効にして FastAPI サーバーを起動するには、以下のコマンドを実行します:
+
 ```bash
 uv run uvicorn server:app --reload --port 8000
 ```
 
-### Running the CLI
+API は `http://localhost:8000` で利用可能になります。
+
+### CLI の実行 (Running the CLI)
+
+API層を介さずにエージェントワークフローを素早くテストする場合:
+
 ```bash
 uv run python main.py
 ```
 
-## Tech Stack
-- **Framework**: FastAPI, LangGraph
-- **LLM**: Gemini (Vertex AI)
-- **Database**: PostgreSQL (Checkpointing)
+## API ドキュメント
+
+バックエンドでは、Swagger UI によって生成されたインタラクティブな API ドキュメントを提供しています。
+
+- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
+
+### 主要なエンドポイント
+
+- **`POST /api/chat/invoke`**: LangGraph ワークフローの同期的な呼び出し。
+- **`POST /api/chat/stream`**: ワークフローの出力をチャンクごとにストリーミングします。
+- **`POST /api/chat/stream_events`**: 詳細なイベントストリーミング（トークン、ツール呼び出し、状態更新など）のためのカスタムエンドポイント。
+
+## テスト
+
+`pytest` を使用してテストスイートを実行します:
+
+```bash
+uv run pytest
+```
+
+## 技術スタック (Tech Stack)
+
+- **Frameworks**: [FastAPI](https://fastapi.tiangolo.com/), [LangGraph](https://langchain-ai.github.io/langgraph/), [LangServe](https://github.com/langchain-ai/langserve)
+- **AI Models**: Google Gemini Pro & Flash (via Vertex AI)
+- **Database**: PostgreSQL (via `psycopg` & `langgraph-checkpoint-postgres`)
 - **Storage**: Google Cloud Storage
-- **Package Manager**: uv
+- **Auth**: Firebase Authentication

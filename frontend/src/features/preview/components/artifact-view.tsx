@@ -8,8 +8,11 @@ import { LogViewer } from "@/features/preview/viewers/log-viewer"
 import { SlideViewer } from "@/features/preview/viewers/slide-viewer"
 import { SlideDeckViewer } from "@/features/preview/viewers/slide-deck-viewer"
 import { DataAnalystViewer } from "@/features/preview/viewers/data-analyst-viewer"
-import { Button } from "@/components/ui/button"
-import { X } from "lucide-react"
+import { WriterStoryFrameworkViewer } from "@/features/preview/viewers/writer-story-framework-viewer"
+import { WriterCharacterSheetViewer } from "@/features/preview/viewers/writer-character-sheet-viewer"
+import { WriterInfographicSpecViewer } from "@/features/preview/viewers/writer-infographic-spec-viewer"
+import { WriterDocumentBlueprintViewer } from "@/features/preview/viewers/writer-document-blueprint-viewer"
+import { WriterComicScriptViewer } from "@/features/preview/viewers/writer-comic-script-viewer"
 import { ArtifactContainer } from "./artifact-container"
 
 // Reuse Markdown component for Report/Outline
@@ -81,8 +84,6 @@ export function ArtifactView() {
 
     const title = activeResearchTask ? "Research Report" : (displayArtifact?.title || "Artifact")
     const subtitle = activeResearchTask ? activeResearchTask.perspective : displayArtifact?.type
-    const status = activeResearchTask ? (activeResearchTask.status === 'completed' ? 'ready' : 'streaming') : displayArtifact?.status
-
     const renderContent = () => {
         if (activeResearchTask) {
             return <ReportViewer content={activeResearchTask.content} citations={activeResearchTask.citations} />
@@ -94,7 +95,7 @@ export function ArtifactView() {
             case 'analysis_log':
             case 'log':
             case 'reasoning':
-                return <LogViewer content={displayArtifact.content} title={displayArtifact.title} status={displayArtifact.status} />
+                return <LogViewer content={displayArtifact.content} title={displayArtifact.title} />
             case 'report':
             case 'outline':
                 return <ReportViewer content={displayArtifact.content} />
@@ -103,7 +104,17 @@ export function ArtifactView() {
             case 'slide_deck':
                 return <SlideDeckViewer content={displayArtifact.content} artifactId={displayArtifact.id} />
             case 'data_analyst':
-                return <DataAnalystViewer content={displayArtifact.content} status={displayArtifact.status} />
+                return <DataAnalystViewer content={displayArtifact.content} />
+            case 'writer_story_framework':
+                return <WriterStoryFrameworkViewer content={displayArtifact.content} />
+            case 'writer_character_sheet':
+                return <WriterCharacterSheetViewer content={displayArtifact.content} />
+            case 'writer_infographic_spec':
+                return <WriterInfographicSpecViewer content={displayArtifact.content} />
+            case 'writer_document_blueprint':
+                return <WriterDocumentBlueprintViewer content={displayArtifact.content} />
+            case 'writer_comic_script':
+                return <WriterComicScriptViewer content={displayArtifact.content} />
             default:
                 return <DefaultJsonViewer data={displayArtifact} />
         }
@@ -113,7 +124,6 @@ export function ArtifactView() {
         <ArtifactContainer
             title={title}
             subtitle={subtitle}
-            status={status}
         >
             {renderContent()}
         </ArtifactContainer>

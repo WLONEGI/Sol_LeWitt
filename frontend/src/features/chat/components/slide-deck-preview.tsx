@@ -9,7 +9,7 @@ export interface SlideDeckItem {
     slide_number: number;
     image_url: string;
     title: string;
-    status?: "generating" | "completed";
+    status?: "generating" | "completed" | "failed";
 }
 
 interface SlideDeckPreviewProps {
@@ -68,6 +68,11 @@ export function SlideDeckPreview({ artifactId, slides, title = "Slides", isStrea
                                 alt={`Slide ${slide.slide_number}`}
                                 className="h-full w-full object-cover transition-transform duration-700 group-hover:scale-[1.02]"
                             />
+                        ) : slide.status === "failed" ? (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-destructive/5 text-destructive">
+                                <Maximize2 className="w-8 h-8 opacity-50 rotate-45" />
+                                <span className="text-xs font-semibold">Generation Failed</span>
+                            </div>
                         ) : (
                             <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
                                 <Loader2 className="w-8 h-8 animate-spin text-primary/40" />

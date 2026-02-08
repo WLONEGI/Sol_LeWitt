@@ -15,13 +15,26 @@ LangGraph ワークフローを実行し、SSE ストリームを返します。
     { "role": "user", "content": "スライドを作って", "parts": [] }
   ],
   "thread_id": "uuid-v4",
-  "pptx_template_base64": "..."
+  "selected_image_inputs": [],
+  "attachments": [
+    {
+      "id": "att_01",
+      "filename": "reference.png",
+      "mime_type": "image/png",
+      "size_bytes": 123456,
+      "url": "https://storage.googleapis.com/...",
+      "kind": "image"
+    }
+  ]
 }
 ```
 
 ### Response
 - **Headers**: `x-vercel-ai-ui-message-stream: v1`
 - **Content**: Vercel AI SDK Data Stream Protocol (Prefix形式)
+- **Behavior**:
+  - `attachments` に `kind: "pptx"` が含まれる場合、バックエンドでPPTXを解析し `pptx_context` を内部Stateに注入
+  - 解析結果は Data Analyst ノードのコンテキストでのみ利用される
 
 ## 2. 履歴管理
 
@@ -31,13 +44,6 @@ LangGraph ワークフローを実行し、SSE ストリームを返します。
 - **Auth**: 必須
 - **Response**: `ThreadInfo[]`
   - ログインユーザーの `owner_uid` に紐づくスレッドのみ返却
-
-### 特定スレッドのメッセージ取得
-- **URL**: `/api/threads/{thread_id}/messages`
-- **Method**: `GET`
-- **Auth**: 必須
-- **Response**: `Message[]` (UIMessage 互換形式)
-  - 対象 `thread_id` の所有者がログインユーザーである場合のみ取得可能
 
 ### 特定スレッドのUIスナップショット取得
 - **URL**: `/api/threads/{thread_id}/snapshot`
@@ -57,3 +63,36 @@ PPTX ファイルから `DesignContext` を抽出します。
 - **Method**: `POST`
 - **Content-Type**: `multipart/form-data`
 - **Response**: `DesignContext`
+
+## 4. ファイルアップロード
+Gemini 3 系入力フォーマットに合わせて、以下のファイルをアップロードし添付メタデータを返します。
+
+- **URL**: `/api/files/upload`
+- **Method**: `POST`
+- **Content-Type**: `multipart/form-data`
+- **Auth**: `Authorization: Bearer <Firebase ID Token>` 必須
+- **Allowed**:
+  - 画像: `png/jpg/webp`
+  - プレゼン: `pptx`
+  - 文書: `pdf`
+  - テキスト系: `csv`, `txt`, `md`, `json`
+- **Excluded**:
+  - `xlsx/xls`（Gemini 3 入力フォーマット対象外として除外）
+- **Form Fields**:
+  - `files`: 1件以上（最大5件）
+  - `thread_id`: 任意（保存先フォルダ識別）
+- **Response**:
+```json
+{
+  "attachments": [
+    {
+      "id": "8f3a...",
+      "filename": "sample.pptx",
+      "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "size_bytes": 456789,
+      "url": "https://storage.googleapis.com/...",
+      "kind": "pptx"
+    }
+  ]
+}
+```

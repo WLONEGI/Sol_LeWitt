@@ -11,6 +11,7 @@ import { useChatStore } from "@/features/chat/stores/chat"
 import { useAuth } from "@/providers/auth-provider"
 import { ChatSidebar } from "@/features/chat/components/chat-sidebar"
 import { ChatInput } from "@/features/chat/components/chat-input"
+import { type AspectRatio } from "@/features/chat/components/aspect-ratio-selector"
 import { MainHeader } from "@/app/_components/main-header"
 import { QUICK_ACTIONS, type QuickActionId } from "@/features/chat/constants/quick-actions"
 import { AuthRequiredDialog } from "@/features/auth/components/auth-required-dialog"
@@ -19,6 +20,7 @@ export function HomeClient() {
   const router = useRouter()
   const { user, token, loading: authLoading, error: authError, signInWithGoogle } = useAuth()
   const [input, setInput] = useState("")
+  const [aspectRatio, setAspectRatio] = useState<AspectRatio>(undefined)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [showAuthDialog, setShowAuthDialog] = useState(false)
 
@@ -27,6 +29,8 @@ export function HomeClient() {
     setCurrentThreadId,
     setPendingMessage,
     consumePendingHomeInput,
+    setPendingAspectRatio,
+    setPendingProductType,
     selectedActionId,
     setSelectedActionId,
   } = useChatStore(
@@ -35,6 +39,8 @@ export function HomeClient() {
       setCurrentThreadId: state.setCurrentThreadId,
       setPendingMessage: state.setPendingMessage,
       consumePendingHomeInput: state.consumePendingHomeInput,
+      setPendingAspectRatio: state.setPendingAspectRatio,
+      setPendingProductType: state.setPendingProductType,
       selectedActionId: state.selectedActionId,
       setSelectedActionId: state.setSelectedActionId,
     }))
@@ -66,11 +72,16 @@ export function HomeClient() {
       const threadId = uuidv4()
       setCurrentThreadId(threadId)
       setPendingMessage(threadId, value)
+      setPendingAspectRatio(aspectRatio)
+
+      const selectedAction = QUICK_ACTIONS.find((action) => action.id === selectedActionId) ?? null
+      setPendingProductType(selectedAction?.productType)
+
       setIsSubmitting(true)
       setInput("")
       router.push(`/chat/${threadId}`)
     },
-    [router, setCurrentThreadId, setPendingMessage]
+    [router, setCurrentThreadId, setPendingMessage, setPendingAspectRatio, setPendingProductType, aspectRatio, selectedActionId]
   )
 
   const handleSend = useCallback(
@@ -103,7 +114,10 @@ export function HomeClient() {
   }, [])
 
   return (
-    <main className="h-screen w-screen overflow-hidden bg-background relative selection:bg-primary/20 flex">
+    <main className={cn(
+      "h-screen w-screen overflow-hidden relative selection:bg-primary/20 flex transition-colors duration-700",
+      selectedAction ? selectedAction.gradientClassName : "bg-background"
+    )}>
       <SidebarProvider defaultOpen={true}>
         {user ? <ChatSidebar /> : null}
         <div className="flex flex-col flex-1 min-w-0 h-full">
@@ -111,28 +125,34 @@ export function HomeClient() {
           <div className="relative z-10 flex-1 w-full min-h-0 overflow-auto">
             <div className="mx-auto flex w-full max-w-5xl flex-col items-center px-6 py-20 md:py-32">
               <div className="flex w-full flex-col items-center gap-12">
-                <div className="text-center max-w-2xl px-4">
+                <div className="text-center w-full animate-in fade-in duration-1000 slide-in-from-bottom-5">
                   <h1 className="text-4xl md:text-6xl font-semibold text-foreground tracking-tight">
-                    What can I do for you?
+                    Co-create SPELL with evolving AI
                   </h1>
                   <p className="mt-4 text-muted-foreground text-base md:text-lg">
-                    Bring a goal or a rough idea. Spell will shape it into something real.
+                    Built for the Agentic AI Hackathon with Google Cloud.
                   </p>
                 </div>
 
-                <div className="w-full max-w-3xl">
+                <div className="w-full max-w-5xl">
                   <ChatInput
                     value={input}
                     onChange={handleInputChange}
                     onSend={handleSend}
                     isLoading={isSubmitting}
-                    placeholder="Assign a task or ask anything"
+                    placeholder="Send message to Spell"
                     actionPill={
                       selectedAction
-                        ? { label: selectedAction.pillLabel, icon: selectedAction.icon }
+                        ? {
+                          label: selectedAction.pillLabel,
+                          icon: selectedAction.icon,
+                          className: selectedAction.pillClassName
+                        }
                         : undefined
                     }
                     onClearAction={() => setSelectedActionId(null)}
+                    aspectRatio={aspectRatio}
+                    onAspectRatioChange={setAspectRatio}
                   />
                 </div>
 

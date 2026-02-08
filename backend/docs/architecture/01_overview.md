@@ -34,12 +34,12 @@ graph TD
         Supervisor{Supervisor}
         
         Supervisor -- "Route: researcher" --> Researcher[Researcher Subgraph]
-        Supervisor -- "Route: storywriter" --> Storywriter
+        Supervisor -- "Route: writer" --> Writer
         Supervisor -- "Route: visualizer" --> Visualizer
         Supervisor -- "Route: data_analyst" --> DataAnalyst
         
         Researcher --> Supervisor
-        Storywriter --> Supervisor
+        Writer --> Supervisor
         Visualizer --> Supervisor
         DataAnalyst --> Supervisor
     end

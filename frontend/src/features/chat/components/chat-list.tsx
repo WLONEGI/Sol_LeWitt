@@ -7,19 +7,25 @@ import { ResearchStatusButton } from "./message/research-status-button";
 import { ArtifactPreview } from "./artifact-preview";
 import { CodeExecutionBlock } from "./code-execution-block";
 import { SlideOutline } from "./slide-outline";
+import { ImageSearchResults } from "./image-search-results";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+import { useArtifactStore } from "@/features/preview/stores/artifact";
 import { CheckCircle2, ChevronDown, ChevronUp, Circle, Loader2 } from "lucide-react";
 import { TimelineEvent } from "../types/timeline";
+import type { PlanStepStatus, PlanUpdateData } from "../types/plan";
+import { normalizePlanStepStatus, normalizePlanUpdateData } from "../types/plan";
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
-
-type PlanStepStatus = "pending" | "in_progress" | "completed";
+import { useShallow } from "zustand/react/shallow";
 
 interface ChatListProps {
     timeline: TimelineEvent[];
-    latestPlan?: any;
+    latestPlan?: PlanUpdateData | null;
     latestOutline?: any;
     latestSlideDeck?: any;
+    selectedImageUrls?: string[];
+    onToggleImageCandidate?: (candidate: any) => void;
+    queuedUserMessage?: string | null;
     isLoading?: boolean;
     status?: "ready" | "submitted" | "streaming" | "error";
     className?: string;
@@ -39,12 +45,20 @@ type TimelineRenderEntry =
 export function ChatList({
     timeline,
     latestPlan,
-    latestOutline: _latestOutline,
-    latestSlideDeck: _latestSlideDeck,
+    latestOutline,
+    latestSlideDeck,
+    selectedImageUrls = [],
+    onToggleImageCandidate,
+    queuedUserMessage,
     isLoading,
     status,
     className,
 }: ChatListProps) {
+    const { artifacts } = useArtifactStore(
+        useShallow((state) => ({
+            artifacts: state.artifacts,
+        }))
+    );
     const scrollAreaRef = useRef<HTMLDivElement | null>(null);
     const viewportRef = useRef<HTMLElement | null>(null);
     const shouldAutoScrollRef = useRef(true);
@@ -102,17 +116,62 @@ export function ChatList({
 
     const shouldRenderPendingAssistant = Boolean(isLoading && !isLastPartReasoning);
     const pendingLabel = status === "streaming" ? "Generating..." : "Thinking...";
+    const hasSlideDeckInTimeline = useMemo(
+        () =>
+            processedTimeline.some(
+                (item) => item.type === "artifact" && (item as any).kind === "slide_deck"
+            ),
+        [processedTimeline]
+    );
+    const hasOutlineInTimeline = useMemo(
+        () => processedTimeline.some((item) => item.type === "slide_outline"),
+        [processedTimeline]
+    );
+    const latestSlideDeckFromArtifactStore = useMemo(() => {
+        const slideDeckArtifacts = Object.values(artifacts).filter((artifact) => artifact?.type === "slide_deck");
+        if (slideDeckArtifacts.length === 0) return null;
+        const latestArtifact = slideDeckArtifacts
+            .slice()
+            .sort((a, b) => (b?.version ?? 0) - (a?.version ?? 0))[0];
+        if (!latestArtifact) return null;
+        const content = latestArtifact.content && typeof latestArtifact.content === "object" ? latestArtifact.content : {};
+        return {
+            artifactId: latestArtifact.id,
+            title: latestArtifact.title || "Generated Slides",
+            slides: Array.isArray(content.slides) ? content.slides : [],
+            status: latestArtifact.status || "completed",
+            pdf_url: typeof content.pdf_url === "string" ? content.pdf_url : undefined,
+        };
+    }, [artifacts]);
+    const effectiveLatestSlideDeck = latestSlideDeck ?? latestSlideDeckFromArtifactStore;
+    const writerArtifactIdsInTimeline = useMemo(() => {
+        const ids = new Set<string>();
+        processedTimeline.forEach((item) => {
+            if (item.type !== "artifact") return;
+            const kind = (item as any).kind;
+            if (typeof kind !== "string" || !kind.startsWith("writer_")) return;
+            if (typeof item.artifactId === "string" && item.artifactId.trim().length > 0) {
+                ids.add(item.artifactId);
+            }
+        });
+        return ids;
+    }, [processedTimeline]);
+    const fallbackWriterArtifacts = useMemo(() => {
+        return Object.values(artifacts)
+            .filter((artifact) => {
+                if (!artifact || typeof artifact.type !== "string") return false;
+                if (!artifact.type.startsWith("writer_")) return false;
+                return !writerArtifactIdsInTimeline.has(artifact.id);
+            })
+            .sort((a, b) => (b?.version ?? 0) - (a?.version ?? 0));
+    }, [artifacts, writerArtifactIdsInTimeline]);
 
     const planStepStatusById = useMemo(() => {
         const statusMap = new Map<string, PlanStepStatus>();
-        const steps = Array.isArray(latestPlan?.plan) ? latestPlan.plan : [];
+        const steps = normalizePlanUpdateData(latestPlan).plan;
         steps.forEach((step: any, index: number) => {
             const stepId = String(step?.id ?? index);
-            const rawStatus = step?.status;
-            const normalized: PlanStepStatus =
-                rawStatus === "in_progress" || rawStatus === "pending" || rawStatus === "completed"
-                    ? rawStatus
-                    : "pending";
+            const normalized = normalizePlanStepStatus(step?.status);
             statusMap.set(stepId, normalized);
         });
         return statusMap;
@@ -204,10 +263,11 @@ export function ChatList({
         }
 
         if (item.type === "worker_result") {
+            const workerKey = item.capability || "worker";
             return (
                 <WorkerResult
                     key={key}
-                    role={item.role}
+                    role={workerKey}
                     summary={item.summary}
                     status={item.status}
                 />
@@ -292,6 +352,18 @@ export function ChatList({
             );
         }
 
+        if (item.type === "image_search_results") {
+            return (
+                <ImageSearchResults
+                    key={key}
+                    query={item.query || item.perspective || "image search"}
+                    candidates={item.candidates || []}
+                    selectedUrls={selectedImageUrls}
+                    onToggleSelect={(candidate) => onToggleImageCandidate?.(candidate)}
+                />
+            )
+        }
+
         return null;
     };
 
@@ -317,6 +389,44 @@ export function ChatList({
                     );
                 })}
 
+                {!hasOutlineInTimeline && latestOutline && Array.isArray(latestOutline.slides) ? (
+                    <div className="flex flex-col gap-1">
+                        <SlideOutline
+                            slides={latestOutline.slides}
+                            title={latestOutline.title}
+                            approvalStatus={isLoading ? "loading" : "idle"}
+                        />
+                    </div>
+                ) : null}
+
+                {fallbackWriterArtifacts.map((artifact) => (
+                    <div key={`fallback-writer-${artifact.id}`} className="flex flex-col gap-1 pl-4 md:pl-10">
+                        <ArtifactButton
+                            artifactId={artifact.id}
+                            title={artifact.title || "Writer Output"}
+                            icon="BookOpen"
+                        />
+                    </div>
+                ))}
+
+                {effectiveLatestSlideDeck && !hasSlideDeckInTimeline ? (
+                    <div className="flex flex-col gap-2">
+                        <ChatItem
+                            role="assistant"
+                            content=""
+                            name="Visualizer"
+                            artifact={{
+                                kind: "slide_deck",
+                                id: effectiveLatestSlideDeck.artifactId || "visual_deck",
+                                title: effectiveLatestSlideDeck.title || "Generated Slides",
+                                slides: Array.isArray(effectiveLatestSlideDeck.slides) ? effectiveLatestSlideDeck.slides : [],
+                                status: effectiveLatestSlideDeck.status,
+                            }}
+                            isStreaming={effectiveLatestSlideDeck.status === "streaming"}
+                        />
+                    </div>
+                ) : null}
+
                 {shouldRenderPendingAssistant && (
                     <div className="flex flex-col gap-2">
                         <ChatItem
@@ -325,6 +435,15 @@ export function ChatList({
                             parts={[]}
                             isStreaming={true}
                             loadingText={pendingLabel}
+                        />
+                    </div>
+                )}
+
+                {queuedUserMessage && queuedUserMessage.trim().length > 0 && (
+                    <div className="flex flex-col gap-2">
+                        <ChatItem
+                            role="user"
+                            content={queuedUserMessage}
                         />
                     </div>
                 )}
@@ -341,10 +460,10 @@ interface PlanStepSectionProps {
 }
 
 function PlanStepSection({ stepId, title, status, children }: PlanStepSectionProps) {
-    const [open, setOpen] = useState(status === "in_progress");
+    const [open, setOpen] = useState(status === "in_progress" || status === "blocked");
 
     useEffect(() => {
-        if (status === "in_progress") {
+        if (status === "in_progress" || status === "blocked") {
             setOpen(true);
         }
     }, [status]);
@@ -355,6 +474,9 @@ function PlanStepSection({ stepId, title, status, children }: PlanStepSectionPro
         }
         if (status === "in_progress") {
             return <Loader2 className="h-4 w-4 animate-spin text-indigo-500" />;
+        }
+        if (status === "blocked") {
+            return <Circle className="h-4 w-4 text-red-500" />;
         }
         return <Circle className="h-4 w-4 text-slate-300" />;
     })();

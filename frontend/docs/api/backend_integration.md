@@ -12,9 +12,32 @@
 
 ```ts
 {
-  "pptx_template_base64": "..." // テンプレート解析が必要な場合に送信
+  "selected_image_inputs": [],
+  "attachments": [
+    {
+      "id": "att_01",
+      "filename": "reference.png",
+      "mime_type": "image/png",
+      "size_bytes": 123456,
+      "url": "https://storage.googleapis.com/...",
+      "kind": "image"
+    }
+  ],
+  "aspect_ratio": "16:9"
 }
 ```
+
+## 1.1 添付アップロード API（BFF）
+- **Endpoint**: `/api/uploads`
+- **Method**: `POST`
+- **Content-Type**: `multipart/form-data`
+- **Forward先**: backend `/api/files/upload`
+- **Auth**: `Authorization: Bearer <Firebase ID Token>` 必須
+- **Allowed**: `png/jpg/webp`, `pptx`, `pdf`, `csv`, `txt`, `md`, `json`
+- **Excluded**: `xlsx/xls`（Gemini 3 入力フォーマット対象外）
+
+> `attachments` に `kind: "pptx"` を含めると、バックエンド側でPPTX解析が行われ、
+> 生成された `pptx_context` は Data Analyst ノードで利用されます。
 
 ## 2. 履歴・管理 API
 
@@ -34,12 +57,6 @@
   - `artifacts`: `Record<string, Artifact>`
   - `ui_events`: タイムライン再現用 `data-*` イベント列
 
-### 旧フォールバック（互換）
-- **Endpoint**: `/api/threads/{threadId}/messages`
-- **Usage**: `snapshot` が利用できない場合のみ
-- **Auth**: 必須
-- **Response**: `Message[]` (UIMessage 互換形式)
-
 ## 3. 型定義 (TypeScript)
 フロントエンドでのデータ安全性は `src/features/chat/types/` および `src/features/preview/store/artifact.ts` で定義されたインターフェースにより担保されています。
 
@@ -56,4 +73,4 @@ export interface Artifact {
 
 ## 4. エラーハンドリング
 - **Network Error**: `useChat` の `onError` プロパティでグローバルに捕捉され、コンソールおよび UI (Toast等) へ出力されます。
-- **Protocol Error**: `stream-transformer.ts` で NDJSON のパースエラーを穏やかに処理し、ストリーム全体が停止するのを防ぎます。
+- **Protocol Error**: `src/app/api/chat/route.ts` のストリームパーサで NDJSON 行を防御的に処理し、不正行があっても継続可能にします。

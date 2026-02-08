@@ -34,9 +34,56 @@ LangGraph のチェックポイント参照時は `checkpoint_ns = owner_uid` �
 Worker が生成する主な成果物形式：
 
 ```json
-// Storywriter (Markdown)
-{ "kind": "document", "content": "# タイトル...", "format": "markdown" }
+// Writer(mode=slide_outline)
+{
+  "execution_summary": "5枚のスライド構成を作成",
+  "slides": [
+    {
+      "slide_number": 1,
+      "title": "導入",
+      "bullet_points": ["背景", "問題提起"],
+      "description": "導入スライド"
+    }
+  ]
+}
 
-// Visualizer (Image)
-{ "kind": "image", "url": "https://...", "prompt": "..." }
+// Researcher(image_search)
+{
+  "perspective": "睡眠 リラックス イラスト",
+  "image_candidates": [
+    {
+      "image_url": "https://example.com/image.jpg",
+      "source_url": "https://example.com",
+      "license_note": "CC BY 4.0",
+      "provider": "google_images",
+      "caption": "候補画像の説明"
+    }
+  ]
+}
+
+// Visualizer
+{
+  "prompts": [
+    {
+      "slide_number": 1,
+      "title": "導入",
+      "compiled_prompt": "clean infographic style ...",
+      "generated_image_url": "https://storage.googleapis.com/..."
+    }
+  ],
+  "combined_pdf_url": "https://storage.googleapis.com/.../slides.pdf"
+}
+
+// Data Analyst
+{
+  "execution_summary": "集計処理を実行",
+  "analysis_report": "処理結果の要約",
+  "outputs": [
+    "https://storage.googleapis.com/.../result.csv"
+  ]
+}
 ```
+
+補足:
+- 旧 `Storywriter` 形式は廃止し、`Writer` の mode 別 JSON 出力に統一。
+- 画像検索候補は `image_url` / `source_url` / `license_note` を必須とする。

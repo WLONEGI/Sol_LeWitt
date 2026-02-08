@@ -3,14 +3,25 @@ import { v4 as uuidv4 } from 'uuid';
 import { createUIMessageStreamResponse } from 'ai';
 import * as fs from 'fs';
 import * as path from 'path';
+import { normalizePlanUpdateData } from '@/features/chat/types/plan';
 
 // Node.js runtime for longer timeouts (Pro plan: up to 5 mins)
 export const runtime = 'nodejs';
 export const maxDuration = 300;
+const ALLOWED_PRODUCT_TYPES = new Set(['slide_infographic', 'document_design', 'comic']);
 
 export async function POST(req: NextRequest) {
     try {
-        const { messages, thread_id, pptx_template_base64 } = await req.json();
+        const {
+            messages,
+            thread_id,
+            pptx_template_base64,
+            selected_image_inputs,
+            attachments,
+            interrupt_intent,
+            product_type,
+            aspect_ratio,
+        } = await req.json();
         const authHeader = req.headers.get("authorization") || req.headers.get("Authorization");
         if (!authHeader || !authHeader.toLowerCase().startsWith("bearer ")) {
             return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
@@ -22,11 +33,23 @@ export async function POST(req: NextRequest) {
             ? lastMessage.content
             : lastMessage.parts?.filter((p: any) => p.type === 'text').map((p: any) => p.text).join('') || '';
 
-        console.log(`[Stream] Received request. Thread ID: ${thread_id || 'New'}`);
+        console.log(`[Stream] Received request. Thread ID: ${thread_id || 'New'}, product_type: ${product_type}`);
+        // console.log("Incoming body keys:", Object.keys(await req.clone().json())); // req.json() consumed above
+
+
+        const normalizedProductType =
+            typeof product_type === 'string' && ALLOWED_PRODUCT_TYPES.has(product_type)
+                ? product_type
+                : undefined;
 
         const backendBody = {
             input: {
                 messages: [{ role: "user", content: userContent }],
+                selected_image_inputs: Array.isArray(selected_image_inputs) ? selected_image_inputs : [],
+                attachments: Array.isArray(attachments) ? attachments : [],
+                interrupt_intent: Boolean(interrupt_intent),
+                ...(normalizedProductType ? { product_type: normalizedProductType } : {}),
+                ...(typeof aspect_ratio === 'string' && aspect_ratio ? { aspect_ratio } : {}),
                 ...(pptx_template_base64 ? { pptx_template_base64 } : {})
             },
             config: {
@@ -69,7 +92,7 @@ export async function POST(req: NextRequest) {
                     let currentTextId: string | null = null;
                     let currentRunId: string | null = null;
                     let plannerTextBuffer = '';
-                    let storywriterTextBuffer = '';
+                    let writerTextBuffer = '';
                     let coordinatorTextBuffer = '';
                     let supervisorTextBuffer = '';
 
@@ -92,19 +115,21 @@ export async function POST(req: NextRequest) {
 
                     const emitPlanFromParsed = (parsed: any) => {
                         const steps = parsed?.steps ?? parsed?.plan ?? [];
+                        const normalized = normalizePlanUpdateData({
+                            plan: Array.isArray(steps) ? steps : [],
+                            ui_type: 'plan_update',
+                            title: 'Execution Plan',
+                            description: 'The updated execution plan.'
+                        });
                         controller.enqueue({
                             type: 'data-plan_update',
-                            data: {
-                                plan: steps,
-                                ui_type: 'plan_update',
-                                title: 'Execution Plan',
-                                description: 'The updated execution plan.'
-                            }
+                            data: normalized
                         } as any);
                     };
 
                     const emitOutlineFromParsed = (parsed: any) => {
-                        const slides = parsed?.slides ?? [];
+                        const slides = Array.isArray(parsed?.slides) ? parsed.slides : [];
+                        if (slides.length === 0) return;
                         controller.enqueue({
                             type: 'data-outline',
                             data: {
@@ -158,16 +183,28 @@ export async function POST(req: NextRequest) {
                                         case 'on_custom_event': {
                                             const eventName = eventData.name;
                                             if (eventName?.startsWith('data-')) {
+                                                const normalizedData =
+                                                    eventName === 'data-plan_update'
+                                                        ? normalizePlanUpdateData(eventData.data ?? {})
+                                                        : (eventData.data ?? {});
                                                 controller.enqueue({
                                                     type: eventName,
+                                                    data: normalizedData
+                                                } as any);
+                                                break;
+                                            }
+                                            if (eventName === 'writer-output') {
+                                                controller.enqueue({
+                                                    type: 'data-writer-output',
                                                     data: eventData.data ?? {}
                                                 } as any);
                                                 break;
                                             }
                                             if (eventName === 'plan_update') {
+                                                const normalized = normalizePlanUpdateData(eventData.data ?? {});
                                                 controller.enqueue({
                                                     type: 'data-plan_update',
-                                                    data: eventData.data ?? {}
+                                                    data: normalized
                                                 } as any);
                                                 break;
                                             }
@@ -210,13 +247,14 @@ export async function POST(req: NextRequest) {
                                             const runName = meta.run_name || eventData.name || '';
 
                                             const isPlannerNode = node === 'planner' || (typeof checkpoint === 'string' && checkpoint.includes('planner:'));
-                                            const isStorywriterNode = node === 'storywriter' || (typeof checkpoint === 'string' && checkpoint.includes('storywriter:'));
+                                            const isWriterNode = node === 'writer' || (typeof checkpoint === 'string' && checkpoint.includes('writer:'));
                                             const isCoordinatorNode = node === 'coordinator' || (typeof checkpoint === 'string' && checkpoint.includes('coordinator:'));
                                             const isSupervisorNode = node === 'supervisor' || (typeof checkpoint === 'string' && checkpoint.includes('supervisor:'));
                                             const isVisualizerNode = node === 'visualizer' || (typeof checkpoint === 'string' && checkpoint.includes('visualizer:'));
                                             const isAnalystNode = node === 'data_analyst' || (typeof checkpoint === 'string' && checkpoint.includes('data_analyst:'));
 
-                                            const isPlannerOrStorywriter = runName === 'planner' || runName === 'storywriter' || isPlannerNode || isStorywriterNode;
+                                            const isWriterRun = runName === 'writer';
+                                            const isPlannerOrWriter = runName === 'planner' || isWriterRun || isPlannerNode || isWriterNode;
                                             const isCoordinator = runName === 'coordinator' || isCoordinatorNode;
                                             const isSupervisor = runName === 'supervisor' || isSupervisorNode;
 
@@ -247,9 +285,9 @@ export async function POST(req: NextRequest) {
                                             if (Array.isArray(content)) {
                                                 for (const part of content) {
                                                     if (part.type === 'thinking' && (part.thinking || part.text)) {
-                                                        // Handling THINKING part (planner/storywriter only)
+                                                        // Handling THINKING part (planner/writer only)
                                                         const reasoningContent = part.thinking || part.text;
-                                                        if (isPlannerOrStorywriter) {
+                                                        if (isPlannerOrWriter) {
                                                             if (currentTextId) {
                                                                 controller.enqueue({
                                                                     type: 'text-end',
@@ -273,11 +311,11 @@ export async function POST(req: NextRequest) {
                                                             } as any);
                                                         }
                                                     } else if ((part.type === 'text' || !part.type) && part.text) {
-                                                        if (isPlannerOrStorywriter) {
+                                                        if (isPlannerOrWriter) {
                                                             if (runName === 'planner') {
                                                                 plannerTextBuffer += part.text;
-                                                            } else if (runName === 'storywriter') {
-                                                                storywriterTextBuffer += part.text;
+                                                            } else if (isWriterRun) {
+                                                                writerTextBuffer += part.text;
                                                             }
                                                             continue;
                                                         }
@@ -290,7 +328,7 @@ export async function POST(req: NextRequest) {
                                                             continue;
                                                         }
 
-                                                        // Handling TEXT part (non-planner/storywriter)
+                                                        // Handling TEXT part (non-planner/writer)
                                                         if (currentReasoningId) {
                                                             controller.enqueue({
                                                                 type: 'reasoning-end',
@@ -315,11 +353,11 @@ export async function POST(req: NextRequest) {
                                                     }
                                                 }
                                             } else if (typeof content === 'string' && content) {
-                                                if (isPlannerOrStorywriter) {
+                                                if (isPlannerOrWriter) {
                                                     if (runName === 'planner') {
                                                         plannerTextBuffer += content;
-                                                    } else if (runName === 'storywriter') {
-                                                        storywriterTextBuffer += content;
+                                                    } else if (isWriterRun) {
+                                                        writerTextBuffer += content;
                                                     }
                                                     break;
                                                 }
@@ -360,7 +398,7 @@ export async function POST(req: NextRequest) {
                                             // Explicitly close blocks when chunk_position: "last" is received
                                             if (isLastChunk) {
                                                 console.log(`[Stream] Received last chunk for runId: ${runId}`);
-                                                if (isPlannerOrStorywriter) {
+                                                if (isPlannerOrWriter) {
                                                     if (runName === 'planner') {
                                                         const jsonText = extractFirstJson(plannerTextBuffer) || plannerTextBuffer;
                                                         try {
@@ -371,16 +409,16 @@ export async function POST(req: NextRequest) {
                                                             logToFile(`[${new Date().toISOString()}] [ParseError] planner JSON parse failed: ${String(parseErr)}\n`);
                                                         }
                                                         plannerTextBuffer = '';
-                                                    } else if (runName === 'storywriter') {
-                                                        const jsonText = extractFirstJson(storywriterTextBuffer) || storywriterTextBuffer;
+                                                    } else if (isWriterRun) {
+                                                        const jsonText = extractFirstJson(writerTextBuffer) || writerTextBuffer;
                                                         try {
                                                             const parsed = JSON.parse(jsonText);
                                                             emitOutlineFromParsed(parsed);
                                                         } catch (parseErr) {
-                                                            console.error('[Stream] Storywriter JSON parse failed:', parseErr);
-                                                            logToFile(`[${new Date().toISOString()}] [ParseError] storywriter JSON parse failed: ${String(parseErr)}\n`);
+                                                            console.error('[Stream] Writer JSON parse failed:', parseErr);
+                                                            logToFile(`[${new Date().toISOString()}] [ParseError] writer JSON parse failed: ${String(parseErr)}\n`);
                                                         }
-                                                        storywriterTextBuffer = '';
+                                                        writerTextBuffer = '';
                                                     }
                                                 }
                                                 if (isCoordinator) {

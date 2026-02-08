@@ -1,4 +1,5 @@
 import logging
+import json
 from typing import Literal
 
 from langgraph.types import Command
@@ -8,22 +9,103 @@ from langchain_core.callbacks.manager import adispatch_custom_event
 
 from src.infrastructure.llm.llm import get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
-from src.shared.config import TEAM_MEMBERS
 from src.core.workflow.state import State
+from src.core.workflow.step_v2 import plan_steps_for_ui
 
 logger = logging.getLogger(__name__)
 
 MAX_MESSAGES = 40
 KEEP_LAST_MESSAGES = 10
 MAX_ARTIFACTS = 20
+CAPABILITY_TO_DESTINATION = {
+    "writer": "writer",
+    "researcher": "researcher",
+    "visualizer": "visualizer",
+    "data_analyst": "data_analyst",
+}
 
 def _normalize_plan_statuses(plan: list[dict]) -> None:
-    """Normalize legacy status values in-place."""
+    """Normalize statuses in-place to canonical values."""
     for step in plan:
-        if step.get("status") == "complete":
-            step["status"] = "completed"
-        if step.get("status") == "todo":
+        status = step.get("status")
+        if status not in {"pending", "in_progress", "completed", "blocked"}:
             step["status"] = "pending"
+
+
+def _looks_like_error_text(text: str | None) -> bool:
+    if not isinstance(text, str):
+        return False
+    lowered = text.lower()
+    return "error" in lowered or "失敗" in text or "エラー" in text or "failed" in lowered
+
+
+def _resolve_worker_destination(step: dict) -> str | None:
+    capability = step.get("capability")
+    if isinstance(capability, str):
+        return CAPABILITY_TO_DESTINATION.get(capability)
+    return None
+
+
+def _artifact_suffix_for_step(step: dict) -> str:
+    capability = step.get("capability")
+    if capability == "writer":
+        return "story"
+    if capability == "visualizer":
+        return "visual"
+    if capability == "researcher":
+        return "research"
+    if capability == "data_analyst":
+        return "data"
+    return "output"
+
+
+def _extract_failure_metadata(current_step: dict, artifact_value: object) -> tuple[bool, list[str], str | None]:
+    failed = False
+    failed_checks: list[str] = []
+    notes: str | None = None
+
+    result_summary = current_step.get("result_summary")
+    if _looks_like_error_text(result_summary if isinstance(result_summary, str) else None):
+        failed = True
+        notes = result_summary if isinstance(result_summary, str) else notes
+
+    if artifact_value is None:
+        if failed and not failed_checks:
+            failed_checks = ["worker_execution"]
+        return failed, failed_checks, notes
+
+    parsed = artifact_value
+    if isinstance(artifact_value, str):
+        if _looks_like_error_text(artifact_value):
+            failed = True
+            notes = artifact_value
+        try:
+            parsed = json.loads(artifact_value)
+        except Exception:
+            parsed = artifact_value
+
+    if isinstance(parsed, dict):
+        if parsed.get("error"):
+            failed = True
+            notes = str(parsed.get("notes") or parsed.get("error"))
+        raw_checks = parsed.get("failed_checks")
+        if isinstance(raw_checks, list):
+            failed_checks.extend(str(item) for item in raw_checks if isinstance(item, str))
+        execution_summary = parsed.get("execution_summary")
+        if _looks_like_error_text(execution_summary if isinstance(execution_summary, str) else None):
+            failed = True
+            if not notes and isinstance(execution_summary, str):
+                notes = execution_summary
+        analysis_report = parsed.get("analysis_report")
+        if _looks_like_error_text(analysis_report if isinstance(analysis_report, str) else None):
+            failed = True
+            if not notes and isinstance(analysis_report, str):
+                notes = analysis_report
+
+    if failed and not failed_checks:
+        failed_checks = ["worker_execution"]
+    failed_checks = sorted(set(failed_checks))
+    return failed, failed_checks, notes
 
 def _merge_updates(*updates: dict) -> dict:
     """Merge update dicts while concatenating messages."""
@@ -125,7 +207,7 @@ async def _generate_supervisor_report(state: State, config: RunnableConfig, is_f
             # Summarize plan
             plan_lines = []
             for step in plan:
-                status_emoji = "✅" if step["status"] == "completed" else "⏳"
+                status_emoji = "✅" if step.get("status") == "completed" else "⏳"
                 plan_lines.append(f"- {status_emoji} {step.get('title')}: {step.get('result_summary', '完了')}")
             enriched_state["PLAN_SUMMARY"] = "\n".join(plan_lines)
             
@@ -137,14 +219,14 @@ async def _generate_supervisor_report(state: State, config: RunnableConfig, is_f
             # Identify last achievement
             last_step = None
             for step in reversed(plan):
-                if step["status"] == "completed":
+                if step.get("status") == "completed":
                     last_step = step
                     break
             
             # Identify next objective
             next_step = None
             for step in plan:
-                if step["status"] == "in_progress":
+                if step.get("status") == "in_progress":
                     next_step = step
                     break
             
@@ -197,7 +279,7 @@ async def _dispatch_plan_update(plan: list[dict], config: RunnableConfig) -> Non
         await adispatch_custom_event(
             "plan_update",
             {
-                "plan": plan,
+                "plan": plan_steps_for_ui(plan),
                 "ui_type": "plan_update",
                 "title": "Execution Plan",
                 "description": "The updated execution plan."
@@ -207,7 +289,39 @@ async def _dispatch_plan_update(plan: list[dict], config: RunnableConfig) -> Non
     except Exception as e:
         logger.warning(f"Failed to dispatch plan update: {e}")
 
-async def supervisor_node(state: State, config: RunnableConfig) -> Command[Literal[*TEAM_MEMBERS, "__end__"]]:
+
+async def _dispatch_plan_step_started(step: dict, config: RunnableConfig) -> None:
+    """Emit step-start event for timeline grouping."""
+    try:
+        await adispatch_custom_event(
+            "data-plan_step_started",
+            {
+                "step_id": step.get("id"),
+                "title": step.get("title"),
+                "status": "in_progress",
+            },
+            config=config,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to dispatch plan step started: {e}")
+
+
+async def _dispatch_plan_step_ended(step: dict, status: str, config: RunnableConfig) -> None:
+    """Emit step-end event for timeline grouping."""
+    try:
+        await adispatch_custom_event(
+            "data-plan_step_ended",
+            {
+                "step_id": step.get("id"),
+                "title": step.get("title"),
+                "status": status,
+            },
+            config=config,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to dispatch plan step ended: {e}")
+
+async def supervisor_node(state: State, config: RunnableConfig) -> Command:
     """
     Supervisor Node (Orchestrator).
     """
@@ -221,7 +335,7 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command[Liter
     
     # Check for in-progress step
     for i, step in enumerate(plan):
-        if step["status"] == "in_progress":
+        if step.get("status") == "in_progress":
             current_step_index = i
             current_step = step
             break
@@ -229,7 +343,7 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command[Liter
     # If no step is in progress, find the first pending step
     if current_step is None:
         for i, step in enumerate(plan):
-            if step["status"] == "pending":
+            if step.get("status") == "pending":
                 current_step_index = i
                 current_step = step
                 break
@@ -246,24 +360,43 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command[Liter
             update={"messages": [AIMessage(content=report, name="supervisor")]}
         )
         
-    current_role = current_step["role"]
+    destination = _resolve_worker_destination(current_step)
     
-    if current_step["status"] == "in_progress":
-        role_suffix_map = {
-            "storywriter": "story",
-            "visualizer": "visual",
-            "researcher": "research",
-            "data_analyst": "data"
-        }
-        suffix = role_suffix_map.get(current_role, "output")
+    if current_step.get("status") == "in_progress":
+        suffix = _artifact_suffix_for_step(current_step)
         artifact_key = f"step_{current_step['id']}_{suffix}"
         
         artifacts = state.get("artifacts", {})
         step_completed = artifact_key in artifacts
         
         if step_completed:
+            artifact_value = artifacts.get(artifact_key)
+            failed, failed_checks, failure_notes = _extract_failure_metadata(current_step, artifact_value)
+            if failed:
+                plan[current_step_index]["status"] = "blocked"
+                await _dispatch_plan_step_ended(current_step, "blocked", config)
+                quality_reports = dict(state.get("quality_reports", {}) or {})
+                step_id = current_step.get("id")
+                if isinstance(step_id, int):
+                    quality_reports[step_id] = {
+                        "step_id": step_id,
+                        "passed": False,
+                        "failed_checks": failed_checks,
+                        "notes": failure_notes or current_step.get("result_summary") or "Worker output indicates failure.",
+                    }
+                logger.warning(
+                    "Step %s (%s) marked blocked due to failure artifact.",
+                    current_step_index,
+                    destination or "unknown",
+                )
+                return Command(
+                    goto="retry_or_alt_mode",
+                    update={"plan": plan, "quality_reports": quality_reports},
+                )
+
             plan[current_step_index]["status"] = "completed"
-            logger.info(f"Step {current_step_index} ({current_role}) completed. Marking as completed.")
+            await _dispatch_plan_step_ended(current_step, "completed", config)
+            logger.info(f"Step {current_step_index} ({destination or 'unknown'}) completed. Marking as completed.")
 
             await _dispatch_plan_update(plan, config)
             
@@ -282,13 +415,29 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command[Liter
                 )
             )
         else:
-             logger.info(f"Step {current_step_index} ({current_role}) in progress but no artifact. Re-assigning.")
-             return Command(goto=current_role)
+             if destination is None:
+                 logger.error(f"Step {current_step_index} has no resolvable destination.")
+                 plan[current_step_index]["status"] = "blocked"
+                 return Command(
+                     goto="retry_or_alt_mode",
+                     update={"plan": plan}
+                 )
+             logger.info(f"Step {current_step_index} ({destination}) in progress but no artifact. Re-assigning.")
+             return Command(goto=destination)
 
-    elif current_step["status"] == "pending":
-        logger.info(f"Starting Step {current_step_index} ({current_role})")
+    elif current_step.get("status") == "pending":
+        if destination is None:
+            logger.error(f"Pending step {current_step_index} has no resolvable destination.")
+            plan[current_step_index]["status"] = "blocked"
+            return Command(
+                goto="retry_or_alt_mode",
+                update={"plan": plan}
+            )
+
+        logger.info(f"Starting Step {current_step_index} ({destination})")
         
         plan[current_step_index]["status"] = "in_progress"
+        await _dispatch_plan_step_started(current_step, config)
 
         await _dispatch_plan_update(plan, config)
         
@@ -299,7 +448,7 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command[Liter
         prune_update = _prune_artifacts_if_needed(state)
 
         return Command(
-            goto=current_role,
+            goto=destination,
             update=_merge_updates(
                 {"plan": plan, "messages": [AIMessage(content=report, name="supervisor")]},
                 compact_update,

@@ -1,6 +1,8 @@
 import logging
 import json
+import re
 from typing import Literal, Any
+from urllib.parse import urlparse, urlunparse
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.types import Command, Send
@@ -19,6 +21,49 @@ from src.core.workflow.state import ResearchSubgraphState
 from .common import _update_artifact, run_structured_output
 
 logger = logging.getLogger(__name__)
+
+IMAGE_REQUEST_KEYWORDS = (
+    "画像",
+    "写真",
+    "イラスト",
+    "参照画像",
+    "image",
+    "photo",
+    "illustration",
+    "reference image",
+)
+
+
+def _contains_explicit_image_request(text: str) -> bool:
+    lowered = text.lower()
+    return any(keyword in text or keyword in lowered for keyword in IMAGE_REQUEST_KEYWORDS)
+
+
+def _normalize_task_modes_by_instruction(
+    tasks: list[ResearchTask],
+    instruction_text: str,
+) -> list[ResearchTask]:
+    explicit_image = _contains_explicit_image_request(instruction_text)
+    normalized: list[ResearchTask] = []
+    has_image_mode = False
+
+    for task in tasks:
+        mode = str(getattr(task, "search_mode", "text_search") or "text_search")
+        if mode not in {"text_search", "image_search", "hybrid_search"}:
+            mode = "text_search"
+
+        if not explicit_image and mode in {"image_search", "hybrid_search"}:
+            mode = "text_search"
+        if explicit_image and mode in {"image_search", "hybrid_search"}:
+            has_image_mode = True
+
+        normalized.append(task.model_copy(update={"search_mode": mode}))
+
+    if explicit_image and normalized and not has_image_mode:
+        normalized[0] = normalized[0].model_copy(update={"search_mode": "image_search"})
+
+    return normalized
+
 
 def _extract_text_from_content(content: Any) -> str:
     if isinstance(content, str):
@@ -41,6 +86,83 @@ def _extract_text_from_content(content: Any) -> str:
         text = content.get("text")
         return text if isinstance(text, str) else ""
     return ""
+
+
+def _extract_urls(text: str) -> list[str]:
+    if not text:
+        return []
+    urls = re.findall(r"https?://[^\s\]\)<>\"']+", text)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        cleaned = url.rstrip(".,);")
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            deduped.append(cleaned)
+    return deduped
+
+
+def _build_image_candidates(urls: list[str], search_mode: str) -> list[dict]:
+    if search_mode not in {"image_search", "hybrid_search"}:
+        return []
+
+    def normalize_source_url(url: str) -> str:
+        try:
+            parsed = urlparse(url)
+            if not parsed.scheme or not parsed.netloc:
+                return url
+            return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+        except Exception:
+            return url
+
+    def infer_license_note(url: str) -> str:
+        lowered = url.lower()
+        if "commons.wikimedia.org" in lowered or "wikipedia.org" in lowered:
+            return "Likely CC BY-SA on Wikimedia. Verify the file detail page."
+        if "unsplash.com" in lowered or "images.unsplash.com" in lowered:
+            return "Unsplash License likely applies. Verify asset page terms."
+        if "pexels.com" in lowered or "images.pexels.com" in lowered:
+            return "Pexels License likely applies. Verify asset page terms."
+        if "pixabay.com" in lowered or "cdn.pixabay.com" in lowered:
+            return "Pixabay License likely applies. Verify asset page terms."
+        if "flickr.com" in lowered or "staticflickr.com" in lowered:
+            return "Flickr image: check photographer-selected license on source page."
+        if "githubusercontent.com" in lowered or "raw.githubusercontent.com" in lowered:
+            return "Repository license may apply. Verify repository LICENSE and asset rights."
+        if re.search(r"\bcc\b|\bcreativecommons\b", lowered):
+            return "Creative Commons reference detected in URL. Verify specific CC variant."
+        return "License unknown. Manual verification required before use."
+
+    def infer_caption(url: str) -> str:
+        try:
+            hostname = urlparse(url).netloc
+            return f"Image candidate from {hostname}" if hostname else "Image candidate"
+        except Exception:
+            return "Image candidate"
+
+    candidates: list[dict] = []
+    for url in urls:
+        lowered = url.lower()
+        is_image_like = (
+            lowered.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
+            or "/image" in lowered
+            or "images" in lowered
+            or "img" in lowered
+            or "photo" in lowered
+        )
+        if not is_image_like:
+            continue
+        candidates.append(
+            {
+                "image_url": url,
+                "source_url": normalize_source_url(url),
+                "license_note": infer_license_note(url),
+                "provider": "grounded_web",
+                "caption": infer_caption(url),
+                "relevance_score": None,
+            }
+        )
+    return candidates
 
 async def research_worker_node(state: ResearchSubgraphState, config: RunnableConfig) -> dict:
     """
@@ -71,7 +193,8 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
         try:
             current_step = next(
                 step for step in state.get("plan", []) 
-                if step.get("status") == "in_progress" and step.get("role") == "researcher"
+                if step.get("status") == "in_progress"
+                and step.get("capability") == "researcher"
             )
             step_id = current_step["id"]
         except (StopIteration, KeyError, TypeError):
@@ -87,8 +210,10 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
 
         system_prompt = load_prompt_markdown("researcher")
         
+        search_mode = str(getattr(task, "search_mode", "text_search") or "text_search")
         instruction = (
             f"You are investigating: '{task.perspective}'.\n"
+            f"Search Mode: {search_mode}\n"
             f"Requirement: {task.expected_output}\n"
         )
         if task.query_hints:
@@ -122,17 +247,37 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
                     config=config
                 )
 
+        sources = _extract_urls(full_content)
+        image_candidates = _build_image_candidates(sources, search_mode)
+        top_image_candidates = image_candidates[:8]
+
         result = ResearchResult(
             task_id=task.id,
             perspective=task.perspective,
             report=full_content,
-            sources=[],
+            sources=sources,
+            image_candidates=top_image_candidates,
             confidence=0.9
         )
         
         # [Decentralized Reporting] Emit individual results immediately
         summary_text = f"【{task.perspective}】の調査が完了しました。"
+        if image_candidates:
+            summary_text += f" 画像候補 {len(image_candidates)} 件を抽出しました。"
         artifact_id = f"step_{step_id}_research_{task.id}"
+
+        if search_mode in {"image_search", "hybrid_search"}:
+            await adispatch_custom_event(
+                "data-image-search-results",
+                {
+                    "artifact_id": artifact_id,
+                    "task_id": task.id,
+                    "query": task.query_hints[0] if task.query_hints else task.perspective,
+                    "perspective": task.perspective,
+                    "candidates": top_image_candidates,
+                },
+                config=config,
+            )
 
         # 3. Dispatch Complete Event
         await adispatch_custom_event(
@@ -143,12 +288,13 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
         
         return {
             "internal_research_results": [result],
-            "artifacts": _update_artifact(state, artifact_id, full_content),
+            "artifacts": _update_artifact(state, artifact_id, result.model_dump_json(exclude_none=True)),
             "messages": [
                 AIMessage(
                     content=summary_text,
                     additional_kwargs={
                         "ui_type": "worker_result",
+                        "capability": "researcher",
                         "role": "researcher", 
                         "status": "completed",
                         "result_summary": summary_text
@@ -161,7 +307,8 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
                         "ui_type": "artifact_view",
                         "artifact_id": artifact_id,
                         "title": f"調査レポート: {task.perspective}",
-                        "icon": "BookOpen"
+                        "icon": "BookOpen",
+                        "preview_urls": [c["image_url"] for c in top_image_candidates],
                     },
                     name=f"researcher_{task.id}_artifact"
                 )
@@ -186,6 +333,7 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
                     perspective=task.perspective,
                     report=error_message,
                     sources=[],
+                    image_candidates=[],
                     confidence=0.0
                 )
             ]
@@ -201,7 +349,8 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
     try:
         step_index, current_step = next(
             (i, step) for i, step in enumerate(state["plan"]) 
-            if step["status"] == "in_progress" and step["role"] == "researcher"
+            if step.get("status") == "in_progress"
+            and step.get("capability") == "researcher"
         )
     except StopIteration:
         logger.error("Research Manager called but no in_progress step found.")
@@ -222,7 +371,8 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
         clear_update = {"internal_research_results": []}
         
         base_prompt = load_prompt_markdown("research_topic_analyzer")
-        instruction_content = f"User Instruction: {current_step['instruction']}"
+        step_instruction = str(current_step.get("instruction") or "")
+        instruction_content = f"User Instruction: {step_instruction}"
         
         llm = get_llm_by_type("reasoning")
         
@@ -244,7 +394,7 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
                 config=stream_config,
                 repair_hint="Schema: ResearchTaskList. No extra text."
             )
-            tasks = qa_result.tasks
+            tasks = _normalize_task_modes_by_instruction(qa_result.tasks, step_instruction)
             if not tasks:
                  raise ValueError("No tasks generated")
         except Exception as e:
@@ -253,6 +403,7 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
                 ResearchTask(
                    id=1, 
                    perspective="General Investigation", 
+                   search_mode="text_search",
                    query_hints=[], 
                    priority="high", 
                    expected_output="Detailed report."

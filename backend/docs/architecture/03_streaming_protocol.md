@@ -1,55 +1,38 @@
 # 03. ストリーミング・プロトコル (SSE)
 
-本システムは、Vercel AI SDK v6 **Data Stream Protocol** に準拠した Server-Sent Events (SSE) を使用して情報を配信します。
+本システムは `POST /api/chat/stream_events` で LangGraph のイベントストリームを配信し、フロント BFF (`frontend/src/app/api/chat/route.ts`) が UI 向け `data-*` パートへ変換します。
 
-## 1. 原則
-- **Prefix-based Streaming**: 全ての出力は `prefix:payload\n` の形式で送信されます。
-- **Multi-Channel**: `0:` (Text), `d:` (Custom Data), `e:` (Error) 等を使い分け、多様なデータを単一のストリームに統合します。
+## 1. 基本フロー
+- バックエンド SSE は `data: { ...event payload... }\n\n` 形式。
+- 主なイベントは `on_chat_model_stream`（トークン）と `on_custom_event`（構造化データ）。
+- フロントは `on_custom_event.name` を解釈し、`data-plan_update` などの UI パートへ正規化。
 
-## 2. カスタム・イベント定義 (`d:` channel)
-フロントエンドの UI 状態を制御するため、JSON 形式のカスタム・イベントを発行します。
+## 2. 主要カスタムイベント（バックエンド発行）
 
-| `type` | 配信元ノード | 説明 |
+| `on_custom_event.name` | 配信元ノード | 用途 |
 | :--- | :--- | :--- |
-| `plan_update` | **Planner** | 実行計画の全量を送信。ヘッダーのタスクリストを更新。 |
-| `artifact_open` | **Worker (Start)** | 成果物生成の開始を通知。サイドパネルのスケルトンを表示。 |
-| `artifact_ready` | **Worker (End)** | 生成完了したデータの実体を送信（Bulk Transfer）。 |
-| `log_update` | **Researcher** | 調査の進捗ログ（Glass Box Logs）を送信。 |
-| `message_metadata` | **Finalizer** | ターンの最後に送信。メッセージと生成された Artifact ID を紐付け。 |
+| `plan_update` | planner / supervisor | 実行プラン更新（全量）。 |
+| `writer-output` | writer | Writer成果物（JSON）通知。 |
+| `data-visual-plan` | visualizer | 画像生成計画。 |
+| `data-visual-prompt` | visualizer | 各画像の生成プロンプト。 |
+| `data-visual-image` | visualizer | 生成画像 URL とメタ情報。 |
+| `data-visual-pdf` | visualizer | 統合 PDF URL。 |
+| `data-image-search-results` | researcher | 画像検索候補（URL/出典/ライセンス含む）。 |
+| `data-analyst-start` / `data-analyst-output` / `data-analyst-complete` | data_analyst | 実行開始・出力・完了。 |
+| `title_generated` | coordinator | スレッドタイトル候補。 |
 
-## 3. シーケンス・ダイアグラム
+## 3. フロント変換ルール（要点）
+- `plan_update` → `data-plan_update`
+- `writer-output` → `data-writer-output`
+- `name` が `data-` で始まるイベントは原則そのまま UI へ転送
+- `on_chat_model_stream` のテキスト/推論は `text-*` / `reasoning-*` に分離
 
-```mermaid
-sequenceDiagram
-    participant FE as Frontend (useChat)
-    participant BE as Backend (FastAPI)
-    participant LG as LangGraph
-    
-    FE->>BE: POST /api/chat/stream
-    BE->>LG: app.stream_events(version="v1")
-    
-    loop Workflow execution
-        LG->>BE: on_chat_model_stream (Coordinator)
-        BE->>FE: 0: "こんにちは..." (Text delta)
-        
-        LG->>BE: on_chain_end (Planner)
-        BE->>FE: d: {"type": "plan_update", "plan": [...]}
-        
-        LG->>BE: on_chain_start (Storywriter)
-        BE->>FE: d: {"type": "artifact_open", "artifactId": "sw-1", ...}
-        
-        LG->>BE: on_chain_end (Storywriter)
-        BE->>FE: d: {"type": "artifact_ready", "artifactId": "sw-1", "payload": {...}}
-    end
-    
-    BE->>FE: d: {"type": "message_metadata", "relatedArtifactIds": ["sw-1"]}
-    BE->>FE: 0: "" (Finish)
-```
-
-## 4. プロトコル準拠の重要性
-バックエンドの `sse_formatter.py` は、LangGraph のイベントを Vercel AI SDK のプロトコルに正確に変換する責務を負います。
-- **Text**: 直接 `0:` プレフィックスで送信。
-- **Custom Data**: `d:` プレフィックスと改行区切りを厳守。
+## 4. スナップショット再生
+`GET /api/threads/{thread_id}/snapshot` は以下を返し、画面再読込時に同じ状態を復元します。
+- `messages`
+- `plan`
+- `artifacts`
+- `ui_events`（`data-*` イベント列）
 
 > [!CAUTION]
-> JSON ペイロード内に生の改行が含まれると、SSE プロトコルが壊れる可能性があります。必ず JSON 文字列としてシリアライズし、最後に `\n` を付与してください。
+> 旧 `Storywriter` / `artifact_open` / `artifact_ready` 前提の実装は廃止済みです。現在は `writer` と `data-*` ベースのイベント契約を使用してください。

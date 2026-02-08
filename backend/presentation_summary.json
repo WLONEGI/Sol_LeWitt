@@ -1,0 +1,160 @@
+{
+  "title": "気候変動の影響：科学的根拠から将来予測まで",
+  "slides": [
+    {
+      "slide_number": 1,
+      "title": "気候変動の影響：科学的根拠から将来予測まで",
+      "bullet_points": [
+        "講義名：環境科学概論",
+        "対象：学部生",
+        "出典：IPCC第6次評価報告書（AR6）に基づく包括的概観"
+      ],
+      "description": "タイトルスライド。講義の主題と、本講義が国際的な科学的合意（IPCC AR6）に基づいていることを明示する。",
+      "key_message": "現代の気候変動に関する科学的知見の全体像を理解する。"
+    },
+    {
+      "slide_number": 2,
+      "title": "本講義の構成",
+      "bullet_points": [
+        "1. 科学的証拠：温室効果のメカニズムと観測事実",
+        "2. 世界的影響：自然・人間システムへのリスク",
+        "3. 緩和策：排出削減の技術と経済性",
+        "4. 将来予測：SSPシナリオと長期的展望"
+      ],
+      "description": "アジェンダスライド。講義の全体フローを提示し、現状分析（証拠・影響）から対策（緩和）、そして未来（予測）へと進む論理構成を示す。",
+      "key_message": "気候変動問題を「物理的実態」「影響」「対策」「予測」の4視点から体系的に学ぶ。"
+    },
+    {
+      "slide_number": 3,
+      "title": "1. 科学的証拠：温室効果の物理的メカニズム",
+      "bullet_points": [
+        "エネルギー収支：太陽放射（短波長）の透過と地表放射（長波長）の吸収",
+        "温室効果ガス（GHG）の役割：赤外線の吸収と再放射による保温効果",
+        "自然の温室効果：平均気温を約15℃に維持（不在時は-18℃）"
+      ],
+      "description": "気候変動の基礎となる物理プロセスの解説。[図解プレースホルダー：太陽からの入射エネルギー、地表での反射・吸収、大気中のGHGによる赤外線再放射のメカニズム図]",
+      "key_message": "温室効果自体は地球の生命維持に不可欠な物理現象であるが、人為的なGHG増加がそのバランスを崩している。"
+    },
+    {
+      "slide_number": 4,
+      "title": "1. 科学的証拠：GHG濃度と気温上昇の観測データ",
+      "bullet_points": [
+        "CO2濃度：産業革命前（約280ppm）から410ppm超へ（約47%増）",
+        "気温上昇：1850-1900年基準で+1.09℃（2011-2020年平均）",
+        "人為 felt_要因：観測された温暖化のほぼ全て（+1.07℃）が人間活動に由来"
+      ],
+      "description": "IPCC AR6 WG1に基づく観測データの提示。[グラフプレースホルダー：過去2000年の世界平均気温の変化（ホッケースティック曲線）および直近のCO2濃度推移グラフ]",
+      "key_message": "大気中のGHG濃度は過去200万年で最高水準にあり、近年の急激な気温上昇との相関は明白である。"
+    },
+    {
+      "slide_number": 5,
+      "title": "2. 世界的影響：水資源と生態系へのリスク",
+      "bullet_points": [
+        "水資源：氷河融解による供給変動、世界人口の約半数が水不足を経験",
+        "生態系：生物種の生息域移動と絶滅リスク（1.5℃上昇でサンゴ礁の70-90%が消失予測）",
+        "極端現象：熱波、干ばつ、豪雨の頻度と強度の増加"
+      ],
+      "description": "自然システムへの物理的・生物学的影響の解説。[図解プレースホルダー：気温上昇に伴う絶滅リスクの増加を示す「バーニング・エンバー（燃えさかる残り火）」図]",
+      "key_message": "気候変動の影響はすでに顕在化しており、特に脆弱な生態系や地域において不可逆的な損失のリスクが高まっている。"
+    },
+    {
+      "slide_number": 6,
+      "title": "2. 世界的影響：食料安全保障と社会インフラ",
+      "bullet_points": [
+        "農業：低緯度地域を中心とした主要作物（トウモロコシ、小麦）の収量低下",
+        "水産業：海洋酸性化と熱波による漁獲量への打撃",
+        "インフラ：海面上昇による沿岸都市のリスク、洪水被害の拡大"
+      ],
+      "description": "人間システム（社会・経済）への影響解説。[グラフプレースホルダー：気候変動による主要作物の収量変化予測グラフ]",
+      "key_message": "気候変動は食料供給や居住環境を脅かし、人間の安全保障に対する直接的なリスク要因となっている。"
+    },
+    {
+      "slide_number": 7,
+      "title": "3. 緩和策：主要セクターの削減ポテンシャル",
+      "bullet_points": [
+        "エネルギー：太陽光・風力発電の導入拡大（最大の削減ポテンシャル）",
+        "AFOLU（農業・林業）：森林減少の抑制と炭素貯留",
+        "需要側：省エネ建築、電気自動車（EV）へのシフト"
+      ],
+      "description": "IPCC AR6 WG3に基づく緩和策の紹介。[グラフプレースホルダー：セクター別（エネルギー、輸送、建物、産業等）の2030年までのGHG削減ポテンシャル棒グラフ]",
+      "key_message": "2030年までの排出半減に向けた技術的選択肢は既に存在し、特に再生可能エネルギーと森林保全の役割が大きい。"
+    },
+    {
+      "slide_number": 8,
+      "title": "3. 緩和策：技術の経済性とコスト低減",
+      "bullet_points": [
+        "劇的なコスト低下（2010-2019）：太陽光(-85%)、風力(-55%)、蓄電池(-85%)",
+        "経済合理性：多くの地域で再エネが化石燃料より安価に",
+        "低コスト削減：2030年削減目標の半分以上は低コスト（<$20/tCO2）で実現可能"
+      ],
+      "description": "緩和策の経済的側面を強調する。[グラフプレースホルダー：再生可能エネルギー技術の単位発電コスト（LCOE）の経年推移グラフ]",
+      "key_message": "気候変動対策は「経済的負担」から「経済的合理性のある投資」へとフェーズが移行している。"
+    },
+    {
+      "slide_number": 9,
+      "title": "4. 将来予測：SSPシナリオによる気温変化",
+      "bullet_points": [
+        "SSPシナリオ：社会経済発展の在り方に基づく5つの排出経路",
+        "SSP1-1.9（1.5℃目標）：今世紀末に1.4℃へ収束（要・急速な排出削減）",
+        "SSP5-8.5（高排出）：今世紀末に約4.4℃上昇する最悪のシナリオ",
+        "短期的予測：どのシナリオでも2040年頃までは1.5℃に達する可能性が高い"
+      ],
+      "description": "IPCC AR6 WG1に基づく将来予測の解説。[グラフプレースホルダー：5つのSSPシナリオに基づく2100年までの世界平均気温変化の時系列グラフ]",
+      "key_message": "将来の気温上昇幅は、今後数十年の私たちの排出行動（シナリオ選択）に強く依存している。"
+    },
+    {
+      "slide_number": 10,
+      "title": "結論：科学的知見が示す行動の緊急性",
+      "bullet_points": [
+        "科学的証拠は明白：人間活動が温暖化の主因である",
+        "影響の深刻化：自然・人間システムへのリスクは拡大傾向にある",
+        "希望と課題：技術的解決策は存在するが、社会実装のスピードアップが不可欠",
+        "1.5℃目標の意義：不可逆的な影響（ティッピングポイント）を回避するための防衛線"
+      ],
+      "description": "講義のまとめ。科学的事実の受容と、緩和策実行の緊急性を再確認する。",
+      "key_message": "気候変動は将来の問題ではなく、現在の危機であり、今この瞬間の行動が未来の地球環境を決定づける。"
+    }
+  ],
+  "visual_assets": [
+    {
+      "slide_number": 1,
+      "generated_image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/2ab6a8ef-e638-4cfe-ad1e-22497ae31942/slide_01_dcf87047-aea3-4ea9-9b99-4af482fe92dc.png"
+    },
+    {
+      "slide_number": 2,
+      "generated_image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/2ab6a8ef-e638-4cfe-ad1e-22497ae31942/slide_02_663b8e2a-78c8-43a7-bdd5-e6d63f9dc35a.png"
+    },
+    {
+      "slide_number": 3,
+      "generated_image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/2ab6a8ef-e638-4cfe-ad1e-22497ae31942/slide_03_719a9ede-1505-4f80-b312-b68108e6186d.png"
+    },
+    {
+      "slide_number": 4,
+      "generated_image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/2ab6a8ef-e638-4cfe-ad1e-22497ae31942/slide_04_0735ad9d-2a4a-4b10-94c5-0c4544317dd1.png"
+    },
+    {
+      "slide_number": 5,
+      "generated_image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/2ab6a8ef-e638-4cfe-ad1e-22497ae31942/slide_05_e43a61ff-98de-40c2-b9ab-5558b6ec3a28.png"
+    },
+    {
+      "slide_number": 6,
+      "generated_image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/2ab6a8ef-e638-4cfe-ad1e-22497ae31942/slide_06_04e8ad57-2912-492c-aae1-7c543d728917.png"
+    },
+    {
+      "slide_number": 7,
+      "generated_image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/2ab6a8ef-e638-4cfe-ad1e-22497ae31942/slide_07_77c2d24f-a5ca-4542-be14-22d8591b96b0.png"
+    },
+    {
+      "slide_number": 8,
+      "generated_image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/2ab6a8ef-e638-4cfe-ad1e-22497ae31942/slide_08_5e992261-f13c-4640-86dd-25dd73dc704c.png"
+    },
+    {
+      "slide_number": 9,
+      "generated_image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/2ab6a8ef-e638-4cfe-ad1e-22497ae31942/slide_09_dacfad8d-de83-4119-b43d-56082770fc05.png"
+    },
+    {
+      "slide_number": 10,
+      "generated_image_url": "https://storage.googleapis.com/ai-slide-artifacts-aerobic-stream-483505-a0/generated_assets/2ab6a8ef-e638-4cfe-ad1e-22497ae31942/slide_10_487029c0-5812-4ebc-ba13-6d3e75d53c78.png"
+    }
+  ]
+}

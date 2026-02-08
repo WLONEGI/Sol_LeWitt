@@ -1,3 +1,4 @@
+import json
 import re
 from typing import Any, TypeVar
 from pydantic import BaseModel
@@ -7,6 +8,15 @@ from src.shared.config.settings import settings
 from src.core.workflow.state import State
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _normalize_worker_capability(value: str | None) -> str:
+    if not isinstance(value, str):
+        return "worker"
+    lowered = value.strip().lower()
+    if lowered in {"writer", "researcher", "visualizer", "data_analyst"}:
+        return lowered
+    return "worker"
 
 def _update_artifact(state: State, key: str, value: Any) -> dict[str, Any]:
     """Helper to update artifacts dictionary."""
@@ -53,33 +63,54 @@ def split_content_parts(content: Any) -> tuple[str, str]:
 
     return ("".join(thinking_parts), "".join(text_parts))
 
+
+def build_worker_error_payload(
+    *,
+    error_text: str,
+    failed_checks: list[str] | None = None,
+    notes: str | None = None,
+) -> str:
+    payload = {
+        "error": error_text,
+        "failed_checks": failed_checks or ["worker_execution"],
+        "notes": notes or error_text,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
 async def run_structured_output(
     llm,
     schema: type[T],
     messages: list,
     config: dict,
-    repair_hint: str
+    repair_hint: str,
+    max_retries: int = 2,
 ) -> T:
-    """Structured output with fallback JSON repair."""
-    try:
-        structured_llm = llm.with_structured_output(schema)
-        return await structured_llm.ainvoke(messages, config=config)
-    except Exception as first_error:
-        repair_messages = list(messages)
-        repair_messages.append(
-            HumanMessage(
-                content=(
-                    "Return ONLY valid JSON for the schema. "
-                    f"{repair_hint}"
+    """Run strict structured output with retriable with_structured_output calls."""
+    attempt = 0
+    current_messages = list(messages)
+    last_error: Exception | None = None
+
+    while attempt <= max_retries:
+        try:
+            structured_llm = llm.with_structured_output(schema)
+            return await structured_llm.ainvoke(current_messages, config=config)
+        except Exception as e:
+            last_error = e
+            if attempt >= max_retries:
+                break
+            current_messages = list(messages) + [
+                HumanMessage(
+                    content=(
+                        "Return ONLY valid JSON matching the schema. "
+                        f"{repair_hint} Retry attempt {attempt + 1}/{max_retries}."
+                    )
                 )
-            )
-        )
-        raw = await llm.ainvoke(repair_messages, config=config)
-        raw_text = raw.content if hasattr(raw, "content") else str(raw)
-        json_text = extract_first_json(raw_text)
-        if not json_text:
-            raise first_error
-        return schema.model_validate_json(json_text)
+            ]
+            attempt += 1
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("run_structured_output failed without explicit error")
 
 def create_worker_response(
     role: str,
@@ -92,7 +123,10 @@ def create_worker_response(
     artifact_icon: str = "FileText",
     artifact_preview_urls: list[str] | None = None,
     is_error: bool = False,
-    goto: str = "supervisor"
+    goto: str = "supervisor",
+    extra_update: dict[str, Any] | None = None,
+    capability: str | None = None,
+    emitter_name: str | None = None,
 ) -> Command:
     """
     Common helper to generate the Command response for worker nodes.
@@ -101,10 +135,13 @@ def create_worker_response(
     
     # 1. Main Response (Raw Content for Context)
     # Using generic response format from settings
-    response_content = settings.RESPONSE_FORMAT.format(role=role, content=content_json)
+    worker_capability = _normalize_worker_capability(capability or role)
+    message_name = emitter_name or role
+
+    response_content = settings.RESPONSE_FORMAT.format(role=worker_capability, content=content_json)
     main_message = AIMessage(
         content=response_content, 
-        name=role
+        name=message_name
     )
 
     # 2. Worker Result UI Message
@@ -114,11 +151,11 @@ def create_worker_response(
         content=result_summary if result_summary else f"{role.capitalize()} finished.",
         additional_kwargs={
             "ui_type": "worker_result", 
-            "role": role, 
+            "capability": worker_capability,
             "status": status_label,
             "result_summary": result_summary
         }, 
-        name=f"{role}_ui"
+        name=f"{message_name}_ui"
     )
 
     # 3. Artifact UI Message
@@ -143,18 +180,22 @@ def create_worker_response(
     artifact_message = AIMessage(
         content=artifact_title,
         additional_kwargs=artifact_kwargs,
-        name=f"{role}_artifact"
+        name=f"{message_name}_artifact"
     )
 
     # Update State: Artifacts
     # Note: State updates in Command are merged.
     updated_artifacts = _update_artifact(state, artifact_id, content_json)
     
+    update_payload: dict[str, Any] = {
+        "messages": [main_message, result_message, artifact_message],
+        "artifacts": updated_artifacts,
+        "plan": state["plan"],
+    }
+    if isinstance(extra_update, dict):
+        update_payload.update(extra_update)
+
     return Command(
-        update={
-            "messages": [main_message, result_message, artifact_message],
-            "artifacts": updated_artifacts,
-            "plan": state["plan"]
-        },
+        update=update_payload,
         goto=goto,
     )
