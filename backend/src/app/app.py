@@ -1438,7 +1438,21 @@ async def get_thread_snapshot(thread_id: str, request: Request):
 
         graph = _manager.get_graph()
         config = _build_graph_config(thread_id, uid)
-        state = await graph.aget_state(config)
+        try:
+            state = await graph.aget_state(config)
+        except Exception as e:
+            # Handle incompatible checkpoints (e.g., after graph structure changes)
+            if "Subgraph" in str(e) and "not found" in str(e):
+                logger.warning(f"Checkpoint mismatch for thread {thread_id}: {e}. Returning empty state.")
+                return {
+                    "thread_id": thread_id,
+                    "messages": [],
+                    "plan": [],
+                    "artifacts": {},
+                    "ui_events": [],
+                    "error": "Checkpoint incompatibility detected. Please start a new thread."
+                }
+            raise e
 
         if not state.values:
             return {

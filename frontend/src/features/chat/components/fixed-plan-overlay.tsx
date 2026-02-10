@@ -50,19 +50,17 @@ export function FixedPlanOverlay({
             <Card className="overflow-hidden border-none shadow-2xl rounded-2xl bg-white dark:bg-slate-900 transition-all duration-300 ease-in-out">
                 <Collapsible open={isExpanded} onOpenChange={setIsExpanded} className="flex flex-col-reverse">
                     {/* Collapsed/Header View (Bottom position) */}
-                    <div className="flex items-center justify-between py-3 px-4 gap-4 bg-white dark:bg-slate-900">
+                    <div className="flex items-center justify-between py-0 px-4 gap-4 bg-white dark:bg-slate-900">
                         {/* Status Icon Area */}
                         <div className="flex items-center gap-3 flex-1 min-w-0">
                             {/* Unified Header Text */}
-                            <div className="flex flex-col">
-                                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                            <div className="flex flex-col -space-y-1">
+                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">
                                     Task Progress
                                 </span>
-                                <div className="flex items-center gap-2">
-                                    <span className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
-                                        {activeStep.title || "Task"}
-                                    </span>
-                                </div>
+                                <span className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
+                                    {activeStep.title || "Task"}
+                                </span>
                             </div>
                         </div>
 

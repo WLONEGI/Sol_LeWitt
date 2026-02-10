@@ -33,11 +33,11 @@ echo "Connection: $CONNECTION_NAME"
 echo "[1/2] Stopping existing processes..."
 
 # Kill Cloud SQL Proxy
-pkill -f "cloud-sql-proxy" && echo "  - Stopped cloud-sql-proxy"
+pkill -9 -f "cloud-sql-proxy" && echo "  - Stopped cloud-sql-proxy"
 
 # Kill Backend (uv/uvicorn)
-pkill -f "uvicorn.*app:app" && echo "  - Stopped backend (uvicorn)"
-pkill -f "uv run uvicorn" && echo "  - Stopped backend (uv wrapper)"
+pkill -9 -f "uvicorn.*app:app" && echo "  - Stopped backend (uvicorn)"
+pkill -9 -f "uv run uvicorn" && echo "  - Stopped backend (uv wrapper)"
 
 # Kill Frontend (port 3000)
 lsof -ti:3000 | xargs kill -9 2>/dev/null && echo "  - Stopped frontend on port 3000"
@@ -46,9 +46,10 @@ lsof -ti:8000 | xargs kill -9 2>/dev/null && echo "  - Stopped process on port 8
 
 # Clean up log files
 mkdir -p "$LOG_DIR"
-rm -f "$LOG_DIR/backend.log" "$LOG_DIR/proxy.log" "$LOG_DIR/frontend.log" "$LOG_DIR/frontend_event.log"
-touch "$LOG_DIR/backend.log" "$LOG_DIR/proxy.log" "$LOG_DIR/frontend.log" "$LOG_DIR/frontend_event.log"
-echo "  - Cleaned up and recreated log files (logs/backend.log, logs/proxy.log, logs/frontend.log, logs/frontend_event.log)"
+for log in "$LOG_DIR/backend.log" "$LOG_DIR/proxy.log" "$LOG_DIR/frontend.log" "$LOG_DIR/frontend_event.log"; do
+    : > "$log"
+done
+echo "  - Cleaned up and truncated log files (logs/backend.log, logs/proxy.log, logs/frontend.log, logs/frontend_event.log)"
 
 sleep 2
 
@@ -58,6 +59,7 @@ echo "[2/2] Starting services in background..."
 # Start Cloud SQL Proxy
 cd "$BACKEND_DIR"
 if [ -f "./cloud-sql-proxy" ]; then
+    # Use -force to ensure it starts even if lock files exist
     nohup ./cloud-sql-proxy "$CONNECTION_NAME" --debug-logs > "$LOG_DIR/proxy.log" 2>&1 &
     echo "  - Cloud SQL Proxy started (PID: $!). Logs: logs/proxy.log"
 else
@@ -66,7 +68,8 @@ fi
 
 # Start Backend
 if [ -d ".venv" ]; then
-    # Start uvicorn via uv in background
+    # Start uvicorn via uv in background with PYTHONUNBUFFERED=1
+    export PYTHONUNBUFFERED=1
     nohup uv run uvicorn src.app.app:app --reload --port 8000 --log-level debug > "$LOG_DIR/backend.log" 2>&1 &
     echo "  - Backend started (PID: $!). Logs: logs/backend.log"
 else
