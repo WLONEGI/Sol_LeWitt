@@ -54,9 +54,9 @@ export function FixedPlanOverlay({
                         {/* Status Icon Area */}
                         <div className="flex items-center gap-3 flex-1 min-w-0">
                             {/* Unified Header Text */}
-                            <div className="flex flex-col -space-y-1">
-                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">
-                                    Task Progress
+                            <div className="flex items-center gap-2">
+                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tight shrink-0">
+                                    Progress:
                                 </span>
                                 <span className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
                                     {activeStep.title || "Task"}
@@ -85,7 +85,6 @@ export function FixedPlanOverlay({
                             </CollapsibleTrigger>
                         </div>
                     </div>
-
 
                     {/* Expanded Content (Top position) */}
                     <CollapsibleContent>
