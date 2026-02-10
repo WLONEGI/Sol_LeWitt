@@ -43,7 +43,7 @@ export function ChatInput({
     isProcessing = false,
     allowSendWhileLoading = false,
     className,
-    placeholder = "Send message to Spell",
+    placeholder = "Send message to Sol LeWitt",
     value,
     onChange,
     onFilesSelect,

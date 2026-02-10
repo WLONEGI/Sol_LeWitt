@@ -425,11 +425,14 @@ async def process_single_slide(
                 # Reference Anchor (Visual Consistency)
                 if prev.get("generated_image_url"):
                     reference_url = prev["generated_image_url"]
-                    logger.info(f"Downloading reference anchor from {reference_url}...")
-                    try:
-                        reference_image_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
-                    except Exception as e:
-                        logger.warning(f"Failed to download previous reference image: {e}")
+                    if reference_url.startswith("gs://"):
+                        logger.info(f"Using GCS URI directly as reference anchor: {reference_url}")
+                    else:
+                        logger.info(f"Downloading reference anchor from {reference_url}...")
+                        try:
+                            reference_image_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
+                        except Exception as e:
+                            logger.warning(f"Failed to download previous reference image: {e}")
                 
                 break
         
@@ -445,7 +448,7 @@ async def process_single_slide(
             generate_image,
             final_prompt,
             seed=seed,
-            reference_image=reference_image_bytes,
+            reference_image=reference_url if reference_url and reference_url.startswith("gs://") else reference_image_bytes,
             thought_signature=previous_thought_signature_token,
             aspect_ratio=aspect_ratio
         )
@@ -844,7 +847,8 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                 reference_bytes = character_sheet_template_bytes
             elif plan_slide and plan_slide.reference_policy == "explicit" and plan_slide.reference_url:
                 reference_url = plan_slide.reference_url
-                reference_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
+                if not reference_url.startswith("gs://"):
+                    reference_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
             elif plan_slide and plan_slide.reference_policy == "previous":
                 if last_generated_image_bytes:
                     reference_bytes = last_generated_image_bytes
@@ -854,7 +858,8 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                     for prev in previous_generations:
                         if prev.get("slide_number") == slide_number and prev.get("generated_image_url"):
                             reference_url = prev["generated_image_url"]
-                            reference_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
+                            if not reference_url.startswith("gs://"):
+                                reference_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
                             break
 
             # Generate image

@@ -1,11 +1,11 @@
-# Spell Backend
+# Sol LeWitt Backend
 
 ![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)
 ![Framework](https://img.shields.io/badge/FastAPI-0.109%2B-009688)
 ![Orchestration](https://img.shields.io/badge/LangGraph-0.0.10%2B-orange)
 ![Code Style](https://img.shields.io/badge/code%20style-black-000000.svg)
 
-**Spell** は **AI Slide with Nano Banana** プロジェクトのためのインテリジェントなバックエンドエンジンです。**LangGraph** を活用してマルチエージェントワークフローをオーケストレーションし、ユーザーのプロンプトに基づいてリサーチ、構成作成、スライドデザイン、レンダリング（PPTX生成）を自律的に実行します。
+**Sol LeWitt** は **AI Slide with Nano Banana** プロジェクトのためのインテリジェントなバックエンドエンジンです。**LangGraph** を活用してマルチエージェントワークフローをオーケストレーションし、ユーザーのプロンプトに基づいてリサーチ、構成作成、スライドデザイン、レンダリング（PPTX生成）を自律的に実行します。
 
 ## 主な機能 (Key Features)
 

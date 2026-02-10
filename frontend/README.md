@@ -1,11 +1,11 @@
-# Spell Frontend (Next.js)
+# Sol LeWitt Frontend (Next.js)
 
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue)
 ![Next.js](https://img.shields.io/badge/Next.js-15%2B-black)
 ![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4.0%2B-38B2AC)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-**Spell Frontend** は、**AI Slide with Nano Banana** プロジェクトのためのリアクティブなWebインターフェースです。**Next.js (App Router)** と **Vercel AI SDK** を採用し、ユーザーが直感的にAIエージェントと対話し、生成されたスライドや成果物をリアルタイムでプレビューできる環境を提供します。
+**Sol LeWitt Frontend** は、**AI Slide with Nano Banana** プロジェクトのためのリアクティブなWebインターフェースです。**Next.js (App Router)** と **Vercel AI SDK** を採用し、ユーザーが直感的にAIエージェントと対話し、生成されたスライドや成果物をリアルタイムでプレビューできる環境を提供します。
 
 ## 主な機能 (Key Features)
 

@@ -21,7 +21,7 @@ export function MainHeader({ className }: { className?: string }) {
         >
             <div className="mx-auto flex w-full max-w-5xl items-center justify-between px-6">
                 <div className="flex items-center gap-2 text-sm font-semibold tracking-[0.2em] text-foreground">
-                    SPELL
+                    Sol LeWitt
                 </div>
                 <div className="flex items-center justify-end gap-2">
                     {!loading && !user ? (

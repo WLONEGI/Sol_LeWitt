@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "spell"
+name = "sol-lewitt"
 version = "0.1.0"
-description = "Spell project"
+description = "Sol LeWitt project"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -22,6 +22,7 @@ dependencies = [
     "sse-starlette>=1.6.5,<2.0.0",
     "langchain-google-vertexai>=3.2.2",
     "langchain-google-genai>=4.2.0",
+    "google-genai>=1.62.0",
     "langgraph-checkpoint-postgres>=3.0.4",
     "psycopg[binary,pool]>=3.3.2",
     "google-cloud-storage>=3.8.0",

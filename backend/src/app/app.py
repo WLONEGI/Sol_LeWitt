@@ -1,5 +1,5 @@
 """
-FastAPI application for Spell - LangServe Edition.
+FastAPI application for Sol LeWitt - LangServe Edition.
 Uses langserve add_routes for standard LangGraph API exposure.
 """
 
@@ -317,7 +317,7 @@ async def lifespan(app: FastAPI):
     Lifespan context manager for the FastAPI app.
     Handles startup and shutdown events.
     """
-    logger.info("🚀 Starting Spell API (LangServe Edition)...")
+    logger.info("🚀 Starting Sol LeWitt API (LangServe Edition)...")
     logger.info("Initializing application resources...")
     try:
         await initialize_graph()
@@ -362,8 +362,8 @@ async def lifespan(app: FastAPI):
 # === Create FastAPI App ===
 
 app = FastAPI(
-    title="Spell API",
-    description="API for Spell LangGraph-based agent workflow (LangServe Edition)",
+    title="Sol LeWitt API",
+    description="API for Sol LeWitt LangGraph-based agent workflow (LangServe Edition)",
     version="0.2.0",
     lifespan=lifespan,
 )
@@ -1472,15 +1472,18 @@ async def _run_inpaint(
     if not image_url:
         raise ValueError("image_url is required")
 
-    reference_bytes = await asyncio.to_thread(download_blob_as_bytes, image_url)
-    if not reference_bytes:
-        raise ValueError("Failed to download source image")
+    reference_input = image_url
+    if not image_url.startswith("gs://"):
+        reference_bytes = await asyncio.to_thread(download_blob_as_bytes, image_url)
+        if not reference_bytes:
+            raise ValueError("Failed to download source image")
+        reference_input = reference_bytes
 
     image_bytes, _ = await asyncio.to_thread(
         generate_image,
         prompt,
         seed=None,
-        reference_image=reference_bytes,
+        reference_image=reference_input,
         thought_signature=None,
     )
 

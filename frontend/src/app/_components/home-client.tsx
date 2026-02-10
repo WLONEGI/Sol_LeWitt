@@ -127,7 +127,7 @@ export function HomeClient() {
               <div className="flex w-full flex-col items-center gap-12">
                 <div className="text-center w-full animate-in fade-in duration-1000 slide-in-from-bottom-5">
                   <h1 className="text-4xl md:text-6xl font-semibold text-foreground tracking-tight">
-                    Co-create SPELL with evolving AI
+                    Co-create Sol LeWitt with evolving AI
                   </h1>
                   <p className="mt-4 text-muted-foreground text-base md:text-lg">
                     Built for the Agentic AI Hackathon with Google Cloud.
@@ -140,7 +140,7 @@ export function HomeClient() {
                     onChange={handleInputChange}
                     onSend={handleSend}
                     isLoading={isSubmitting}
-                    placeholder="Send message to Spell"
+                    placeholder="Send message to Sol LeWitt"
                     actionPill={
                       selectedAction
                         ? {

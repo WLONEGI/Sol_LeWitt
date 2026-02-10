@@ -107,7 +107,7 @@ export function ChatSidebar() {
                     <div className={cn("flex items-center h-10 w-full", isCollapsed ? "justify-center" : "justify-between pl-3 pr-2")}>
                         {!isCollapsed ? (
                             <Link href="/" className="text-base font-semibold tracking-[0.2em] text-foreground hover:opacity-80 transition-opacity">
-                                SPELL
+                                Sol LeWitt
                             </Link>
                         ) : null}
                         <SidebarTrigger className={cn("h-10 w-10 text-muted-foreground hover:text-foreground hover:bg-black/5 rounded-lg transition-colors flex items-center justify-center", isCollapsed && "mx-auto")}>

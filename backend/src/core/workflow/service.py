@@ -86,7 +86,8 @@ class WorkflowManager:
                 min_size=1, 
                 max_size=10, 
                 open=False,
-                timeout=30.0
+                timeout=30.0,
+                kwargs={"autocommit": True}
             )
             await self.pool.open()
             

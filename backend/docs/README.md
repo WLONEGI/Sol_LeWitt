@@ -1,6 +1,6 @@
-# Spell Backend Documentation
+# Sol LeWitt Backend Documentation
 
-Spell バックエンドの技術ドキュメントへようこそ。本システムは、LangGraph を用いた高度なエージェント・ワークフロー・エンジンです。
+Sol LeWitt バックエンドの技術ドキュメントへようこそ。本システムは、LangGraph を用いた高度なエージェント・ワークフロー・エンジンです。
 
 ## 📚 ドキュメント構成
 
