@@ -1,0 +1,27 @@
+kind: "AppHostingConfig"
+schemaVersion: "v1"
+
+# Environment variables for the application
+environmentVariables:
+  - variable: "NEXT_PUBLIC_FIREBASE_API_KEY"
+    value: "AIzaSyCCH9jNA8odZp-2MrgoI5hbj4eNJqNFxKI"
+    availability: ["BUILD", "RUNTIME"]
+  - variable: "NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN"
+    value: "aerobic-stream-483505-a0.firebaseapp.com"
+    availability: ["BUILD", "RUNTIME"]
+  - variable: "NEXT_PUBLIC_FIREBASE_PROJECT_ID"
+    value: "aerobic-stream-483505-a0"
+    availability: ["BUILD", "RUNTIME"]
+  - variable: "NEXT_PUBLIC_FIREBASE_APP_ID"
+    value: "1:1021289594562:web:c3b69d6536dc1604d7455b"
+    availability: ["BUILD", "RUNTIME"]
+  - variable: "BACKEND_URL"
+    value: "https://ai-slide-backend-1021289594562.asia-northeast1.run.app"
+    availability: ["RUNTIME"]
+
+# Runtime configuration (Cloud Run settings)
+runConfig:
+  minInstances: 0
+  maxInstances: 10
+  memory: "1Gi"
+  cpu: 1
