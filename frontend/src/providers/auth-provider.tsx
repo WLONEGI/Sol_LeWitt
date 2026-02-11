@@ -69,6 +69,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             return
         }
 
+        // Build-time or missing config guard
+        if (typeof window === "undefined" || !auth) {
+            setLoading(false)
+            return
+        }
+
         const unsubscribe = onIdTokenChanged(auth, async (nextUser) => {
             const nextUid = nextUser?.uid ?? null
             if (previousUidRef.current !== nextUid) {

@@ -10,10 +10,18 @@ const firebaseConfig = {
     appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 }
 
-const app = getApps().length ? getApp() : initializeApp(firebaseConfig)
-const auth = getAuth(app)
+// Build-time safety: initialize only when API key is present
+const isConfigValid = !!firebaseConfig.apiKey;
 
-const googleProvider = new GoogleAuthProvider()
-googleProvider.setCustomParameters({ prompt: "select_account" })
+let app: any;
+let auth: any;
+let googleProvider: any;
+
+if (typeof window !== "undefined" && isConfigValid) {
+    app = getApps().length ? getApp() : initializeApp(firebaseConfig)
+    auth = getAuth(app)
+    googleProvider = new GoogleAuthProvider()
+    googleProvider.setCustomParameters({ prompt: "select_account" })
+}
 
 export { auth, googleProvider }
