@@ -1260,6 +1260,20 @@ def _build_research_artifact(artifact_id: str, value: Any) -> tuple[dict[str, An
     }
 
     events: list[dict[str, Any]] = []
+    events.append(
+        {
+            "type": "data-research-report",
+            "data": {
+                "artifact_id": artifact_id,
+                "task_id": data.get("task_id"),
+                "perspective": perspective,
+                "search_mode": data.get("search_mode"),
+                "status": "completed",
+                "report": report,
+                "sources": jsonable_encoder(data.get("sources") if isinstance(data.get("sources"), list) else []),
+            },
+        }
+    )
     if candidates:
         events.append(
             {
@@ -1269,7 +1283,7 @@ def _build_research_artifact(artifact_id: str, value: Any) -> tuple[dict[str, An
                     "task_id": data.get("task_id"),
                     "query": perspective,
                     "perspective": perspective,
-                    "candidates": jsonable_encoder(candidates[:8]),
+                    "candidates": jsonable_encoder(candidates[:10]),
                 },
             }
         )

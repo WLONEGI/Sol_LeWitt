@@ -1,6 +1,10 @@
-import logging
+import asyncio
+import hashlib
 import json
+import logging
+import mimetypes
 import re
+import uuid
 from typing import Literal, Any
 from urllib.parse import urlparse, urlunparse
 
@@ -10,7 +14,7 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.runnables import RunnableConfig
 
 from src.infrastructure.llm.llm import get_llm_by_type
-from src.shared.config.settings import settings
+from src.infrastructure.storage.gcs import download_blob_as_bytes, upload_to_gcs
 from src.resources.prompts.template import load_prompt_markdown
 from src.shared.schemas import (
     ResearchTask,
@@ -21,6 +25,21 @@ from src.core.workflow.state import ResearchSubgraphState
 from .common import _update_artifact, run_structured_output
 
 logger = logging.getLogger(__name__)
+VALID_SEARCH_MODES = {"text_search", "image_search", "hybrid_search"}
+MAX_IMAGE_CANDIDATES = 10
+IMAGE_EXT_TO_MIME: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+MIME_TO_IMAGE_EXT: dict[str, str] = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
 
 IMAGE_REQUEST_KEYWORDS = (
     "画像",
@@ -39,28 +58,48 @@ def _contains_explicit_image_request(text: str) -> bool:
     return any(keyword in text or keyword in lowered for keyword in IMAGE_REQUEST_KEYWORDS)
 
 
+def _normalize_search_mode(value: Any, default: str | None = "text_search") -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in VALID_SEARCH_MODES:
+            return normalized
+    return default if default in VALID_SEARCH_MODES else None
+
+
 def _normalize_task_modes_by_instruction(
     tasks: list[ResearchTask],
     instruction_text: str,
+    preferred_mode: str | None = None,
 ) -> list[ResearchTask]:
     explicit_image = _contains_explicit_image_request(instruction_text)
+    preferred = _normalize_search_mode(preferred_mode, default=None)
     normalized: list[ResearchTask] = []
     has_image_mode = False
 
     for task in tasks:
-        mode = str(getattr(task, "search_mode", "text_search") or "text_search")
-        if mode not in {"text_search", "image_search", "hybrid_search"}:
+        mode = _normalize_search_mode(getattr(task, "search_mode", "text_search"), default="text_search") or "text_search"
+
+        if preferred == "text_search":
+            mode = "text_search"
+        elif preferred == "image_search":
+            if mode == "text_search":
+                mode = "image_search"
+        elif preferred == "hybrid_search":
+            if mode == "text_search" and explicit_image:
+                mode = "hybrid_search"
+        elif not explicit_image and mode in {"image_search", "hybrid_search"}:
             mode = "text_search"
 
-        if not explicit_image and mode in {"image_search", "hybrid_search"}:
-            mode = "text_search"
-        if explicit_image and mode in {"image_search", "hybrid_search"}:
+        if mode in {"image_search", "hybrid_search"}:
             has_image_mode = True
 
         normalized.append(task.model_copy(update={"search_mode": mode}))
 
-    if explicit_image and normalized and not has_image_mode:
-        normalized[0] = normalized[0].model_copy(update={"search_mode": "image_search"})
+    if normalized and not has_image_mode:
+        if preferred in {"image_search", "hybrid_search"}:
+            normalized[0] = normalized[0].model_copy(update={"search_mode": preferred})
+        elif explicit_image:
+            normalized[0] = normalized[0].model_copy(update={"search_mode": "image_search"})
 
     return normalized
 
@@ -164,6 +203,87 @@ def _build_image_candidates(urls: list[str], search_mode: str) -> list[dict]:
         )
     return candidates
 
+
+def _sanitize_filename(text: str) -> str:
+    value = re.sub(r"[^\w\s.-]", "", text).strip()
+    value = value.replace(" ", "_")
+    return value[:80] or "research"
+
+
+def _infer_image_extension(url: str) -> tuple[str, str]:
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    ext = ""
+    for candidate_ext in IMAGE_EXT_TO_MIME.keys():
+        if path.endswith(candidate_ext):
+            ext = candidate_ext
+            break
+    if not ext:
+        guessed_mime, _ = mimetypes.guess_type(path)
+        if isinstance(guessed_mime, str) and guessed_mime in MIME_TO_IMAGE_EXT:
+            ext = MIME_TO_IMAGE_EXT[guessed_mime]
+    if not ext:
+        ext = ".png"
+    return ext, IMAGE_EXT_TO_MIME.get(ext, "image/png")
+
+
+async def _store_image_candidates_to_gcs(
+    *,
+    candidates: list[dict],
+    session_id: str,
+    safe_step_title: str,
+    step_id: str | int,
+    task_id: str | int,
+) -> list[dict]:
+    stored: list[dict] = []
+    seen_hashes: set[str] = set()
+
+    for index, candidate in enumerate(candidates[:MAX_IMAGE_CANDIDATES], start=1):
+        image_url = str(candidate.get("image_url") or "").strip()
+        if not image_url:
+            continue
+
+        try:
+            payload = await asyncio.to_thread(download_blob_as_bytes, image_url)
+            if not payload:
+                continue
+
+            digest = hashlib.sha256(payload).hexdigest()
+            if digest in seen_hashes:
+                continue
+            seen_hashes.add(digest)
+
+            ext, content_type = _infer_image_extension(image_url)
+            object_name = (
+                f"generated_assets/{session_id}/{safe_step_title}/research/"
+                f"step_{step_id}/task_{task_id}/{index:02d}_{digest[:12]}{ext}"
+            )
+            uploaded_url = await asyncio.to_thread(
+                upload_to_gcs,
+                payload,
+                content_type,
+                None,
+                None,
+                object_name,
+            )
+            stored.append(
+                {
+                    "task_id": task_id,
+                    "source_url": candidate.get("source_url"),
+                    "image_url": image_url,
+                    "gcs_url": uploaded_url,
+                    "sha256": digest,
+                    "content_type": content_type,
+                    "license_note": candidate.get("license_note"),
+                    "caption": candidate.get("caption"),
+                }
+            )
+        except Exception as image_err:
+            logger.warning("Failed to store image candidate %s: %s", image_url, image_err)
+            continue
+
+    return stored
+
 async def research_worker_node(state: ResearchSubgraphState, config: RunnableConfig) -> dict:
     """
     Worker node for executing a single research task.
@@ -200,17 +320,27 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
         except (StopIteration, KeyError, TypeError):
             step_id = "unknown"
     
+    step_title = str(state.get("step_title") or "research")
+    step_mode = _normalize_search_mode(state.get("step_mode"), default=None)
+    session_id = str(config.get("configurable", {}).get("thread_id") or uuid.uuid4())
+    safe_step_title = _sanitize_filename(step_title)
+
     try:
         # 1. Dispatch Start Event
         await adispatch_custom_event(
             "research_worker_start",
-            {"task_id": task.id, "perspective": task.perspective},
+            {
+                "task_id": task.id,
+                "perspective": task.perspective,
+                "search_mode": _normalize_search_mode(getattr(task, "search_mode", "text_search"), default="text_search"),
+            },
             config=config
         )
 
         system_prompt = load_prompt_markdown("researcher")
         
-        search_mode = str(getattr(task, "search_mode", "text_search") or "text_search")
+        task_search_mode = _normalize_search_mode(getattr(task, "search_mode", "text_search"), default="text_search")
+        search_mode = step_mode or task_search_mode or "text_search"
         instruction = (
             f"You are investigating: '{task.perspective}'.\n"
             f"Search Mode: {search_mode}\n"
@@ -249,7 +379,19 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
 
         sources = _extract_urls(full_content)
         image_candidates = _build_image_candidates(sources, search_mode)
-        top_image_candidates = image_candidates[:8]
+        top_image_candidates = image_candidates[:MAX_IMAGE_CANDIDATES]
+        stored_images: list[dict] = []
+        if search_mode in {"image_search", "hybrid_search"} and top_image_candidates:
+            try:
+                stored_images = await _store_image_candidates_to_gcs(
+                    candidates=top_image_candidates,
+                    session_id=session_id,
+                    safe_step_title=safe_step_title,
+                    step_id=step_id,
+                    task_id=task.id,
+                )
+            except Exception as image_store_err:
+                logger.warning("Failed to persist image candidates for task %s: %s", task.id, image_store_err)
 
         result = ResearchResult(
             task_id=task.id,
@@ -262,9 +404,26 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
         
         # [Decentralized Reporting] Emit individual results immediately
         summary_text = f"【{task.perspective}】の調査が完了しました。"
-        if image_candidates:
-            summary_text += f" 画像候補 {len(image_candidates)} 件を抽出しました。"
+        if search_mode in {"image_search", "hybrid_search"}:
+            summary_text += (
+                f" 画像候補 {len(top_image_candidates)} 件を抽出し、"
+                f"{len(stored_images)} 件を保存しました。"
+            )
         artifact_id = f"step_{step_id}_research_{task.id}"
+
+        await adispatch_custom_event(
+            "data-research-report",
+            {
+                "artifact_id": artifact_id,
+                "task_id": task.id,
+                "perspective": task.perspective,
+                "search_mode": search_mode,
+                "status": "completed",
+                "report": full_content,
+                "sources": sources,
+            },
+            config=config,
+        )
 
         if search_mode in {"image_search", "hybrid_search"}:
             await adispatch_custom_event(
@@ -288,7 +447,18 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
         
         return {
             "internal_research_results": [result],
-            "artifacts": _update_artifact(state, artifact_id, result.model_dump_json(exclude_none=True)),
+            "artifacts": _update_artifact(
+                state,
+                artifact_id,
+                json.dumps(
+                    {
+                        **result.model_dump(exclude_none=True),
+                        "search_mode": search_mode,
+                        "stored_images": stored_images,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
             "messages": [
                 AIMessage(
                     content=summary_text,
@@ -319,6 +489,19 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
         logger.error(f"Research worker {task_id} failed: {e}")
         error_message = f"Research worker failed: {e}"
         try:
+            await adispatch_custom_event(
+                "data-research-report",
+                {
+                    "artifact_id": f"step_{step_id}_research_{task.id}",
+                    "task_id": task.id,
+                    "perspective": task.perspective,
+                    "search_mode": _normalize_search_mode(getattr(task, "search_mode", "text_search"), default="text_search"),
+                    "status": "failed",
+                    "report": error_message,
+                    "sources": [],
+                },
+                config=config,
+            )
             await adispatch_custom_event(
                 "research_worker_complete",
                 {"task_id": task.id, "status": "failed", "error": error_message},
@@ -372,6 +555,7 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
         
         base_prompt = load_prompt_markdown("research_topic_analyzer")
         step_instruction = str(current_step.get("instruction") or "")
+        step_mode = _normalize_search_mode(current_step.get("mode"), default=None)
         instruction_content = f"User Instruction: {step_instruction}"
         
         llm = get_llm_by_type("reasoning")
@@ -394,16 +578,21 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
                 config=stream_config,
                 repair_hint="Schema: ResearchTaskList. No extra text."
             )
-            tasks = _normalize_task_modes_by_instruction(qa_result.tasks, step_instruction)
+            tasks = _normalize_task_modes_by_instruction(
+                qa_result.tasks,
+                step_instruction,
+                preferred_mode=step_mode,
+            )
             if not tasks:
                  raise ValueError("No tasks generated")
         except Exception as e:
             logger.warning(f"Decomposition failed: {e}. Fallback to single task.")
+            fallback_mode = step_mode or ("image_search" if _contains_explicit_image_request(step_instruction) else "text_search")
             tasks = [
                 ResearchTask(
                    id=1, 
                    perspective="General Investigation", 
-                   search_mode="text_search",
+                   search_mode=fallback_mode,
                    query_hints=[], 
                    priority="high", 
                    expected_output="Detailed report."
@@ -414,7 +603,15 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
         # [Serialization] Start sequential execution from the first task
         first_task = tasks[0]
         return Command(
-            goto=Send("research_worker", {"task": first_task, "step_id": current_step["id"]}),
+            goto=Send(
+                "research_worker",
+                {
+                    "task": first_task,
+                    "step_id": current_step["id"],
+                    "step_title": current_step.get("title") or current_step.get("description") or "research",
+                    "step_mode": step_mode,
+                },
+            ),
             update={
                 "internal_research_tasks": tasks,
                 "is_decomposed": True,
@@ -438,7 +635,15 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
         logger.info(f"Manager: Dispatching next task ({current_idx + 1}/{len(internal_tasks)})")
         next_task = internal_tasks[current_idx]
         return Command(
-            goto=Send("research_worker", {"task": next_task, "step_id": current_step["id"]}),
+            goto=Send(
+                "research_worker",
+                {
+                    "task": next_task,
+                    "step_id": current_step["id"],
+                    "step_title": current_step.get("title") or current_step.get("description") or "research",
+                    "step_mode": _normalize_search_mode(current_step.get("mode"), default=None),
+                },
+            ),
             update={
                 "current_task_index": current_idx + 1
             }
@@ -447,8 +652,25 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
     # Check if all workers finished (safety check, though in sequential it should be true here)
     if len(results) >= len(internal_tasks) and len(internal_tasks) > 0:
         logger.info("Manager: All workers finished. Finalizing step.")
-        
-        summary_text = f"計 {len(results)} 件の個別調査が完了しました。"
+
+        failed_results = 0
+        completed_results = 0
+        for result in results:
+            confidence = getattr(result, "confidence", None)
+            if confidence is None and isinstance(result, dict):
+                confidence = result.get("confidence")
+            score = float(confidence) if isinstance(confidence, (int, float)) else 0.0
+            if score <= 0.0:
+                failed_results += 1
+            else:
+                completed_results += 1
+
+        if failed_results > 0 and completed_results > 0:
+            summary_text = f"計 {len(results)} 件中 {completed_results} 件成功、{failed_results} 件失敗で完了しました。"
+        elif failed_results > 0:
+            summary_text = f"計 {len(results)} 件の調査が失敗しました。"
+        else:
+            summary_text = f"計 {len(results)} 件の個別調査が完了しました。"
         current_step["result_summary"] = summary_text
 
         logger.info(f"Research Manager finished. Finalized {len(results)} individual results.")
@@ -456,7 +678,19 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
         return Command(
             goto=END,
             update={
-                "artifacts": _update_artifact(state, f"step_{current_step['id']}_research", summary_text),
+                "artifacts": _update_artifact(
+                    state,
+                    f"step_{current_step['id']}_research",
+                    json.dumps(
+                        {
+                            "summary": summary_text,
+                            "total_tasks": len(results),
+                            "completed_tasks": completed_results,
+                            "failed_tasks": failed_results,
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
                 "internal_research_tasks": [], 
                 "internal_research_results": [],
                 "is_decomposed": False,

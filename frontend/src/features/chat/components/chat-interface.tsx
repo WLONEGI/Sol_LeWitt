@@ -67,6 +67,9 @@ const DATA_EVENTS_TO_STORE = new Set([
     'data-analyst-output',
     'data-analyst-complete',
     'data-writer-output',
+    'data-research-start',
+    'data-research-complete',
+    'data-research-report',
     'data-image-search-results',
     'data-coordinator-followups',
 ])

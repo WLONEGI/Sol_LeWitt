@@ -29,7 +29,12 @@ from src.core.workflow.state import State
 from src.domain.designer.generator import generate_image, create_image_chat_session_async, send_message_for_image_async
 from src.infrastructure.storage.gcs import upload_to_gcs, download_blob_as_bytes
 
-from .common import build_worker_error_payload, create_worker_response, run_structured_output
+from .common import (
+    build_worker_error_payload,
+    create_worker_response,
+    resolve_step_dependency_context,
+    run_structured_output,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -577,6 +582,7 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         if isinstance(item, dict) and str(item.get("kind") or "").lower() != "pptx"
     ]
     design_dir = current_step.get("design_direction")
+    dependency_context = resolve_step_dependency_context(state, current_step)
 
     def _get_latest_artifact_by_suffix(suffix: str) -> dict | None:
         candidates: list[tuple[int, str]] = []
@@ -632,6 +638,10 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         "mode": mode,
         "aspect_ratio": aspect_ratio,
         "instruction": current_step.get("instruction"),
+        "planned_inputs": dependency_context["planned_inputs"],
+        "depends_on_step_ids": dependency_context["depends_on_step_ids"],
+        "resolved_dependency_artifacts": dependency_context["resolved_dependency_artifacts"],
+        "resolved_research_inputs": dependency_context["resolved_research_inputs"],
         "design_direction": design_dir,
         "selected_image_inputs": selected_image_inputs,
         "attachments": attachments,
@@ -733,6 +743,10 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
             prompt_context = {
                 "slide_number": slide_number,
                 "mode": mode,
+                "planned_inputs": dependency_context["planned_inputs"],
+                "depends_on_step_ids": dependency_context["depends_on_step_ids"],
+                "resolved_dependency_artifacts": dependency_context["resolved_dependency_artifacts"],
+                "resolved_research_inputs": dependency_context["resolved_research_inputs"],
                 "writer_slide": slide_content,
                 "character_profile": slide_content.get("character_profile") if isinstance(slide_content, dict) else None,
                 "design_direction": design_dir,

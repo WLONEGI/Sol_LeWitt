@@ -87,7 +87,10 @@ export interface ResearchReportTimelineItem extends TimelineItem {
     type: 'research_report';
     taskId: string;
     perspective: string;
-    status: 'running' | 'completed';
+    status: 'running' | 'completed' | 'failed';
+    searchMode?: string;
+    report?: string;
+    sources?: string[];
 }
 
 export interface ImageSearchCandidate {

@@ -24,6 +24,7 @@ from .common import (
     build_worker_error_payload,
     create_worker_response,
     extract_first_json,
+    resolve_step_dependency_context,
     run_structured_output,
     split_content_parts,
 )
@@ -56,13 +57,45 @@ WRITER_MODE_TO_ARTIFACT_TYPE = {
     "comic_script": "writer_comic_script",
 }
 
+WRITER_ALLOWED_MODES_BY_PRODUCT: dict[str, set[str]] = {
+    "slide": {"slide_outline", "infographic_spec"},
+    "design": {"document_blueprint"},
+    "comic": {"story_framework", "character_sheet", "comic_script"},
+}
+
+WRITER_DEFAULT_MODE_BY_PRODUCT: dict[str, str] = {
+    "slide": "slide_outline",
+    "design": "document_blueprint",
+    "comic": "story_framework",
+}
+
 
 def _default_writer_mode(product_type: str | None) -> str:
-    if product_type == "comic":
-        return "comic_script"
-    if product_type == "design":
-        return "document_blueprint"
-    return "slide_outline"
+    return WRITER_DEFAULT_MODE_BY_PRODUCT.get(str(product_type), "slide_outline")
+
+
+def _resolve_writer_mode(raw_mode: str | None, product_type: str | None) -> str:
+    normalized_mode = str(raw_mode or "").strip()
+    default_mode = _default_writer_mode(product_type)
+
+    if not normalized_mode:
+        return default_mode
+
+    if normalized_mode not in WRITER_MODE_TO_SCHEMA:
+        logger.warning("Writer received unknown mode '%s'. Falling back to %s.", normalized_mode, default_mode)
+        return default_mode
+
+    allowed_modes = WRITER_ALLOWED_MODES_BY_PRODUCT.get(str(product_type))
+    if allowed_modes and normalized_mode not in allowed_modes:
+        logger.warning(
+            "Writer mode '%s' is not allowed for product_type='%s'. Falling back to %s.",
+            normalized_mode,
+            product_type,
+            default_mode,
+        )
+        return default_mode
+
+    return normalized_mode
 
 
 async def writer_node(state: State, config: RunnableConfig) -> Command[Literal["supervisor"]]:
@@ -82,7 +115,7 @@ async def writer_node(state: State, config: RunnableConfig) -> Command[Literal["
         logger.error("Writer called but no in_progress step found.")
         return Command(goto="supervisor", update={})
 
-    mode = str(current_step.get("mode") or _default_writer_mode(state.get("product_type")))
+    mode = _resolve_writer_mode(current_step.get("mode"), state.get("product_type"))
     schema = WRITER_MODE_TO_SCHEMA.get(mode, WriterSlideOutlineOutput)
     artifact_title = WRITER_MODE_TO_TITLE.get(mode, "Writer Output")
 
@@ -91,12 +124,18 @@ async def writer_node(state: State, config: RunnableConfig) -> Command[Literal["
         for item in (state.get("attachments") or [])
         if isinstance(item, dict) and str(item.get("kind") or "").lower() != "pptx"
     ]
+    dependency_context = resolve_step_dependency_context(state, current_step)
 
     context_payload = {
+        "product_type": state.get("product_type"),
         "mode": mode,
         "instruction": current_step.get("instruction"),
         "success_criteria": current_step.get("success_criteria") or current_step.get("validation") or [],
         "target_scope": current_step.get("target_scope"),
+        "planned_inputs": dependency_context["planned_inputs"],
+        "depends_on_step_ids": dependency_context["depends_on_step_ids"],
+        "resolved_dependency_artifacts": dependency_context["resolved_dependency_artifacts"],
+        "resolved_research_inputs": dependency_context["resolved_research_inputs"],
         "selected_image_inputs": state.get("selected_image_inputs") or [],
         "attachments": non_pptx_attachments,
         "available_artifacts": state.get("artifacts", {}),

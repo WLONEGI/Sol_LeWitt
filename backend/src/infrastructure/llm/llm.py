@@ -85,6 +85,7 @@ def create_grounded_llm(
     project: str | None = None,
     location: str | None = None,
     temperature: float = 0.0,
+    streaming: bool = True,
 ) -> ChatGoogleGenerativeAI:
     """
     Google Search Grounding を有効化したLLMを作成する。
@@ -133,7 +134,8 @@ def create_grounded_llm(
         location=location,
         temperature=temperature,
         include_thoughts=include_thoughts,
-        thinking_level=thinking_level
+        thinking_level=thinking_level,
+        streaming=streaming,
     )
     
     # 3. ツールとしてバインド
@@ -164,6 +166,14 @@ def get_llm_by_type(llm_type: str, streaming: bool = True) -> ChatGoogleGenerati
     include_thoughts = False
     thinking_level = None
 
+    if llm_type == "grounded":
+        return create_grounded_llm(
+            model=settings.REASONING_MODEL,
+            project=settings.VERTEX_PROJECT_ID,
+            location=settings.VERTEX_LOCATION,
+            temperature=0.0,
+            streaming=streaming,
+        )
     if llm_type == "reasoning":
         model = settings.REASONING_MODEL
         include_thoughts = True
@@ -200,4 +210,3 @@ def get_llm_by_type(llm_type: str, streaming: bool = True) -> ChatGoogleGenerati
         thinking_level=thinking_level,
         streaming=streaming
     )
-

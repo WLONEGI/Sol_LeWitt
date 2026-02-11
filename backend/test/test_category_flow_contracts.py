@@ -149,7 +149,7 @@ def test_category_fixed_flow_snapshot_contracts(
     image_search_events = [event for event in ui_events if event["type"] == "data-image-search-results"]
     assert len(image_search_events) == 1
     candidates = image_search_events[0]["data"]["candidates"]
-    assert len(candidates) == 8
+    assert len(candidates) == 10
     assert all(isinstance(c.get("source_url"), str) and c["source_url"] for c in candidates)
     assert all(isinstance(c.get("license_note"), str) and c["license_note"] for c in candidates)
 

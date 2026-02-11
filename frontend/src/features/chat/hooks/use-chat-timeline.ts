@@ -126,6 +126,46 @@ export function useChatTimeline(
                     taskId,
                     perspective: typeof eventPayload.perspective === 'string' ? eventPayload.perspective : '',
                     status: 'running',
+                    searchMode: typeof eventPayload.search_mode === 'string' ? eventPayload.search_mode : undefined,
+                };
+                researchMap.set(taskId, nextItem);
+                items.push(nextItem);
+                return;
+            }
+
+            if (type === 'data-research-report') {
+                const taskId = String(eventPayload.task_id ?? idSeed);
+                const statusValue = typeof eventPayload.status === 'string' ? eventPayload.status : 'completed';
+                const normalizedStatus: 'running' | 'completed' | 'failed' =
+                    statusValue === 'failed' ? 'failed' : statusValue === 'running' ? 'running' : 'completed';
+                const reportText = typeof eventPayload.report === 'string' ? eventPayload.report : '';
+                const sources = Array.isArray(eventPayload.sources)
+                    ? eventPayload.sources.filter((source: any) => typeof source === 'string')
+                    : [];
+                const searchMode = typeof eventPayload.search_mode === 'string' ? eventPayload.search_mode : undefined;
+                const perspective = typeof eventPayload.perspective === 'string' ? eventPayload.perspective : '';
+
+                const existing = researchMap.get(taskId);
+                if (existing) {
+                    existing.timestamp = timestamp;
+                    if (perspective) existing.perspective = perspective;
+                    existing.status = normalizedStatus;
+                    if (searchMode) existing.searchMode = searchMode;
+                    if (reportText) existing.report = reportText;
+                    existing.sources = sources;
+                    return;
+                }
+
+                const nextItem: ResearchReportTimelineItem = {
+                    id: `${idSeed}-research-${taskId}`,
+                    type: 'research_report',
+                    timestamp,
+                    taskId,
+                    perspective,
+                    status: normalizedStatus,
+                    searchMode,
+                    report: reportText,
+                    sources,
                 };
                 researchMap.set(taskId, nextItem);
                 items.push(nextItem);
@@ -136,7 +176,9 @@ export function useChatTimeline(
                 const taskId = String(eventPayload.task_id ?? idSeed);
                 const startItem = researchMap.get(taskId);
                 if (startItem) {
-                    startItem.status = 'completed';
+                    if (startItem.status !== 'failed') {
+                        startItem.status = 'completed';
+                    }
                 }
                 return;
             }

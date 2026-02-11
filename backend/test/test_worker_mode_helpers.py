@@ -103,6 +103,44 @@ def test_research_mode_promotes_first_task_to_image_when_explicit_request_exists
     assert normalized[0].search_mode == "image_search"
 
 
+def test_research_mode_prefers_step_image_mode_without_explicit_keyword() -> None:
+    tasks = [
+        ResearchTask(
+            id=1,
+            perspective="ビジュアル参考探索",
+            search_mode="text_search",
+            query_hints=["wellness style board"],
+            priority="high",
+            expected_output="参照画像一覧",
+        )
+    ]
+    normalized = _normalize_task_modes_by_instruction(
+        tasks,
+        "ウェルネスデザインの方向性を調査",
+        preferred_mode="image_search",
+    )
+    assert normalized[0].search_mode == "image_search"
+
+
+def test_research_mode_prefers_step_text_mode_even_if_task_requests_image() -> None:
+    tasks = [
+        ResearchTask(
+            id=1,
+            perspective="市場調査",
+            search_mode="image_search",
+            query_hints=["fitness market size"],
+            priority="high",
+            expected_output="市場規模の根拠",
+        )
+    ]
+    normalized = _normalize_task_modes_by_instruction(
+        tasks,
+        "フィットネス市場のファクト調査",
+        preferred_mode="text_search",
+    )
+    assert normalized[0].search_mode == "text_search"
+
+
 def test_contains_explicit_image_request_detects_japanese_and_english() -> None:
     assert _contains_explicit_image_request("参照画像を探して") is True
     assert _contains_explicit_image_request("Collect reference images for style") is True

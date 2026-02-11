@@ -3,7 +3,7 @@ import { ChatItem } from "./chat-item";
 import { TaskAccordion } from "./task-accordion";
 import { ArtifactButton } from "./artifact-button";
 import { WorkerResult } from "./worker-result";
-import { ResearchStatusButton } from "./message/research-status-button";
+import { ResearchTaskCard } from "./message/research-task-card";
 import { ArtifactPreview } from "./artifact-preview";
 import { CodeExecutionBlock } from "./code-execution-block";
 import { SlideOutline } from "./slide-outline";
@@ -350,10 +350,13 @@ export function ChatList({
         if (item.type === "research_report") {
             return (
                 <div key={key} className="flex w-full justify-start">
-                    <ResearchStatusButton
+                    <ResearchTaskCard
                         taskId={item.taskId}
                         perspective={item.perspective}
                         status={item.status}
+                        searchMode={item.searchMode}
+                        report={item.report}
+                        sources={item.sources}
                     />
                 </div>
             );
