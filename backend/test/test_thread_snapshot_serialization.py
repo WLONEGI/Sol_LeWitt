@@ -103,20 +103,41 @@ def test_build_snapshot_payload_supports_writer_structured_artifacts() -> None:
             "step_10_story": json.dumps(
                 {
                     "execution_summary": "framework completed",
-                    "logline": "A young inventor rewrites a kingdom's fate.",
-                    "world_setting": "Clockwork medieval city",
-                    "background_context": "Era of guild conflicts",
-                    "tone_and_temperature": "Hopeful but tense",
-                    "narrative_arc": ["Setup", "Conflict", "Twist", "Resolution"],
-                    "key_beats": [
-                        {
-                            "beat_id": "setup",
-                            "summary": "Introduce hero",
-                            "purpose": "Establish stakes",
-                            "tone": "quiet",
-                        }
-                    ],
-                    "constraints": ["PG-12", "No modern tech"],
+                    "user_message": "Story framework ready.",
+                    "story_framework": {
+                        "concept": "A young inventor rewrites a kingdom's fate.",
+                        "theme": "Hope under pressure",
+                        "format_policy": {
+                            "series_type": "oneshot",
+                            "medium": "digital",
+                            "page_budget": {"min": 24, "max": 32},
+                            "reading_direction": "rtl",
+                        },
+                        "structure_type": "kishotenketsu",
+                        "arc_overview": [
+                            {"phase": "起", "purpose": "導入"},
+                            {"phase": "承", "purpose": "対立拡大"},
+                            {"phase": "転", "purpose": "反転"},
+                            {"phase": "結", "purpose": "決着"},
+                        ],
+                        "core_conflict": "Inventor vs ruling guild",
+                        "world_policy": {
+                            "era": "Clockwork medieval city",
+                            "primary_locations": ["Guild district"],
+                            "social_rules": ["No unauthorized machines"],
+                        },
+                        "direction_policy": {
+                            "paneling_policy": "5-6 panels baseline",
+                            "eye_guidance_policy": "Right to left flow",
+                            "page_turn_policy": "Use cliffhanger on page turns",
+                            "dialogue_policy": "One idea per bubble",
+                        },
+                        "art_style_policy": {
+                            "line_style": "G-pen main lines",
+                            "shading_style": "Screentone + solid black",
+                            "negative_constraints": ["photorealism", "3D render"],
+                        },
+                    },
                 },
                 ensure_ascii=False,
             )
@@ -127,7 +148,10 @@ def test_build_snapshot_payload_supports_writer_structured_artifacts() -> None:
 
     artifacts = snapshot["artifacts"]
     assert artifacts["step_10_story"]["type"] == "writer_story_framework"
-    assert artifacts["step_10_story"]["content"]["logline"] == "A young inventor rewrites a kingdom's fate."
+    assert (
+        artifacts["step_10_story"]["content"]["story_framework"]["concept"]
+        == "A young inventor rewrites a kingdom's fate."
+    )
 
     writer_events = [event for event in snapshot["ui_events"] if event["type"] == "data-writer-output"]
     assert len(writer_events) == 1

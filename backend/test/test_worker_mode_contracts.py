@@ -1,5 +1,11 @@
 from src.core.workflow.nodes.planner import _normalize_plan_steps
-from src.shared.schemas.outputs import ResearchImageCandidate, ResearchResult, ResearchTask, TaskStep
+from src.shared.schemas.outputs import (
+    ResearchImageCandidate,
+    ResearchResult,
+    ResearchTask,
+    TaskStep,
+    WriterStoryFrameworkOutput,
+)
 
 
 def test_task_step_accepts_capability_only() -> None:
@@ -125,3 +131,59 @@ def test_planner_normalize_comic_preserves_steps_without_auto_insertion() -> Non
         ("writer", "story_framework"),
         ("writer", "comic_script"),
     ]
+
+
+def test_writer_story_framework_output_accepts_new_shape() -> None:
+    data = {
+        "execution_summary": "ok",
+        "user_message": "done",
+        "story_framework": {
+            "concept": "新世界の再建",
+            "theme": "希望と連帯",
+            "format_policy": {
+                "series_type": "oneshot",
+                "medium": "digital",
+                "page_budget": {"min": 24, "max": 32},
+                "reading_direction": "rtl",
+            },
+            "structure_type": "kishotenketsu",
+            "arc_overview": [{"phase": "起", "purpose": "導入"}],
+            "core_conflict": "都市を支配する勢力との対立",
+            "world_policy": {
+                "era": "近未来",
+                "primary_locations": ["第7区"],
+                "social_rules": ["夜間外出制限"],
+            },
+            "direction_policy": {
+                "paneling_policy": "通常5コマ",
+                "eye_guidance_policy": "右上から左下",
+                "page_turn_policy": "章末で反転",
+                "dialogue_policy": "1フキダシ1情報",
+            },
+            "art_style_policy": {
+                "line_style": "Gペン主線",
+                "shading_style": "スクリーントーン中心",
+                "negative_constraints": ["フォトリアル禁止"],
+            },
+        },
+    }
+    parsed = WriterStoryFrameworkOutput.model_validate(data)
+    assert parsed.story_framework.concept == "新世界の再建"
+    assert parsed.story_framework.format_policy.page_budget.min == 24
+
+
+def test_writer_story_framework_output_upgrades_legacy_shape() -> None:
+    legacy = {
+        "execution_summary": "ok",
+        "user_message": "done",
+        "logline": "古い形式のログライン",
+        "world_setting": "蒸気都市",
+        "background_context": "旧体制との対立",
+        "tone_and_temperature": "重厚",
+        "narrative_arc": ["導入", "対立", "反転", "決着"],
+        "constraints": ["CGI禁止"],
+    }
+    parsed = WriterStoryFrameworkOutput.model_validate(legacy)
+    assert parsed.story_framework.concept == "古い形式のログライン"
+    assert parsed.story_framework.world_policy.era == "蒸気都市"
+    assert parsed.story_framework.art_style_policy.negative_constraints[0] == "CGI禁止"

@@ -1158,6 +1158,18 @@ def _build_story_artifact(artifact_id: str, value: Any) -> tuple[dict[str, Any] 
             data=data,
         )
 
+    story_framework_payload = data.get("story_framework")
+    if (
+        isinstance(story_framework_payload, dict)
+        and isinstance(story_framework_payload.get("concept"), str)
+        and isinstance(story_framework_payload.get("format_policy"), dict)
+    ):
+        return _build_writer_structured_artifact(
+            artifact_id=artifact_id,
+            artifact_type="writer_story_framework",
+            data=data,
+        )
+
     if isinstance(data.get("key_beats"), list) and isinstance(data.get("logline"), str):
         return _build_writer_structured_artifact(
             artifact_id=artifact_id,

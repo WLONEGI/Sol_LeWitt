@@ -11,8 +11,8 @@ When `mode=character_sheet_render`, enforce this exact design protocol:
 
 ## A. Source Priority (fixed)
 1) Style/Rendering source: `story_framework`
-- Prefer `tone_and_temperature`, `world_setting`, `constraints`.
-- Line art / screentone / shading policy must be inherited from `story_framework` first.
+- Prefer `story_framework.theme`, `story_framework.world_policy`, `story_framework.art_style_policy`.
+- Line art / screentone / shading policy must be inherited from `story_framework.art_style_policy` first.
 
 2) Identity source: `character_sheet`
 - Prefer `character_profile` then `writer_slide` data.

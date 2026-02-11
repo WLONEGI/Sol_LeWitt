@@ -200,25 +200,128 @@ class WriterSlideOutlineOutput(BaseModel):
     slides: List[SlideContent] = Field(description="スライドコンテンツのリスト")
 
 
-class StoryBeat(BaseModel):
-    """物語フレームワークのビート定義。"""
-    beat_id: str = Field(description="ビートID（例: setup, inciting_incident）")
-    summary: str = Field(description="ビートの要約")
-    purpose: str = Field(description="このビートの役割")
-    tone: Optional[str] = Field(default=None, description="感情トーン")
+class StoryFrameworkPageBudget(BaseModel):
+    """ページ数レンジ."""
+    min: int = Field(ge=1, description="最小ページ数")
+    max: int = Field(ge=1, description="最大ページ数")
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> "StoryFrameworkPageBudget":
+        if self.max < self.min:
+            self.max = self.min
+        return self
+
+
+class StoryFrameworkFormatPolicy(BaseModel):
+    """媒体・形式の方針."""
+    series_type: Literal["oneshot", "serialized"] = Field(description="読切または連載")
+    medium: Literal["print", "digital", "webtoon"] = Field(description="主媒体")
+    page_budget: StoryFrameworkPageBudget = Field(description="ページ数レンジ")
+    reading_direction: Literal["rtl", "ltr", "vertical_scroll"] = Field(description="読み方向")
+
+
+class StoryFrameworkArcPhase(BaseModel):
+    """物語フェーズ."""
+    phase: str = Field(description="フェーズ名")
+    purpose: str = Field(description="フェーズの目的")
+
+
+class StoryFrameworkWorldPolicy(BaseModel):
+    """世界観の方針."""
+    era: str = Field(description="時代設定")
+    primary_locations: List[str] = Field(default_factory=list, description="主舞台")
+    social_rules: List[str] = Field(default_factory=list, description="社会ルール")
+
+
+class StoryFrameworkDirectionPolicy(BaseModel):
+    """演出方針."""
+    paneling_policy: str = Field(description="コマ割り方針")
+    eye_guidance_policy: str = Field(description="視線誘導方針")
+    page_turn_policy: str = Field(description="ページめくり方針")
+    dialogue_policy: str = Field(description="セリフ運用方針")
+
+
+class StoryFrameworkArtStylePolicy(BaseModel):
+    """画風方針."""
+    line_style: str = Field(description="線画仕様")
+    shading_style: str = Field(description="陰影仕様")
+    negative_constraints: List[str] = Field(default_factory=list, description="禁止表現")
+
+
+class StoryFrameworkPayload(BaseModel):
+    """story_framework 本体."""
+    concept: str = Field(description="作品コンセプト")
+    theme: str = Field(description="テーマ")
+    format_policy: StoryFrameworkFormatPolicy = Field(description="形式方針")
+    structure_type: Literal["kishotenketsu", "three_act", "jo_ha_kyu", "other"] = Field(
+        description="物語構成の型"
+    )
+    arc_overview: List[StoryFrameworkArcPhase] = Field(default_factory=list, description="物語フェーズ概要")
+    core_conflict: str = Field(description="中核対立")
+    world_policy: StoryFrameworkWorldPolicy = Field(description="世界観方針")
+    direction_policy: StoryFrameworkDirectionPolicy = Field(description="演出方針")
+    art_style_policy: StoryFrameworkArtStylePolicy = Field(description="画風方針")
 
 
 class WriterStoryFrameworkOutput(BaseModel):
     """Writer(mode=story_framework) の出力。"""
     execution_summary: str = Field(description="実行結果の要約")
     user_message: str = Field(description="ユーザー向けの簡潔な進捗・成果メッセージ")
-    logline: str = Field(description="一文で要約した物語の核")
-    world_setting: str = Field(description="世界観")
-    background_context: str = Field(description="時代背景・前提状況")
-    tone_and_temperature: str = Field(description="温度感・文体トーン")
-    narrative_arc: List[str] = Field(default_factory=list, description="全体の起承転結")
-    key_beats: List[StoryBeat] = Field(default_factory=list, description="主要ビート")
-    constraints: List[str] = Field(default_factory=list, description="制作上の制約")
+    story_framework: StoryFrameworkPayload = Field(description="作品全体方針")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy_shape(cls, value: Any) -> Any:
+        """旧形式(logline/world_setting...)から新形式へ移行する互換処理."""
+        if not isinstance(value, dict):
+            return value
+
+        if isinstance(value.get("story_framework"), dict):
+            return value
+
+        arc_raw = value.get("narrative_arc")
+        arc_overview: list[dict[str, str]] = []
+        if isinstance(arc_raw, list):
+            for idx, item in enumerate(arc_raw, start=1):
+                if isinstance(item, str) and item.strip():
+                    arc_overview.append({"phase": f"phase_{idx}", "purpose": item.strip()})
+
+        constraints = value.get("constraints")
+        constraint_items = [str(item).strip() for item in constraints if isinstance(item, str)] if isinstance(constraints, list) else []
+
+        upgraded = {
+            **value,
+            "story_framework": {
+                "concept": str(value.get("logline") or "未設定のコンセプト"),
+                "theme": str(value.get("tone_and_temperature") or "未設定のテーマ"),
+                "format_policy": {
+                    "series_type": "oneshot",
+                    "medium": "digital",
+                    "page_budget": {"min": 8, "max": 16},
+                    "reading_direction": "rtl",
+                },
+                "structure_type": "kishotenketsu",
+                "arc_overview": arc_overview or [{"phase": "phase_1", "purpose": "物語導入"}],
+                "core_conflict": str(value.get("background_context") or "主要対立は未定義"),
+                "world_policy": {
+                    "era": str(value.get("world_setting") or "未設定"),
+                    "primary_locations": [],
+                    "social_rules": [],
+                },
+                "direction_policy": {
+                    "paneling_policy": "通常は5-6コマ、要点で大ゴマを使う",
+                    "eye_guidance_policy": "右上から左下へ視線誘導する",
+                    "page_turn_policy": "章末や転換点でめくりを強調する",
+                    "dialogue_policy": "1フキダシ1情報で簡潔にする",
+                },
+                "art_style_policy": {
+                    "line_style": "主線はGペン基調",
+                    "shading_style": "スクリーントーン中心",
+                    "negative_constraints": constraint_items or ["フォトリアル禁止"],
+                },
+            },
+        }
+        return upgraded
 
 
 class CharacterProfile(BaseModel):

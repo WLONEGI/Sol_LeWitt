@@ -16,23 +16,31 @@ Each mode must return its own JSON schema independently. Do not mix fields acros
 Goal: 作品の「設計図（World + Style Bible）」を確定する。
 
 Required quality rules:
-1. Build story in clear beats (setup -> build -> turn -> payoff) with emotional progression.
-2. Define global design axes in framework-level language:
-   - 世界観（時代・地域・文化・技術水準・社会ルール）
-   - カテゴリ/ジャンル（作品のカテゴリと演出傾向）
-   - 舞台設計（Locationの基準）
-   - 画風設計（Styleの基準）
-3. `constraints` must include all of the following as explicit production rules:
-   - パネル/ページ運用方針
-   - 読み方向/視線誘導方針（右上から左下）
-   - 線画仕様（Line Art）
-   - トーン陰影仕様（Screentones & Shading）
-   - ネガティブ制約
-4. Subject/Composition/Action の詳細定義はここで固定しすぎない。
+1. `story_framework` object only. Do not output legacy top-level fields like `logline` or `constraints`.
+2. Include exactly the 9 core policy areas:
+   - concept
+   - theme
+   - format_policy
+   - structure_type
+   - arc_overview
+   - core_conflict
+   - world_policy
+   - direction_policy
+   - art_style_policy
+3. `direction_policy` must explicitly define:
+   - paneling_policy
+   - eye_guidance_policy（右上から左下の流れ）
+   - page_turn_policy
+   - dialogue_policy
+4. `art_style_policy` must explicitly define:
+   - line_style
+   - shading_style
+   - negative_constraints
+5. Subject/Composition/Action の詳細定義はここで固定しすぎない。
    - キャラ固有の被写体定義は `character_sheet` で確定
    - コマ単位の構図/動作は `comic_script` で確定
 
-Line Art / Tone & Shading baseline (must be defined in `story_framework.constraints`):
+Line Art / Tone & Shading baseline (must be defined in `story_framework.art_style_policy`):
 - 線画:
   - 主線は `Gペン` 基調
   - 補助線/背景ディテールは必要に応じて `ミリペン` または `筆ペン`
@@ -69,8 +77,8 @@ Reference-image handling (`selected_image_inputs`):
 - For multi-character scenes, ensure left/right placement disambiguation can be derived from profiles.
 
 World consistency policy:
-- キャラクターの服飾・小物・口調・価値観は `story_framework` の時代/文化/技術水準に整合させる。
-- 線画・トーン陰影は `story_framework` の仕様を継承し、ここで独自ルールを増やしすぎない。
+- キャラクターの服飾・小物・口調・価値観は `story_framework.world_policy` に整合させる。
+- 線画・トーン陰影は `story_framework.art_style_policy` を継承し、ここで独自ルールを増やしすぎない。
 - `visual_keywords` はキャラ識別語を優先し、画風ルールは最小限の継承表現に留める。
 
 ## Task 3: `comic_script` (Panel Blueprint for Rendering)
@@ -82,9 +90,9 @@ Panel writing requirements:
 2. `camera` must specify at least angle + shot size; add lens/tilt when useful.
 3. `dialogue` should be short and drawable; avoid long sentences that break bubble rendering.
 4. `sfx` should be compact onomatopoeia with clear intent.
-5. `[舞台]` は `story_framework` の世界観（時代/文化/照明/環境）を反映する。
+5. `[舞台]` は `story_framework.world_policy`（時代/文化/環境）を反映する。
 6. `[被写体]` と `[動作]` は `character_sheet` の性格・動機・関係性を反映する。
-7. `[画風]` は `story_framework` で定義した線画/トーン陰影仕様を継承し、矛盾する追加指定をしない。
+7. `[画風]` は `story_framework.art_style_policy`（線画/トーン陰影/禁止事項）を継承し、矛盾する追加指定をしない。
 
 Recommended panel grammar:
 - [被写体]: character identity + expression state
@@ -110,18 +118,40 @@ Text rendering policy:
 {
   "execution_summary": "...",
   "user_message": "...",
-  "logline": "...",
-  "world_setting": "...",
-  "background_context": "...",
-  "tone_and_temperature": "...",
-  "narrative_arc": ["..."],
-  "key_beats": [{"beat_id":"setup","summary":"...","purpose":"...","tone":"..."}],
-  "constraints": [
-    "線画: 主線はGペン基調、補助線は必要時のみミリペン",
-    "トーン陰影: スクリーントーン+ベタ+カケアミを基本とする",
-    "禁止: 3Dレンダリング/CGI/フォトリアル/過度な体積光/写真的ボケ",
-    "読み方向は右上から左下を意識する"
-  ]
+  "story_framework": {
+    "concept": "...",
+    "theme": "...",
+    "format_policy": {
+      "series_type": "oneshot",
+      "medium": "digital",
+      "page_budget": {"min": 24, "max": 32},
+      "reading_direction": "rtl"
+    },
+    "structure_type": "kishotenketsu",
+    "arc_overview": [
+      {"phase":"起","purpose":"導入とフック提示"},
+      {"phase":"承","purpose":"対立の拡大"},
+      {"phase":"転","purpose":"反転と危機"},
+      {"phase":"結","purpose":"決着と余韻"}
+    ],
+    "core_conflict": "...",
+    "world_policy": {
+      "era": "...",
+      "primary_locations": ["..."],
+      "social_rules": ["..."]
+    },
+    "direction_policy": {
+      "paneling_policy": "...",
+      "eye_guidance_policy": "右上から左下へ視線誘導",
+      "page_turn_policy": "...",
+      "dialogue_policy": "1フキダシ1情報を基本とする"
+    },
+    "art_style_policy": {
+      "line_style": "主線はGペン基調",
+      "shading_style": "スクリーントーン+ベタ+カケアミ",
+      "negative_constraints": ["3Dレンダリング禁止", "フォトリアル禁止"]
+    }
+  }
 }
 ```
 

@@ -107,9 +107,23 @@ def _find_latest_story_framework(artifacts: dict[str, Any]) -> dict[str, Any] | 
     """Find latest writer story framework artifact from state."""
     candidates = _collect_artifacts_by_suffix(artifacts, "_story")
     for _, _, data in reversed(candidates):
+        payload = data.get("story_framework")
+        if (
+            isinstance(payload, dict)
+            and isinstance(payload.get("concept"), str)
+            and isinstance(payload.get("format_policy"), dict)
+        ):
+            return data
         if "logline" in data and "world_setting" in data and isinstance(data.get("key_beats"), list):
             return data
     return None
+
+
+def _extract_story_framework_payload(writer_data: dict[str, Any]) -> dict[str, Any]:
+    payload = writer_data.get("story_framework")
+    if isinstance(payload, dict):
+        return payload
+    return {}
 
 
 def _find_latest_character_sheet(artifacts: dict[str, Any]) -> dict[str, Any] | None:
@@ -271,6 +285,34 @@ def _writer_output_to_slides(writer_data: dict, mode: str) -> list[dict]:
         return slides
 
     if mode == "story_framework_render":
+        payload = _extract_story_framework_payload(writer_data)
+        if payload:
+            world_policy = payload.get("world_policy")
+            era = world_policy.get("era") if isinstance(world_policy, dict) else None
+            locations = world_policy.get("primary_locations") if isinstance(world_policy, dict) else []
+            location_text = ""
+            if isinstance(locations, list):
+                joined = ", ".join(str(item) for item in locations[:3] if isinstance(item, str) and item.strip())
+                location_text = joined
+            description = " / ".join(item for item in [era, location_text] if isinstance(item, str) and item.strip())
+            arc_overview = payload.get("arc_overview")
+            bullet_points: list[str] = []
+            if isinstance(arc_overview, list):
+                for item in arc_overview:
+                    if isinstance(item, dict):
+                        phase = str(item.get("phase") or "").strip()
+                        purpose = str(item.get("purpose") or "").strip()
+                        if phase or purpose:
+                            bullet_points.append(f"{phase}: {purpose}".strip(": "))
+            return [
+                {
+                    "slide_number": 1,
+                    "title": payload.get("concept", "Story Framework"),
+                    "description": description,
+                    "bullet_points": bullet_points[:6],
+                    "key_message": payload.get("theme"),
+                }
+            ]
         return [
             {
                 "slide_number": 1,
