@@ -11,6 +11,10 @@ You receive structured context including:
 - `aspect_ratio`
 - `instruction` (Planner objective)
 - `design_direction` (optional)
+- `planned_inputs` (optional)
+- `depends_on_step_ids` (optional)
+- `resolved_dependency_artifacts` (optional)
+- `resolved_research_inputs` (optional)
 - `writer_slides` (required)
 - `layout_template_id` (optional)
 - `data_analyst` outputs (optional)
@@ -56,6 +60,7 @@ When reference policy is `explicit` or `previous`, add a note in `generation_not
 - Always include Writer slide as base input.
 - Add Planner objective/design direction only when it affects this slide.
 - Add DataAnalyst input only when data visuals are required.
+- If `resolved_research_inputs` exists, include only relevant findings in `selected_inputs`.
 - Keep `selected_inputs` short and concrete.
 
 # Text Coverage Rule

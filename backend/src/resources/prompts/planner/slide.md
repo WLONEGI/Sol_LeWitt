@@ -15,6 +15,7 @@
 - If visualizer step uses writer output, visualizer must depend on writer.
 - If data_analyst packages final visuals, data_analyst must depend on the final visualizer step.
 - If writer/visualizer explicitly consumes researcher output, add dependency from that step to researcher.
+- When researcher output is consumed, propagate the same `research:<topic_slug>` label from researcher `outputs` to downstream `inputs`.
 
 ## Replan hints
 - For partial fixes, prefer appending a scoped visualizer or writer step over full regeneration.

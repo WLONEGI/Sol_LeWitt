@@ -1,3 +1,6 @@
+import json
+
+from src.core.workflow.nodes.common import resolve_step_dependency_context
 from src.core.workflow.nodes.researcher import (
     _build_image_candidates,
     _contains_explicit_image_request,
@@ -6,6 +9,7 @@ from src.core.workflow.nodes.researcher import (
 )
 from src.shared.schemas.outputs import ResearchTask
 from src.core.workflow.nodes.visualizer import _resolve_asset_unit_meta, _writer_output_to_slides
+from src.core.workflow.nodes.writer import _resolve_writer_mode
 
 
 def test_extract_urls_and_image_candidates() -> None:
@@ -145,3 +149,75 @@ def test_contains_explicit_image_request_detects_japanese_and_english() -> None:
     assert _contains_explicit_image_request("参照画像を探して") is True
     assert _contains_explicit_image_request("Collect reference images for style") is True
     assert _contains_explicit_image_request("市場規模を調査して") is False
+
+
+def test_writer_mode_is_constrained_by_product_type() -> None:
+    assert _resolve_writer_mode("comic_script", "comic") == "comic_script"
+    assert _resolve_writer_mode("story_framework", "slide") == "slide_outline"
+    assert _resolve_writer_mode(None, "comic") == "story_framework"
+
+
+def test_resolve_step_dependency_context_reads_research_artifacts_by_depends_on() -> None:
+    state = {
+        "plan": [
+            {"id": 1, "capability": "researcher", "mode": "text_search", "status": "completed"},
+            {"id": 2, "capability": "writer", "mode": "slide_outline", "status": "in_progress"},
+        ],
+        "artifacts": {
+            "step_1_research_1": json.dumps(
+                {
+                    "task_id": 1,
+                    "perspective": "市場調査",
+                    "report": "A" * 3200,
+                    "sources": ["https://example.com/source"],
+                },
+                ensure_ascii=False,
+            )
+        },
+    }
+    current_step = {
+        "id": 2,
+        "capability": "writer",
+        "mode": "slide_outline",
+        "inputs": ["research:market_facts"],
+        "depends_on": [1],
+    }
+
+    context = resolve_step_dependency_context(state, current_step)
+    assert context["depends_on_step_ids"] == [1]
+    assert context["planned_inputs"] == ["research:market_facts"]
+    assert len(context["resolved_research_inputs"]) == 1
+    report = context["resolved_research_inputs"][0]["content"]["report"]
+    assert isinstance(report, str)
+    assert report.endswith("(truncated)")
+
+
+def test_resolve_step_dependency_context_falls_back_to_research_labels_without_depends_on() -> None:
+    state = {
+        "plan": [
+            {"id": 1, "capability": "researcher", "mode": "image_search", "status": "completed"},
+            {"id": 2, "capability": "visualizer", "mode": "slide_render", "status": "in_progress"},
+        ],
+        "artifacts": {
+            "step_1_research_1": json.dumps(
+                {
+                    "task_id": 1,
+                    "perspective": "参照画像",
+                    "search_mode": "image_search",
+                    "sources": ["https://example.com/image.png"],
+                },
+                ensure_ascii=False,
+            )
+        },
+    }
+    current_step = {
+        "id": 2,
+        "capability": "visualizer",
+        "mode": "slide_render",
+        "inputs": ["research:reference_images"],
+        "depends_on": [],
+    }
+
+    context = resolve_step_dependency_context(state, current_step)
+    assert context["depends_on_step_ids"] == []
+    assert len(context["resolved_research_inputs"]) == 1

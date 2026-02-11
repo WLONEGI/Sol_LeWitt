@@ -45,6 +45,14 @@ Create an executable plan that improves output quality while keeping execution s
   - `image_search`: visual references
   - `hybrid_search`: both needed
 
+# Research Hand-off Contract (Important)
+- If you add a `researcher` step, define explicit reusable output labels in `outputs`.
+  - Recommended format: `research:<topic_slug>` (example: `research:market_facts`, `research:reference_images`).
+- Any `writer` / `visualizer` / `data_analyst` step that consumes those findings must:
+  - include the same label(s) in `inputs`
+  - include the researcher step id in `depends_on`
+- Do not reference research findings in downstream instructions without wiring `inputs` + `depends_on`.
+
 # Dependency Rule (Global)
 - Add `depends_on` only when a step consumes outputs from another step.
 - Do not add unnecessary dependencies.

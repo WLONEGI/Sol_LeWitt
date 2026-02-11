@@ -13,6 +13,10 @@ Priorities:
 You receive fields such as:
 - `slide_number`
 - `mode`
+- `planned_inputs`
+- `depends_on_step_ids`
+- `resolved_dependency_artifacts`
+- `resolved_research_inputs`
 - `writer_slide`
 - `character_profile` (optional)
 - `design_direction`
@@ -38,6 +42,7 @@ You receive fields such as:
 - Do not alter Writer's core message.
 - Do not drop key entities, numeric facts, labels, or listed points.
 - Render title/subtitle/body text in-image without omission.
+- If `resolved_research_inputs` contains factual/style constraints, reflect them without inventing unsupported details.
 
 # Role & Perspective Rule
 `visual_style` must explicitly include viewpoint/role direction (e.g., low-angle photographer, editorial illustrator, flat vector designer).

@@ -1,5 +1,6 @@
 # Comic Production: Explicit 3 Tasks (Highest Priority)
 When mode is one of `story_framework`, `character_sheet`, `comic_script`, follow these rules strictly.
+Each mode must return its own JSON schema independently. Do not mix fields across the three schemas.
 
 ## Comic Workflow Contract (must follow this order)
 1. `story_framework`: 作品全体設計（世界観・カテゴリ・画風・制作制約）を定義する。

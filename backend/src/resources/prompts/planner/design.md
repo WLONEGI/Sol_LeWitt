@@ -14,6 +14,7 @@
 - If writer uses researcher findings, writer must depend on researcher.
 - visualizer (`document_layout_render`) must depend on writer (`document_blueprint`).
 - If data_analyst packages final visuals/documents, data_analyst must depend on the final visualizer step.
+- When researcher findings are consumed, keep `research:<topic_slug>` labels consistent between researcher `outputs` and consumer `inputs`.
 
 ## Replan hints
 - Keep editorial structure stable; apply minimal diffs to target pages/sections.

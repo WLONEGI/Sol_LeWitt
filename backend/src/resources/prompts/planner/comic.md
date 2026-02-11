@@ -17,6 +17,7 @@
 
 ## Researcher policy
 - Insert Researcher proactively when references, factual grounding, or style evidence improves quality.
+- If inserted, use explicit `research:<topic_slug>` outputs and carry the same labels into dependent writer/visualizer `inputs` with matching `depends_on`.
 
 ## Replan hints
 - Keep story continuity and character identity consistency.
