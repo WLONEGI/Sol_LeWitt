@@ -4,6 +4,8 @@ from src.shared.schemas.outputs import (
     ResearchResult,
     ResearchTask,
     TaskStep,
+    WriterCharacterSheetOutput,
+    WriterComicScriptOutput,
     WriterStoryFrameworkOutput,
 )
 
@@ -187,3 +189,115 @@ def test_writer_story_framework_output_upgrades_legacy_shape() -> None:
     assert parsed.story_framework.concept == "古い形式のログライン"
     assert parsed.story_framework.world_policy.era == "蒸気都市"
     assert parsed.story_framework.art_style_policy.negative_constraints[0] == "CGI禁止"
+
+
+def test_writer_character_sheet_output_accepts_new_shape() -> None:
+    data = {
+        "execution_summary": "ok",
+        "user_message": "done",
+        "characters": [
+            {
+                "character_id": "hero_01",
+                "name": "アオイ",
+                "story_role": "主人公",
+                "core_personality": "責任感が強い",
+                "motivation": "家族を守る",
+                "weakness_or_fear": "孤立への恐れ",
+                "silhouette_signature": "長いコートと片肩バッグ",
+                "face_hair_anchors": "切れ長の目と右分けの短髪",
+                "costume_anchors": "濃紺コート、白シャツ、革手袋",
+                "color_palette": {"main": "#1A2B4C", "sub": "#D8D8D8", "accent": "#C08A2E"},
+                "signature_items": ["方位磁針"],
+                "forbidden_drift": ["髪色変更禁止"],
+                "speech_style": "端的で硬い口調",
+            }
+        ],
+    }
+    parsed = WriterCharacterSheetOutput.model_validate(data)
+    assert parsed.characters[0].story_role == "主人公"
+    assert parsed.characters[0].color_palette.main == "#1A2B4C"
+
+
+def test_writer_character_sheet_output_upgrades_legacy_shape() -> None:
+    legacy = {
+        "execution_summary": "ok",
+        "user_message": "done",
+        "characters": [
+            {
+                "character_id": "hero_01",
+                "name": "アオイ",
+                "role": "主人公",
+                "appearance_core": "切れ長の目と短髪",
+                "costume_core": "濃紺コート",
+                "personality": "責任感が強い",
+                "motivation": "家族を守る",
+                "color_palette": ["#1A2B4C", "#D8D8D8", "#C08A2E"],
+                "signature_items": ["方位磁針"],
+                "forbidden_elements": ["髪色変更禁止"],
+            }
+        ],
+    }
+    parsed = WriterCharacterSheetOutput.model_validate(legacy)
+    character = parsed.characters[0]
+    assert character.story_role == "主人公"
+    assert character.core_personality == "責任感が強い"
+    assert character.face_hair_anchors == "切れ長の目と短髪"
+    assert character.costume_anchors == "濃紺コート"
+    assert character.forbidden_drift[0] == "髪色変更禁止"
+
+
+def test_writer_comic_script_output_accepts_panel_detail_shape() -> None:
+    data = {
+        "execution_summary": "ok",
+        "user_message": "done",
+        "pages": [
+            {
+                "page_number": 1,
+                "panels": [
+                    {
+                        "panel_number": 1,
+                        "foreground": "主人公が時計を握る",
+                        "background": "蒸気都市の路地",
+                        "composition": "対角線構図",
+                        "camera": "ローアングルのミディアムショット",
+                        "lighting": "朝の斜光",
+                        "dialogue": ["これが最後だ。"],
+                        "negative_constraints": ["フォトリアル禁止"],
+                    }
+                ],
+            }
+        ],
+    }
+    parsed = WriterComicScriptOutput.model_validate(data)
+    panel = parsed.pages[0].panels[0]
+    assert panel.foreground == "主人公が時計を握る"
+    assert panel.negative_constraints[0] == "フォトリアル禁止"
+
+
+def test_writer_comic_script_output_upgrades_legacy_scene_description() -> None:
+    legacy = {
+        "execution_summary": "ok",
+        "user_message": "done",
+        "title": "Clockwork Dawn",
+        "genre": "fantasy",
+        "pages": [
+            {
+                "page_number": 1,
+                "page_goal": "導入",
+                "panels": [
+                    {
+                        "panel_number": 1,
+                        "scene_description": "[被写体] 主人公 [構図] 対角線 [動作] 走る [舞台] 夕方の路地 [画風] Gペン+トーン",
+                        "camera": "ローアングル",
+                        "dialogue": ["急げ。"],
+                        "sfx": ["ダッ"],
+                    }
+                ],
+            }
+        ],
+    }
+    parsed = WriterComicScriptOutput.model_validate(legacy)
+    panel = parsed.pages[0].panels[0]
+    assert panel.foreground == "主人公"
+    assert panel.background == "夕方の路地"
+    assert panel.composition.startswith("対角線")

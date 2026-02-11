@@ -48,7 +48,7 @@ def test_writer_output_to_slides_for_comic_script() -> None:
     slides = _writer_output_to_slides(writer_data, "comic_page_render")
     assert len(slides) == 1
     assert slides[0]["slide_number"] == 1
-    assert slides[0]["bullet_points"][0] == "城下町の朝"
+    assert "城下町の朝" in slides[0]["bullet_points"][0]
 
 
 def test_resolve_asset_unit_meta_by_mode() -> None:

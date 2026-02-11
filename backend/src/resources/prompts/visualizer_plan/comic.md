@@ -7,10 +7,4 @@
   - set `layout_type` to `other` (fixed)
   - style source is `story_framework`, identity source is `character_sheet`
   - if `layout_template_id` exists in input, use template-first planning
-  - generation_notes must mention these five content groups:
-    - メインビジュアル
-    - デザイン詳細
-    - 表情集
-    - 三面図
-    - アクションポーズ
-  - generation_notes must also mention immutable identity lock (face/hair/body/costume anchors)
+  - generation_notes should focus on immutable identity lock (face/hair/body/costume anchors)

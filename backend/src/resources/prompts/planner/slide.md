@@ -3,7 +3,7 @@
 ## Recommended baseline flow
 1. researcher (`text_search` / `image_search` / `hybrid_search`)
 2. writer (`slide_outline` or `infographic_spec`)
-3. visualizer (`slide_render` or `infographic_render`)
+3. visualizer (`slide_render`)
 4. data_analyst (`asset_packaging` or `python_pipeline`) when packaging/post-processing is needed
 
 ## Researcher policy for slide (strong recommendation)

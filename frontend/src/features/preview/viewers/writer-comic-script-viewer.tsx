@@ -24,10 +24,6 @@ export function WriterComicScriptViewer({ content }: WriterComicScriptViewerProp
                             <div className="whitespace-pre-wrap">
                                 {data.execution_summary || "Summary is not available."}
                             </div>
-                            <div className="flex flex-wrap gap-2">
-                                {data.title && <Badge variant="outline">{data.title}</Badge>}
-                                {data.genre && <Badge>{data.genre}</Badge>}
-                            </div>
                         </CardContent>
                     </Card>
 
@@ -44,7 +40,7 @@ export function WriterComicScriptViewer({ content }: WriterComicScriptViewerProp
                                     <div key={`comic-page-${page?.page_number ?? index}`} className="rounded-md border border-border p-4 space-y-3">
                                         <div className="flex flex-wrap items-center gap-2">
                                             <Badge variant="outline">Page {page?.page_number ?? index + 1}</Badge>
-                                            <span className="text-sm font-semibold">{page?.page_goal || "Page Goal N/A"}</span>
+                                            {page?.page_goal && <span className="text-sm font-semibold">{page.page_goal}</span>}
                                         </div>
 
                                         <div className="space-y-2">
@@ -52,14 +48,35 @@ export function WriterComicScriptViewer({ content }: WriterComicScriptViewerProp
                                                 <div className="text-xs text-muted-foreground">No panels.</div>
                                             ) : panels.map((panel: any, panelIndex: number) => {
                                                 const dialogues = Array.isArray(panel?.dialogue) ? panel.dialogue : []
-                                                const sfxList = Array.isArray(panel?.sfx) ? panel.sfx : []
+                                                const negatives = Array.isArray(panel?.negative_constraints) ? panel.negative_constraints : []
+                                                const legacySfx = Array.isArray(panel?.sfx) ? panel.sfx : []
                                                 return (
                                                     <div key={`panel-${index}-${panel?.panel_number ?? panelIndex}`} className="rounded border border-border/80 p-3 space-y-2">
                                                         <div className="flex flex-wrap items-center gap-2">
                                                             <Badge variant="secondary">Panel {panel?.panel_number ?? panelIndex + 1}</Badge>
-                                                            {panel?.camera && <Badge variant="outline">{panel.camera}</Badge>}
                                                         </div>
-                                                        <div className="text-sm whitespace-pre-wrap">{panel?.scene_description || "N/A"}</div>
+                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                                                            <div className="rounded bg-muted/20 px-2 py-1">
+                                                                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Foreground</div>
+                                                                <div className="whitespace-pre-wrap">{panel?.foreground || "N/A"}</div>
+                                                            </div>
+                                                            <div className="rounded bg-muted/20 px-2 py-1">
+                                                                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Background</div>
+                                                                <div className="whitespace-pre-wrap">{panel?.background || "N/A"}</div>
+                                                            </div>
+                                                            <div className="rounded bg-muted/20 px-2 py-1">
+                                                                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Composition</div>
+                                                                <div className="whitespace-pre-wrap">{panel?.composition || panel?.scene_description || "N/A"}</div>
+                                                            </div>
+                                                            <div className="rounded bg-muted/20 px-2 py-1">
+                                                                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Camera</div>
+                                                                <div className="whitespace-pre-wrap">{panel?.camera || "N/A"}</div>
+                                                            </div>
+                                                            <div className="rounded bg-muted/20 px-2 py-1 md:col-span-2">
+                                                                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Lighting</div>
+                                                                <div className="whitespace-pre-wrap">{panel?.lighting || "N/A"}</div>
+                                                            </div>
+                                                        </div>
                                                         <div>
                                                             <div className="text-xs uppercase tracking-wider text-muted-foreground mb-1">Dialogue</div>
                                                             {dialogues.length === 0 ? (
@@ -75,17 +92,27 @@ export function WriterComicScriptViewer({ content }: WriterComicScriptViewerProp
                                                             )}
                                                         </div>
                                                         <div>
-                                                            <div className="text-xs uppercase tracking-wider text-muted-foreground mb-1">SFX</div>
-                                                            {sfxList.length === 0 ? (
-                                                                <div className="text-xs text-muted-foreground">No SFX.</div>
+                                                            <div className="text-xs uppercase tracking-wider text-muted-foreground mb-1">Negative Constraints</div>
+                                                            {negatives.length === 0 ? (
+                                                                <div className="text-xs text-muted-foreground">No constraints.</div>
                                                             ) : (
                                                                 <div className="flex flex-wrap gap-2">
-                                                                    {sfxList.map((sfx: string, sfxIndex: number) => (
-                                                                        <Badge key={`sfx-${panelIndex}-${sfxIndex}`} variant="secondary">{sfx}</Badge>
+                                                                    {negatives.map((item: string, itemIndex: number) => (
+                                                                        <Badge key={`negative-${panelIndex}-${itemIndex}`} variant="secondary">{item}</Badge>
                                                                     ))}
                                                                 </div>
                                                             )}
                                                         </div>
+                                                        {legacySfx.length > 0 && (
+                                                            <div>
+                                                                <div className="text-xs uppercase tracking-wider text-muted-foreground mb-1">Legacy SFX</div>
+                                                                <div className="flex flex-wrap gap-2">
+                                                                    {legacySfx.map((sfx: string, sfxIndex: number) => (
+                                                                        <Badge key={`sfx-${panelIndex}-${sfxIndex}`} variant="outline">{sfx}</Badge>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 )
                                             })}

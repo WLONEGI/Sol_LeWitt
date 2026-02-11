@@ -1,6 +1,6 @@
-# Mode-specific Prompting: Slide & Infographic
+# Mode-specific Prompting: Slide
 
-- `slide_render` / `infographic_render`:
+- `slide_render`:
   - professional slide clarity first
   - explicit hierarchy and text-safe zones
   - secure negative space for readability when appropriate.

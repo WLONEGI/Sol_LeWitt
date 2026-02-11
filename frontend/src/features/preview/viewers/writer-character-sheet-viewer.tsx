@@ -24,12 +24,6 @@ export function WriterCharacterSheetViewer({ content }: WriterCharacterSheetView
                             <div className="whitespace-pre-wrap">
                                 {data.execution_summary || "Summary is not available."}
                             </div>
-                            {data.setting_notes && (
-                                <div>
-                                    <div className="text-xs uppercase tracking-wider text-muted-foreground mb-1">Setting Notes</div>
-                                    <div className="whitespace-pre-wrap">{data.setting_notes}</div>
-                                </div>
-                            )}
                         </CardContent>
                     </Card>
 
@@ -41,23 +35,25 @@ export function WriterCharacterSheetViewer({ content }: WriterCharacterSheetView
                             {characters.length === 0 ? (
                                 <div className="text-xs text-muted-foreground">No characters defined.</div>
                             ) : characters.map((character: any, index: number) => {
-                                const palette = Array.isArray(character?.color_palette) ? character.color_palette : []
-                                const keywords = Array.isArray(character?.visual_keywords) ? character.visual_keywords : []
-                                const relationships = Array.isArray(character?.relationships) ? character.relationships : []
+                                const palette = normalizePalette(character?.color_palette)
                                 const signatureItems = Array.isArray(character?.signature_items) ? character.signature_items : []
-                                const forbiddenElements = Array.isArray(character?.forbidden_elements) ? character.forbidden_elements : []
+                                const forbiddenElements = Array.isArray(character?.forbidden_drift)
+                                    ? character.forbidden_drift
+                                    : (Array.isArray(character?.forbidden_elements) ? character.forbidden_elements : [])
                                 return (
                                     <div key={character?.character_id || `character-${index}`} className="rounded-md border border-border p-4 space-y-3">
                                         <div className="flex flex-wrap items-center gap-2">
                                             <Badge variant="outline">{character?.character_id || `character-${index + 1}`}</Badge>
                                             <span className="text-sm font-semibold">{character?.name || "Unnamed"}</span>
-                                            {character?.role && <Badge>{character.role}</Badge>}
+                                            {(character?.story_role || character?.role) && <Badge>{character?.story_role || character?.role}</Badge>}
                                         </div>
-                                        <Field label="Appearance Core" value={character?.appearance_core || character?.appearance} />
-                                        <Field label="Costume Core" value={character?.costume_core} />
-                                        <Field label="Personality" value={character?.personality} />
-                                        <Field label="Backstory" value={character?.backstory} />
+                                        <Field label="Silhouette Signature" value={character?.silhouette_signature || character?.appearance_core} />
+                                        <Field label="Face/Hair Anchors" value={character?.face_hair_anchors || character?.appearance_core} />
+                                        <Field label="Costume Anchors" value={character?.costume_anchors || character?.costume_core} />
+                                        <Field label="Core Personality" value={character?.core_personality || character?.personality} />
                                         <Field label="Motivation" value={character?.motivation} />
+                                        <Field label="Weakness or Fear" value={character?.weakness_or_fear} />
+                                        <Field label="Speech Style" value={character?.speech_style} />
 
                                         <div className="space-y-1">
                                             <div className="text-xs uppercase tracking-wider text-muted-foreground">Color Palette</div>
@@ -72,22 +68,8 @@ export function WriterCharacterSheetViewer({ content }: WriterCharacterSheetView
                                             )}
                                         </div>
 
-                                        <ListField label="Relationships" values={relationships} />
                                         <ListField label="Signature Items" values={signatureItems} />
-                                        <ListField label="Forbidden Elements" values={forbiddenElements} />
-
-                                        <div className="space-y-1">
-                                            <div className="text-xs uppercase tracking-wider text-muted-foreground">Visual Keywords</div>
-                                            {keywords.length === 0 ? (
-                                                <div className="text-xs text-muted-foreground">N/A</div>
-                                            ) : (
-                                                <div className="flex flex-wrap gap-2">
-                                                    {keywords.map((keyword: string, keywordIndex: number) => (
-                                                        <Badge key={`keyword-${index}-${keywordIndex}`} variant="secondary">{keyword}</Badge>
-                                                    ))}
-                                                </div>
-                                            )}
-                                        </div>
+                                        <ListField label="Forbidden Drift" values={forbiddenElements} />
                                     </div>
                                 )
                             })}
@@ -123,4 +105,17 @@ function ListField({ label, values }: { label: string, values: string[] }) {
             )}
         </div>
     )
+}
+
+function normalizePalette(raw: any): string[] {
+    if (Array.isArray(raw)) {
+        return raw.filter((item): item is string => typeof item === "string" && item.length > 0)
+    }
+    if (raw && typeof raw === "object") {
+        const keys = ["main", "sub", "accent"] as const
+        return keys
+            .map((key) => raw[key])
+            .filter((item): item is string => typeof item === "string" && item.length > 0)
+    }
+    return []
 }

@@ -1,4 +1,5 @@
 # Pydanticスキーマ: LangGraphノードの構造化出力定義
+import re
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
@@ -324,28 +325,97 @@ class WriterStoryFrameworkOutput(BaseModel):
         return upgraded
 
 
+class CharacterColorPalette(BaseModel):
+    """キャラクター配色."""
+    main: str = Field(description="メインカラー")
+    sub: str = Field(description="サブカラー")
+    accent: str = Field(description="アクセントカラー")
+
+
 class CharacterProfile(BaseModel):
-    """キャラクター設定。"""
+    """キャラクター設定（最小項目）."""
     character_id: str = Field(description="キャラクターID")
     name: str = Field(description="表示名")
-    role: str = Field(description="物語上の役割")
-    appearance_core: str = Field(description="外見の核となる特徴（体型・顔立ち・髪型など）")
-    costume_core: str = Field(description="衣装・装身具の核となる特徴")
-    personality: str = Field(description="性格")
-    backstory: str = Field(description="背景")
+    story_role: str = Field(description="物語上の役割")
+    core_personality: str = Field(description="性格の核")
     motivation: str = Field(description="動機")
-    relationships: List[str] = Field(default_factory=list, description="主要な関係性（人物名: 関係）")
-    color_palette: List[str] = Field(default_factory=list, description="推奨配色")
+    weakness_or_fear: str = Field(description="弱点または恐れ")
+    silhouette_signature: str = Field(description="シルエット識別要素")
+    face_hair_anchors: str = Field(description="顔・髪の固定要素")
+    costume_anchors: str = Field(description="衣装の固定要素")
+    color_palette: CharacterColorPalette = Field(description="推奨配色")
     signature_items: List[str] = Field(default_factory=list, description="象徴的な持ち物・意匠")
-    forbidden_elements: List[str] = Field(default_factory=list, description="避けるべき要素")
-    visual_keywords: List[str] = Field(default_factory=list, description="画像生成向けキーワード")
+    forbidden_drift: List[str] = Field(default_factory=list, description="崩してはいけない要素")
+    speech_style: Optional[str] = Field(default=None, description="口調（任意）")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy_shape(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+
+        def _pick_text(*keys: str, default: str = "") -> str:
+            for key in keys:
+                raw = value.get(key)
+                if isinstance(raw, str) and raw.strip():
+                    return raw.strip()
+            return default
+
+        palette_raw = value.get("color_palette")
+        palette: dict[str, str]
+        if isinstance(palette_raw, dict):
+            palette = {
+                "main": str(palette_raw.get("main") or palette_raw.get("primary") or "#4A4A4A"),
+                "sub": str(palette_raw.get("sub") or palette_raw.get("secondary") or "#9A9A9A"),
+                "accent": str(palette_raw.get("accent") or palette_raw.get("highlight") or "#D9A441"),
+            }
+        elif isinstance(palette_raw, list):
+            colors = [str(item).strip() for item in palette_raw if isinstance(item, str) and item.strip()]
+            palette = {
+                "main": colors[0] if len(colors) > 0 else "#4A4A4A",
+                "sub": colors[1] if len(colors) > 1 else "#9A9A9A",
+                "accent": colors[2] if len(colors) > 2 else "#D9A441",
+            }
+        else:
+            palette = {"main": "#4A4A4A", "sub": "#9A9A9A", "accent": "#D9A441"}
+
+        forbidden_raw = value.get("forbidden_drift")
+        if not isinstance(forbidden_raw, list):
+            forbidden_raw = value.get("forbidden_elements")
+        forbidden_items = [str(item).strip() for item in forbidden_raw if isinstance(item, str) and item.strip()] if isinstance(forbidden_raw, list) else []
+
+        signature_raw = value.get("signature_items")
+        signature_items = [str(item).strip() for item in signature_raw if isinstance(item, str) and item.strip()] if isinstance(signature_raw, list) else []
+
+        upgraded = {
+            **value,
+            "character_id": _pick_text("character_id", default="character_01"),
+            "name": _pick_text("name", default="Unnamed"),
+            "story_role": _pick_text("story_role", "role", default="未設定"),
+            "core_personality": _pick_text("core_personality", "personality", default="未設定"),
+            "motivation": _pick_text("motivation", default="未設定"),
+            "weakness_or_fear": _pick_text("weakness_or_fear", "weakness", "fear", default="未設定"),
+            "silhouette_signature": _pick_text("silhouette_signature", "appearance_core", default="未設定"),
+            "face_hair_anchors": _pick_text(
+                "face_hair_anchors",
+                "appearance_core",
+                "face_features_lock",
+                "hairstyle_lock",
+                default="未設定",
+            ),
+            "costume_anchors": _pick_text("costume_anchors", "costume_core", default="未設定"),
+            "color_palette": palette,
+            "signature_items": signature_items,
+            "forbidden_drift": forbidden_items,
+            "speech_style": _pick_text("speech_style", default="") or None,
+        }
+        return upgraded
 
 
 class WriterCharacterSheetOutput(BaseModel):
     """Writer(mode=character_sheet) の出力。"""
     execution_summary: str = Field(description="実行結果の要約")
     user_message: str = Field(description="ユーザー向けの簡潔な進捗・成果メッセージ")
-    setting_notes: Optional[str] = Field(default=None, description="キャラ共通の設定メモ")
     characters: List[CharacterProfile] = Field(description="キャラクター一覧")
 
 
@@ -393,19 +463,97 @@ class WriterDocumentBlueprintOutput(BaseModel):
     pages: List[DocumentPage] = Field(description="ページ設計")
 
 
+_SCENE_TAG_PATTERN = re.compile(r"\[(被写体|構図|動作|舞台|画風)\]\s*")
+
+
+def _parse_scene_description_tags(scene_description: str) -> dict[str, str]:
+    text = str(scene_description or "").strip()
+    if not text:
+        return {}
+
+    matches = list(_SCENE_TAG_PATTERN.finditer(text))
+    if not matches:
+        return {}
+
+    parsed: dict[str, str] = {}
+    for idx, match in enumerate(matches):
+        tag = match.group(1)
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        value = text[start:end].strip()
+        if value:
+            parsed[tag] = value
+    return parsed
+
+
 class ComicPanel(BaseModel):
-    """漫画コマ定義。"""
+    """漫画コマ定義（ページ/コマの描画詳細に限定）。"""
     panel_number: int = Field(description="コマ番号")
-    scene_description: str = Field(description="コマの状況説明")
-    camera: Optional[str] = Field(default=None, description="カメラ指示")
+    foreground: str = Field(description="前景（主被写体）")
+    background: str = Field(description="背景（舞台）")
+    composition: str = Field(description="構図")
+    camera: str = Field(description="カメラ")
+    lighting: str = Field(description="照明")
     dialogue: List[str] = Field(default_factory=list, description="セリフ")
-    sfx: List[str] = Field(default_factory=list, description="効果音")
+    negative_constraints: List[str] = Field(default_factory=list, description="禁止事項")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy_shape(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+
+        scene_description = value.get("scene_description")
+        parsed = _parse_scene_description_tags(scene_description) if isinstance(scene_description, str) else {}
+
+        foreground = str(value.get("foreground") or parsed.get("被写体") or scene_description or "未指定").strip()
+        background = str(value.get("background") or parsed.get("舞台") or "未指定").strip()
+
+        composition_parts: list[str] = []
+        if isinstance(value.get("composition"), str) and str(value.get("composition")).strip():
+            composition_parts.append(str(value.get("composition")).strip())
+        else:
+            if parsed.get("構図"):
+                composition_parts.append(parsed["構図"].strip())
+            if parsed.get("動作"):
+                composition_parts.append(f"動作: {parsed['動作'].strip()}")
+        composition = " / ".join([part for part in composition_parts if part]) or "未指定"
+
+        camera = str(value.get("camera") or "未指定").strip() or "未指定"
+        lighting = str(value.get("lighting") or "未指定").strip() or "未指定"
+
+        dialogue_raw = value.get("dialogue")
+        dialogue = [
+            str(item).strip()
+            for item in dialogue_raw
+            if isinstance(item, str) and item.strip()
+        ] if isinstance(dialogue_raw, list) else []
+
+        negatives_raw = value.get("negative_constraints")
+        if not isinstance(negatives_raw, list):
+            negatives_raw = value.get("forbidden_drift")
+        negative_constraints = [
+            str(item).strip()
+            for item in negatives_raw
+            if isinstance(item, str) and item.strip()
+        ] if isinstance(negatives_raw, list) else []
+
+        return {
+            **value,
+            "panel_number": int(value.get("panel_number") or 1),
+            "foreground": foreground,
+            "background": background,
+            "composition": composition,
+            "camera": camera,
+            "lighting": lighting,
+            "dialogue": dialogue,
+            "negative_constraints": negative_constraints,
+        }
 
 
 class ComicPageScript(BaseModel):
     """漫画1ページ分の脚本。"""
     page_number: int = Field(description="ページ番号")
-    page_goal: str = Field(description="このページの目的")
     panels: List[ComicPanel] = Field(description="コマ一覧")
 
 
@@ -413,8 +561,6 @@ class WriterComicScriptOutput(BaseModel):
     """Writer(mode=comic_script) の出力。"""
     execution_summary: str = Field(description="実行結果の要約")
     user_message: str = Field(description="ユーザー向けの簡潔な進捗・成果メッセージ")
-    title: str = Field(description="作品タイトル")
-    genre: str = Field(description="ジャンル")
     pages: List[ComicPageScript] = Field(description="ページ構成")
 
 

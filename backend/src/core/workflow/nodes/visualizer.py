@@ -40,7 +40,6 @@ logger = logging.getLogger(__name__)
 
 ASPECT_RATIO_BY_MODE = {
     "slide_render": "16:9",
-    "infographic_render": "1:1",
     "document_layout_render": "4:5",
     "comic_page_render": "9:16",
     "character_sheet_render": "2:3",
@@ -143,6 +142,13 @@ def _default_visualizer_mode(product_type: str | None) -> str:
     return "slide_render"
 
 
+def _normalize_visualizer_mode(mode: str) -> str:
+    if mode == "infographic_render":
+        logger.info("Visualizer mode 'infographic_render' is deprecated. Fallback to 'slide_render'.")
+        return "slide_render"
+    return mode
+
+
 def _resolve_aspect_ratio(mode: str, step: dict[str, Any], state_ratio: str | None = None) -> str:
     if state_ratio:
         return state_ratio
@@ -179,10 +185,10 @@ def _writer_output_to_slides(writer_data: dict, mode: str) -> list[dict]:
     if not isinstance(writer_data, dict):
         return []
 
-    if mode in {"slide_render", "infographic_render"} and isinstance(writer_data.get("slides"), list):
+    if mode == "slide_render" and isinstance(writer_data.get("slides"), list):
         return writer_data.get("slides", [])
 
-    if mode == "infographic_render" and isinstance(writer_data.get("blocks"), list):
+    if mode == "slide_render" and isinstance(writer_data.get("blocks"), list):
         slides: list[dict] = []
         title = writer_data.get("title", "Infographic")
         for idx, block in enumerate(writer_data.get("blocks", []), start=1):
@@ -226,18 +232,37 @@ def _writer_output_to_slides(writer_data: dict, mode: str) -> list[dict]:
                     "OutfitVariants: " + ", ".join(str(v).strip() for v in outfit_variants if str(v).strip())
                 )
 
+            color_palette = chara.get("color_palette")
+            if isinstance(color_palette, dict):
+                color_bits = []
+                for key in ("main", "sub", "accent"):
+                    value = color_palette.get(key)
+                    if isinstance(value, str) and value.strip():
+                        color_bits.append(f"{key}:{value.strip()}")
+                if color_bits:
+                    details.append("Palette: " + ", ".join(color_bits))
+
+            forbidden_drift = chara.get("forbidden_drift")
+            if isinstance(forbidden_drift, list) and forbidden_drift:
+                details.append(
+                    "Forbidden: " + ", ".join(str(v).strip() for v in forbidden_drift[:4] if str(v).strip())
+                )
+
             slides.append(
                 {
                     "slide_number": idx,
                     "title": f"Character Sheet: {chara.get('name', f'Character {idx}')}",
-                    "description": chara.get("appearance_core") or chara.get("appearance", ""),
+                    "description": chara.get("face_hair_anchors") or chara.get("appearance_core") or chara.get("appearance", ""),
                     "bullet_points": [
-                        f"Role: {chara.get('role', '')}",
-                        f"Personality: {chara.get('personality', '')}",
+                        f"Role: {chara.get('story_role', chara.get('role', ''))}",
+                        f"Personality: {chara.get('core_personality', chara.get('personality', ''))}",
                         f"Motivation: {chara.get('motivation', '')}",
+                        f"Weakness/Fear: {chara.get('weakness_or_fear', '')}",
+                        f"Silhouette: {chara.get('silhouette_signature', '')}",
                         *details[:6],
                     ],
-                    "key_message": ", ".join(chara.get("visual_keywords", [])[:5]) if isinstance(chara.get("visual_keywords"), list) else None,
+                    "key_message": chara.get("silhouette_signature")
+                    or ", ".join(chara.get("visual_keywords", [])[:5]) if isinstance(chara.get("visual_keywords"), list) else None,
                     "character_profile": chara,
                 }
             )
@@ -253,14 +278,34 @@ def _writer_output_to_slides(writer_data: dict, mode: str) -> list[dict]:
             panel_descriptions = []
             for p in panels:
                 if isinstance(p, dict):
-                    panel_descriptions.append(str(p.get("scene_description", "")))
+                    panel_number = p.get("panel_number")
+                    if isinstance(p.get("scene_description"), str) and str(p.get("scene_description")).strip():
+                        summary = str(p.get("scene_description")).strip()
+                    else:
+                        detail_parts = []
+                        for label, key in (
+                            ("前景", "foreground"),
+                            ("背景", "background"),
+                            ("構図", "composition"),
+                            ("カメラ", "camera"),
+                            ("照明", "lighting"),
+                        ):
+                            value = p.get(key)
+                            if isinstance(value, str) and value.strip() and value.strip() != "未指定":
+                                detail_parts.append(f"{label}: {value.strip()}")
+                        summary = " / ".join(detail_parts) if detail_parts else "詳細未指定"
+                    prefix = f"P{panel_number}" if isinstance(panel_number, int) else "P?"
+                    panel_descriptions.append(f"{prefix}: {summary}")
+            page_description = page.get("page_goal")
+            if not (isinstance(page_description, str) and page_description.strip()):
+                page_description = panel_descriptions[0] if panel_descriptions else ""
             slides.append(
                 {
                     "slide_number": page_number,
                     "title": f"Comic Page {page_number}",
-                    "description": page.get("page_goal", ""),
+                    "description": page_description,
                     "bullet_points": panel_descriptions[:5],
-                    "key_message": page.get("page_goal"),
+                    "key_message": page_description,
                 }
             )
         return slides
@@ -325,6 +370,231 @@ def _writer_output_to_slides(writer_data: dict, mode: str) -> list[dict]:
 
     return []
 
+
+def _text_or_default(value: Any, default: str = "未指定") -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+    return default
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _find_comic_page_payload(writer_data: dict[str, Any], page_number: int) -> dict[str, Any] | None:
+    pages = writer_data.get("pages")
+    if not isinstance(pages, list):
+        return None
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        raw_number = page.get("page_number")
+        if isinstance(raw_number, int) and raw_number == page_number:
+            return page
+    if 1 <= page_number <= len(pages) and isinstance(pages[page_number - 1], dict):
+        return pages[page_number - 1]
+    return None
+
+
+def _find_character_payload(
+    writer_data: dict[str, Any],
+    index: int,
+    fallback_profile: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    characters = writer_data.get("characters")
+    if isinstance(characters, list) and 1 <= index <= len(characters):
+        candidate = characters[index - 1]
+        if isinstance(candidate, dict):
+            return candidate
+    if isinstance(fallback_profile, dict):
+        return fallback_profile
+    return None
+
+
+def _build_comic_page_prompt_text(
+    *,
+    slide_number: int,
+    slide_content: dict[str, Any],
+    writer_data: dict[str, Any],
+    aspect_ratio: str,
+) -> str:
+    page = _find_comic_page_payload(writer_data, slide_number)
+    lines: list[str] = [
+        f"#Page{slide_number}",
+        "Mode: comic_page_render",
+        f"Aspect ratio: {aspect_ratio}",
+        "",
+    ]
+
+    page_goal = ""
+    panels: list[dict[str, Any]] = []
+    if isinstance(page, dict):
+        page_goal = _text_or_default(page.get("page_goal"), "")
+        raw_panels = page.get("panels")
+        if isinstance(raw_panels, list):
+            panels = [item for item in raw_panels if isinstance(item, dict)]
+
+    if not page_goal:
+        page_goal = _text_or_default(slide_content.get("description"), "未指定")
+    lines.extend(["[Page Goal]", page_goal, "", "[Panels]"])
+
+    if not panels:
+        for bullet in _string_list(slide_content.get("bullet_points"))[:5]:
+            lines.append(f"- {bullet}")
+        if len(lines) == 7:
+            lines.append("- 未指定")
+        return "\n".join(lines)
+
+    for idx, panel in enumerate(panels, start=1):
+        panel_number = panel.get("panel_number")
+        panel_label = panel_number if isinstance(panel_number, int) and panel_number > 0 else idx
+        lines.append(f"Panel {panel_label}")
+        lines.append(f"- Foreground: {_text_or_default(panel.get('foreground'))}")
+        lines.append(f"- Background: {_text_or_default(panel.get('background'))}")
+        lines.append(f"- Composition: {_text_or_default(panel.get('composition'))}")
+        lines.append(f"- Camera: {_text_or_default(panel.get('camera'))}")
+        lines.append(f"- Lighting: {_text_or_default(panel.get('lighting'))}")
+        dialogue = _string_list(panel.get("dialogue"))
+        if dialogue:
+            lines.append("- Dialogue:")
+            for line in dialogue:
+                lines.append(f"  - {line}")
+        negative_constraints = _string_list(panel.get("negative_constraints"))
+        if negative_constraints:
+            lines.append("- Negative constraints:")
+            for item in negative_constraints:
+                lines.append(f"  - {item}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+def _build_character_sheet_prompt_text(
+    *,
+    slide_number: int,
+    slide_content: dict[str, Any],
+    writer_data: dict[str, Any],
+    story_framework_data: dict[str, Any],
+    aspect_ratio: str,
+    layout_template_enabled: bool,
+) -> str:
+    character_profile = _find_character_payload(
+        writer_data,
+        slide_number,
+        slide_content.get("character_profile") if isinstance(slide_content, dict) else None,
+    ) or {}
+
+    story_payload = (
+        story_framework_data.get("story_framework")
+        if isinstance(story_framework_data.get("story_framework"), dict)
+        else story_framework_data
+    )
+    art_style = story_payload.get("art_style_policy") if isinstance(story_payload, dict) else {}
+
+    lines: list[str] = [
+        f"#Character{slide_number}",
+        "Mode: character_sheet_render",
+        f"Aspect ratio: {aspect_ratio}",
+        "",
+        "[Character]",
+        f"- Name: {_text_or_default(character_profile.get('name'))}",
+        f"- Role: {_text_or_default(character_profile.get('story_role') or character_profile.get('role'))}",
+        f"- Core personality: {_text_or_default(character_profile.get('core_personality') or character_profile.get('personality'))}",
+        f"- Motivation: {_text_or_default(character_profile.get('motivation'))}",
+        f"- Weakness or fear: {_text_or_default(character_profile.get('weakness_or_fear'))}",
+        f"- Speech style: {_text_or_default(character_profile.get('speech_style'), '指定なし')}",
+        f"- Silhouette signature: {_text_or_default(character_profile.get('silhouette_signature'))}",
+        f"- Face and hair anchors: {_text_or_default(character_profile.get('face_hair_anchors'))}",
+        f"- Costume anchors: {_text_or_default(character_profile.get('costume_anchors'))}",
+    ]
+
+    color_palette = character_profile.get("color_palette")
+    if isinstance(color_palette, dict):
+        palette_items = [
+            f"{key}={value.strip()}"
+            for key in ("main", "sub", "accent")
+            if isinstance((value := color_palette.get(key)), str) and value.strip()
+        ]
+        if palette_items:
+            lines.append("- Color palette: " + ", ".join(palette_items))
+
+    signature_items = _string_list(character_profile.get("signature_items"))
+    if signature_items:
+        lines.append("- Signature items:")
+        for item in signature_items:
+            lines.append(f"  - {item}")
+
+    forbidden_drift = _string_list(character_profile.get("forbidden_drift"))
+    if forbidden_drift:
+        lines.append("- Forbidden drift:")
+        for item in forbidden_drift:
+            lines.append(f"  - {item}")
+
+    lines.extend(
+        [
+            "",
+            "[Style]",
+            f"- Line style: {_text_or_default(art_style.get('line_style'), '指定なし') if isinstance(art_style, dict) else '指定なし'}",
+            f"- Shading style: {_text_or_default(art_style.get('shading_style'), '指定なし') if isinstance(art_style, dict) else '指定なし'}",
+        ]
+    )
+
+    style_negatives = (
+        _string_list(art_style.get("negative_constraints"))
+        if isinstance(art_style, dict)
+        else []
+    )
+    if style_negatives:
+        lines.append("- Global negative constraints:")
+        for item in style_negatives:
+            lines.append(f"  - {item}")
+
+    if layout_template_enabled:
+        lines.extend(["", "[Layout Template]", "- Provided reference template must be followed as-is."])
+
+    return "\n".join(lines).rstrip()
+
+
+def _build_mechanical_comic_prompt_item(
+    *,
+    mode: str,
+    slide_number: int,
+    slide_content: dict[str, Any],
+    writer_data: dict[str, Any],
+    story_framework_data: dict[str, Any],
+    aspect_ratio: str,
+    layout_template_enabled: bool,
+) -> ImagePrompt:
+    if mode == "character_sheet_render":
+        prompt_text = _build_character_sheet_prompt_text(
+            slide_number=slide_number,
+            slide_content=slide_content,
+            writer_data=writer_data,
+            story_framework_data=story_framework_data,
+            aspect_ratio=aspect_ratio,
+            layout_template_enabled=layout_template_enabled,
+        )
+    else:
+        prompt_text = _build_comic_page_prompt_text(
+            slide_number=slide_number,
+            slide_content=slide_content,
+            writer_data=writer_data,
+            aspect_ratio=aspect_ratio,
+        )
+
+    return ImagePrompt(
+        slide_number=slide_number,
+        layout_type="other",
+        structured_prompt=None,
+        image_generation_prompt=prompt_text,
+        rationale="Writer出力を機械的に整形したプロンプトを使用。",
+    )
+
+
 def _sanitize_filename(title: str) -> str:
     # Remove filesystem-unfriendly chars, keep unicode
     safe = re.sub(r"[\\\\/:*?\"<>|]", "_", title).strip()
@@ -353,15 +623,23 @@ async def _get_thread_title(thread_id: str | None, owner_uid: str | None) -> str
 
 def compile_structured_prompt(
     structured: StructuredImagePrompt,
-    slide_number: int = 1
+    slide_number: int = 1,
+    mode: str = "slide_render",
 ) -> str:
     """
     構造化プロンプトをMarkdownスライド形式の最終プロンプトに変換。
     """
     prompt_lines = []
     
-    # Slide Header: # Slide1: Title Slide
-    prompt_lines.append(f"# Slide{slide_number}: {structured.slide_type}")
+    normalized_mode = _normalize_visualizer_mode(mode)
+    if normalized_mode in {"document_layout_render", "comic_page_render"}:
+        header = f"#Page{slide_number}"
+    elif normalized_mode == "character_sheet_render":
+        header = f"#Character{slide_number}"
+    else:
+        header = f"#Slide{slide_number}"
+    prompt_lines.append(header)
+    prompt_lines.append(f"Type: {structured.slide_type}")
     
     # Main Title: ## The Evolution of Japan's Economy
     prompt_lines.append(f"## {structured.main_title}")
@@ -402,7 +680,7 @@ def compile_structured_prompt(
     
     # 最終プロンプト生成
     final_prompt = "\n".join(prompt_lines)
-    logger.debug(f"Compiled slide prompt ({len(final_prompt)} chars)")
+    logger.debug(f"Compiled visual prompt ({len(final_prompt)} chars)")
     
     return final_prompt
 
@@ -416,6 +694,7 @@ async def process_single_slide(
     seed_override: int | None = None,
     session_id: str | None = None,
     aspect_ratio: str | None = None,
+    mode: str = "slide_render",
 ) -> tuple[ImagePrompt, bytes | None]:
     """
     Helper function to process a single slide: generation or edit.
@@ -429,7 +708,8 @@ async def process_single_slide(
         if prompt_item.structured_prompt is not None:
             final_prompt = compile_structured_prompt(
                 prompt_item.structured_prompt,
-                slide_number=prompt_item.slide_number
+                slide_number=prompt_item.slide_number,
+                mode=mode,
             )
             logger.info(f"Using structured prompt for slide {prompt_item.slide_number}")
         elif prompt_item.image_generation_prompt:
@@ -614,7 +894,9 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         logger.error("Visualizer called but no in_progress step found.")
         return Command(goto="supervisor", update={})
 
-    mode = str(current_step.get("mode") or _default_visualizer_mode(state.get("product_type")))
+    mode = _normalize_visualizer_mode(
+        str(current_step.get("mode") or _default_visualizer_mode(state.get("product_type")))
+    )
     aspect_ratio = _resolve_aspect_ratio(mode, current_step, state.get("aspect_ratio"))
     artifacts = state.get("artifacts", {}) or {}
     selected_image_inputs = state.get("selected_image_inputs") or []
@@ -782,61 +1064,72 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                 if use_local_character_sheet_template
                 else (plan_slide.reference_url if plan_slide else None)
             )
-            prompt_context = {
-                "slide_number": slide_number,
-                "mode": mode,
-                "planned_inputs": dependency_context["planned_inputs"],
-                "depends_on_step_ids": dependency_context["depends_on_step_ids"],
-                "resolved_dependency_artifacts": dependency_context["resolved_dependency_artifacts"],
-                "resolved_research_inputs": dependency_context["resolved_research_inputs"],
-                "writer_slide": slide_content,
-                "character_profile": slide_content.get("character_profile") if isinstance(slide_content, dict) else None,
-                "design_direction": design_dir,
-                "aspect_ratio": aspect_ratio,
-                "story_framework": story_framework_data if mode == "character_sheet_render" else None,
-                "character_sheet": character_sheet_data if mode == "character_sheet_render" else None,
-                "data_analyst": data_analyst_data,
-                "attachments": attachments,
-                "selected_inputs": [
-                    *(plan_slide.selected_inputs if plan_slide else []),
-                    *(
-                        [f"SystemTemplate: {CHARACTER_SHEET_TEMPLATE_ID}"]
-                        if use_local_character_sheet_template
-                        else []
-                    ),
-                    *[
-                        str(item.get("image_url"))
-                        for item in selected_image_inputs
-                        if isinstance(item, dict) and item.get("image_url")
-                    ],
-                ],
-                "reference_policy": reference_policy,
-                "reference_url": reference_url,
-                "layout_template_id": CHARACTER_SHEET_TEMPLATE_ID if use_local_character_sheet_template else None,
-                "generation_notes": plan_slide.generation_notes if plan_slide else None,
-                "master_style": master_style,
-                "previous_generations": previous_generations or None
-            }
-
-            prompt_state = {"messages": []}
-            prompt_messages = apply_prompt_template("visualizer_prompt", prompt_state)
-            prompt_messages.append(
-                HumanMessage(
-                    content=json.dumps(prompt_context, ensure_ascii=False, indent=2),
-                    name="supervisor"
+            if mode in {"comic_page_render", "character_sheet_render"}:
+                prompt_item = _build_mechanical_comic_prompt_item(
+                    mode=mode,
+                    slide_number=slide_number,
+                    slide_content=slide_content,
+                    writer_data=writer_data,
+                    story_framework_data=story_framework_data,
+                    aspect_ratio=aspect_ratio,
+                    layout_template_enabled=use_local_character_sheet_template,
                 )
-            )
+            else:
+                prompt_context = {
+                    "slide_number": slide_number,
+                    "mode": mode,
+                    "planned_inputs": dependency_context["planned_inputs"],
+                    "depends_on_step_ids": dependency_context["depends_on_step_ids"],
+                    "resolved_dependency_artifacts": dependency_context["resolved_dependency_artifacts"],
+                    "resolved_research_inputs": dependency_context["resolved_research_inputs"],
+                    "writer_slide": slide_content,
+                    "character_profile": slide_content.get("character_profile") if isinstance(slide_content, dict) else None,
+                    "design_direction": design_dir,
+                    "aspect_ratio": aspect_ratio,
+                    "story_framework": story_framework_data if mode == "character_sheet_render" else None,
+                    "character_sheet": character_sheet_data if mode == "character_sheet_render" else None,
+                    "data_analyst": data_analyst_data,
+                    "attachments": attachments,
+                    "selected_inputs": [
+                        *(plan_slide.selected_inputs if plan_slide else []),
+                        *(
+                            [f"SystemTemplate: {CHARACTER_SHEET_TEMPLATE_ID}"]
+                            if use_local_character_sheet_template
+                            else []
+                        ),
+                        *[
+                            str(item.get("image_url"))
+                            for item in selected_image_inputs
+                            if isinstance(item, dict) and item.get("image_url")
+                        ],
+                    ],
+                    "reference_policy": reference_policy,
+                    "reference_url": reference_url,
+                    "layout_template_id": CHARACTER_SHEET_TEMPLATE_ID if use_local_character_sheet_template else None,
+                    "generation_notes": plan_slide.generation_notes if plan_slide else None,
+                    "master_style": master_style,
+                    "previous_generations": previous_generations or None
+                }
 
-            prompt_stream_config = config.copy()
-            prompt_stream_config["run_name"] = "visualizer_prompt"
+                prompt_state = {"messages": []}
+                prompt_messages = apply_prompt_template("visualizer_prompt", prompt_state)
+                prompt_messages.append(
+                    HumanMessage(
+                        content=json.dumps(prompt_context, ensure_ascii=False, indent=2),
+                        name="supervisor"
+                    )
+                )
 
-            prompt_item: ImagePrompt = await run_structured_output(
-                llm=llm,
-                schema=ImagePrompt,
-                messages=prompt_messages,
-                config=prompt_stream_config,
-                repair_hint="Schema: ImagePrompt. No extra text."
-            )
+                prompt_stream_config = config.copy()
+                prompt_stream_config["run_name"] = "visualizer_prompt"
+
+                prompt_item = await run_structured_output(
+                    llm=llm,
+                    schema=ImagePrompt,
+                    messages=prompt_messages,
+                    config=prompt_stream_config,
+                    repair_hint="Schema: ImagePrompt. No extra text."
+                )
 
             # Enforce slide number and layout if provided by planner
             prompt_item.slide_number = slide_number
@@ -849,7 +1142,8 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
             if prompt_item.structured_prompt is not None:
                 compiled_prompt = compile_structured_prompt(
                     prompt_item.structured_prompt,
-                    slide_number=slide_number
+                    slide_number=slide_number,
+                    mode=mode,
                 )
             else:
                 compiled_prompt = prompt_item.image_generation_prompt or ""
@@ -925,7 +1219,8 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                 override_reference_bytes=reference_bytes,
                 override_reference_url=reference_url,
                 session_id=session_id,
-                aspect_ratio=aspect_ratio
+                aspect_ratio=aspect_ratio,
+                mode=mode,
             )
 
             updated_prompts.append(processed)
