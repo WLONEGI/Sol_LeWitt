@@ -42,7 +42,7 @@ const getAuthErrorMessage = (code?: string, fallback?: string) => {
         case "auth/network-request-failed":
             return "ネットワークエラーが発生しました。接続を確認してください"
         default:
-            return fallback || "ログインに失敗しました"
+            return fallback || (code ? `ログインに失敗しました (${code})` : "ログインに失敗しました")
     }
 }
 
