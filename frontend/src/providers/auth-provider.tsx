@@ -57,6 +57,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const bypassAuthForE2E = process.env.NEXT_PUBLIC_E2E_BYPASS_AUTH === "1"
 
     useEffect(() => {
+        const firebaseConfig = {
+            apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+            authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+            projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+            appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+        }
+
+        console.log("Firebase Config Initialization:", {
+            hasApiKey: !!process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+            hasAuthDomain: !!process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+            env: process.env.NODE_ENV
+        })
+
         if (bypassAuthForE2E) {
             const mockUser = {
                 uid: "e2e-user",
