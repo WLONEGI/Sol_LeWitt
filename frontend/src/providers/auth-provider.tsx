@@ -72,7 +72,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
 
         // Build-time or missing config guard
-        if (typeof window === "undefined" || !auth) {
+        if (typeof window === "undefined") {
+            setLoading(false)
+            return
+        }
+
+        // Check if Firebase auth is initialized
+        if (!auth) {
+            console.error("Firebase Auth is not initialized. Check firebase/client.ts configuration.")
+            setError("Firebase Auth is not initialized.")
             setLoading(false)
             return
         }
@@ -118,6 +126,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             return
         }
         setError(null)
+
+        if (!auth || !googleProvider) {
+            const msg = "Firebase認証が初期化されていません。環境変数設定を確認してください。"
+            console.error(msg)
+            setError(msg)
+            return
+        }
+
         try {
             await signInWithPopup(auth, googleProvider)
         } catch (error: unknown) {
