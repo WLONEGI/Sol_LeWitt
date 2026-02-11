@@ -17,11 +17,18 @@ let app: any;
 let auth: any;
 let googleProvider: any;
 
-if (typeof window !== "undefined" && isConfigValid) {
-    app = getApps().length ? getApp() : initializeApp(firebaseConfig)
-    auth = getAuth(app)
-    googleProvider = new GoogleAuthProvider()
-    googleProvider.setCustomParameters({ prompt: "select_account" })
+if (typeof window !== "undefined") {
+    console.log("Firebase client.ts: Initializing...", {
+        hasApiKey: !!firebaseConfig.apiKey,
+        isConfigValid
+    })
+
+    if (isConfigValid) {
+        app = getApps().length ? getApp() : initializeApp(firebaseConfig)
+        auth = getAuth(app)
+        googleProvider = new GoogleAuthProvider()
+        googleProvider.setCustomParameters({ prompt: "select_account" })
+    }
 }
 
 export { auth, googleProvider }
