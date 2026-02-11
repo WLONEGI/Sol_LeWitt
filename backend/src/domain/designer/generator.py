@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 
 def _get_client() -> genai.Client:
     """Initialize and return the GenAI client."""
+    if settings.AI_STUDIO_API_KEY:
+        logger.info("Initializing GenAI client with AI Studio API Key.")
+        return genai.Client(api_key=settings.AI_STUDIO_API_KEY)
+    
+    logger.info("Initializing GenAI client with Vertex AI.")
     return genai.Client(
         vertexai=True,
         project=settings.VERTEX_PROJECT_ID,

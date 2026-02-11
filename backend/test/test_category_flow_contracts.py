@@ -1,11 +1,9 @@
-import asyncio
 import json
 
 import pytest
 from langchain_core.messages import HumanMessage
 
 from src.app.app import _build_snapshot_payload
-from src.core.workflow.nodes.orchestration import patch_gate_node, patch_planner_node
 
 
 def _image_candidates(count: int) -> list[dict]:
@@ -160,62 +158,3 @@ def test_category_fixed_flow_snapshot_contracts(
     selected_inputs = visual_events[0]["data"]["selected_inputs"]
     assert isinstance(selected_inputs, list) and len(selected_inputs) == 1
     assert selected_inputs[0]["image_url"] == selected["image_url"]
-
-
-@pytest.mark.parametrize(
-    ("product_type", "refine_message", "expected_asset_unit"),
-    [
-        ("slide_infographic", "2枚目の色調を暖色に修正して", "slide:2"),
-        ("document_design", "3ページの配色を落ち着いたトーンに修正して", "page:3"),
-        ("comic", "4コマ目の色味を調整して", "panel:4"),
-    ],
-)
-def test_category_fixed_flow_refine_patch_contracts(
-    product_type: str,
-    refine_message: str,
-    expected_asset_unit: str,
-) -> None:
-    base_state = {
-        "messages": [HumanMessage(content=refine_message)],
-        "request_intent": "refine",
-        "product_type": product_type,
-        "plan": [
-            {
-                "id": 10,
-                "status": "pending",
-                "capability": "visualizer",
-                "mode": "slide_render",
-                "instruction": "既存成果物を更新する",
-                "title": "Visual Update",
-                "description": "ビジュアル更新",
-                "inputs": ["existing_artifacts"],
-                "outputs": ["patched_visual"],
-                "preconditions": [],
-                "validation": ["期待する見た目に更新される"],
-                "success_criteria": ["期待する見た目に更新される"],
-                "fallback": [],
-                "depends_on": [],
-            }
-        ],
-        "artifacts": {},
-    }
-
-    patch_cmd = asyncio.run(patch_planner_node(base_state, {}))
-    assert patch_cmd.goto == "patch_gate"
-    patch_ops = patch_cmd.update["plan_patch_log"]
-    assert len(patch_ops) == 1
-    patch_op = patch_ops[0]
-    assert patch_op["op"] == "edit_pending"
-    assert patch_op["target_step_id"] == 10
-    assert patch_op["payload"]["target_scope"]["asset_unit_ids"] == [expected_asset_unit]
-
-    gate_state = {
-        **base_state,
-        "plan_patch_log": patch_ops,
-    }
-    gate_cmd = asyncio.run(patch_gate_node(gate_state, {}))
-    assert gate_cmd.goto == "supervisor"
-
-    patched_plan = gate_cmd.update["plan"]
-    assert patched_plan[0]["target_scope"]["asset_unit_ids"] == [expected_asset_unit]
-    assert "追加修正指示" in patched_plan[0]["instruction"]

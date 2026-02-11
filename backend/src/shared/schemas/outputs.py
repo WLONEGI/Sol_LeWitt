@@ -7,12 +7,11 @@ from pydantic import BaseModel, Field, model_validator
 
 
 # === Orchestration Contracts (v1) ===
-ProductType = Literal["slide_infographic", "document_design", "comic"]
+ProductType = Literal["slide", "design", "comic"]
 IntentType = Literal["new", "refine", "regenerate"]
 TaskCapability = Literal["writer", "visualizer", "researcher", "data_analyst"]
 TaskStatus = Literal["pending", "in_progress", "completed", "blocked"]
 ArtifactStatus = Literal["streaming", "completed", "failed"]
-PlanPatchOpType = Literal["edit_pending", "split_pending", "append_tail"]
 
 
 class TargetScope(BaseModel):
@@ -27,13 +26,6 @@ class TargetScope(BaseModel):
     panel_numbers: List[int] = Field(default_factory=list)
     character_ids: List[str] = Field(default_factory=list)
     artifact_ids: List[str] = Field(default_factory=list)
-
-
-class PlanPatchOp(BaseModel):
-    """Frozen Planに対する許可済み差分操作."""
-    op: PlanPatchOpType
-    target_step_id: Optional[int] = None
-    payload: Dict[str, Any] = Field(default_factory=dict)
 
 
 class OrchestrationTaskStep(BaseModel):

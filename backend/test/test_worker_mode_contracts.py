@@ -62,7 +62,7 @@ def test_planner_normalize_step_uses_canonical_v2() -> None:
     assert steps[0]["instruction"] == "漫画のページ構成を作る"
 
 
-def test_planner_normalize_comic_enforces_required_sequence() -> None:
+def test_planner_normalize_comic_keeps_model_sequence_in_hybrid_mode() -> None:
     steps = _normalize_plan_steps(
         [
             {
@@ -83,20 +83,14 @@ def test_planner_normalize_comic_enforces_required_sequence() -> None:
         product_type="comic",
     )
 
-    required_modes = [
-        ("writer", "story_framework"),
-        ("writer", "character_sheet"),
-        ("visualizer", "character_sheet_render"),
+    assert [(step["capability"], step["mode"]) for step in steps] == [
         ("writer", "comic_script"),
         ("visualizer", "comic_page_render"),
     ]
-    first_five = [(steps[i]["capability"], steps[i]["mode"]) for i in range(5)]
-    assert first_five == required_modes
-    assert steps[3]["depends_on"] == [steps[2]["id"]]
-    assert steps[4]["depends_on"] == [steps[3]["id"]]
+    assert steps[1]["depends_on"] == [1]
 
 
-def test_planner_normalize_comic_preserves_non_required_steps() -> None:
+def test_planner_normalize_comic_preserves_steps_without_auto_insertion() -> None:
     steps = _normalize_plan_steps(
         [
             {
@@ -126,10 +120,8 @@ def test_planner_normalize_comic_preserves_non_required_steps() -> None:
 
     assert steps[0]["capability"] == "researcher"
     assert steps[0]["mode"] == "text_search"
-    assert [(step["capability"], step["mode"]) for step in steps[1:6]] == [
+    assert [(step["capability"], step["mode"]) for step in steps] == [
+        ("researcher", "text_search"),
         ("writer", "story_framework"),
-        ("writer", "character_sheet"),
-        ("visualizer", "character_sheet_render"),
         ("writer", "comic_script"),
-        ("visualizer", "comic_page_render"),
     ]

@@ -1,7 +1,7 @@
 import { BookOpen, Palette, Presentation, type LucideIcon } from "lucide-react"
 
 export type QuickActionId = "slide" | "design" | "comics"
-export type ProductType = "slide_infographic" | "document_design" | "comic"
+export type ProductType = "slide" | "design" | "comic"
 
 export interface QuickActionConfig {
   id: QuickActionId
@@ -18,7 +18,7 @@ export interface QuickActionConfig {
 export const QUICK_ACTIONS: QuickActionConfig[] = [
   {
     id: "slide",
-    productType: "slide_infographic",
+    productType: "slide",
     title: "Create Slide",
     pillLabel: "Create Slide",
     icon: Presentation,
@@ -33,7 +33,7 @@ export const QUICK_ACTIONS: QuickActionConfig[] = [
   },
   {
     id: "design",
-    productType: "document_design",
+    productType: "design",
     title: "Design",
     pillLabel: "Design",
     icon: Palette,

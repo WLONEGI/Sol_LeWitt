@@ -29,7 +29,7 @@ export function ArtifactContainer({
         <div className="h-full w-full flex flex-col min-w-0">
             <div className="flex-1 flex flex-col bg-transparent overflow-hidden relative group/window">
                 {/* Minimalist header - Matched to Chat Header style */}
-                <div className="h-12 border-b border-border/50 bg-background/80 backdrop-blur-sm flex items-center px-4 justify-between shrink-0">
+                <div className="h-12 border-b border-border/50 bg-white/90 backdrop-blur-sm flex items-center px-4 justify-between shrink-0">
                     <div className="flex items-center gap-3 min-w-0">
                         <div className="flex items-center gap-2 min-w-0">
                             <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />

@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     VERTEX_LOCATION: str | None = Field(default=None)
 
     # ===========================
+    # AI Studio Configuration
+    # ===========================
+    AI_STUDIO_API_KEY: str | None = Field(default=None, alias="AI_STUDIO")
+
+    # ===========================
     # External Services
     # ===========================
     CHROME_INSTANCE_PATH: str | None = Field(default=None)

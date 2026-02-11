@@ -43,6 +43,8 @@ FIXED_FALLBACK = [
     "switch_mode_minimal_safe_output",
 ]
 
+SUPPORTED_PRODUCT_TYPES = {"slide", "design", "comic"}
+
 
 def _step_signature(step: dict[str, Any]) -> tuple[str, str]:
     return capability_from_any(step), str(step.get("mode") or "")
@@ -274,12 +276,25 @@ def _extract_latest_user_text(state: State) -> str:
     return ""
 
 
+def _detect_intent(text: str) -> str:
+    lowered = text.lower()
+    if any(keyword in text for keyword in ("再生成", "作り直", "やり直し")) or "regenerate" in lowered:
+        return "regenerate"
+    if any(keyword in text for keyword in ("修正", "変更", "調整", "直して")) or any(
+        keyword in lowered for keyword in ("fix", "refine", "update")
+    ):
+        return "refine"
+    return "new"
+
+
 def _normalize_plan_steps(plan_data: list[dict], product_type: str | None) -> list[dict]:
-    """Normalize planner output to canonical V2 steps."""
-    normalized = normalize_plan_v2(plan_data, product_type=product_type)
-    if product_type == "comic":
-        return _enforce_comic_required_sequence(normalized)
-    return normalized
+    """Normalize planner output to canonical V2 steps.
+
+    Hybrid policy:
+    - Keep structural normalization hard.
+    - Keep sequence/content decisions soft (AI judgment).
+    """
+    return normalize_plan_v2(plan_data, product_type=product_type)
 
 
 def _step_text_blob(step: dict[str, Any]) -> str:
@@ -330,22 +345,50 @@ def _missing_required_research_step(
 async def planner_node(state: State, config: RunnableConfig) -> Command[Literal["supervisor", "__end__"]]:
     """Planner node - uses structured output for reliable JSON execution plan."""
     logger.info("Planner creating execution plan")
-    
+
+    product_type = state.get("product_type") if isinstance(state.get("product_type"), str) else None
+    if product_type not in SUPPORTED_PRODUCT_TYPES:
+        logger.warning("Planner aborted because product_type is invalid: %s", product_type)
+        return Command(
+            update={
+                "messages": [
+                    AIMessage(
+                        content="プロダクト種別が未確定のため、slide/design/comic を指定してください。",
+                        name="planner",
+                    )
+                ]
+            },
+            goto="__end__",
+        )
+
+    latest_user_text = _extract_latest_user_text(state)
+    request_intent = (
+        state.get("request_intent")
+        if isinstance(state.get("request_intent"), str) and state.get("request_intent") in {"new", "refine", "regenerate"}
+        else _detect_intent(latest_user_text)
+    )
+    has_existing_plan = bool(state.get("plan"))
+    planning_mode = "replan" if has_existing_plan and request_intent in {"refine", "regenerate"} else "initial"
+
     context_state = deepcopy(state)
+    context_state["product_type"] = product_type
+    context_state["request_intent"] = request_intent
+    context_state["planning_mode"] = planning_mode
+    context_state["latest_user_text"] = latest_user_text
     context_state["plan"] = json.dumps(state.get("plan", []), ensure_ascii=False, indent=2)
-    
+
     messages = apply_prompt_template("planner", context_state)
     logger.debug(f"[DEBUG] Planner Input Messages: {messages}")
-    
+
     llm = get_llm_by_type("reasoning", streaming=True)
-    
+
     try:
         logger.info("Planner: Calling LLM for structured output (streaming=True)")
-        
+
         # Add run_name for better visibility in stream events
         stream_config = config.copy()
         stream_config["run_name"] = "planner"
-        
+
         # Stream tokens via on_chat_model_stream; keep final JSON in-buffer
         full_text = ""
         async for chunk in llm.astream(messages, config=stream_config):
@@ -367,28 +410,16 @@ async def planner_node(state: State, config: RunnableConfig) -> Command[Literal[
                 config=stream_config,
                 repair_hint="Schema: PlannerOutput. No extra text."
             )
-        
+
         logger.debug(f"[DEBUG] Planner Output: {planner_output}")
         plan_data = [step.model_dump(exclude_none=True) for step in planner_output.steps]
-        plan_data = _normalize_plan_steps(plan_data, product_type=state.get("product_type"))
+        plan_data = _normalize_plan_steps(plan_data, product_type=product_type)
 
-        latest_user_text = _extract_latest_user_text(state)
         missing_research, reason = _missing_required_research_step(plan_data, latest_user_text)
         if missing_research:
-            logger.error("Planner output missing explicit researcher step: %s", reason)
-            return Command(
-                update={
-                    "messages": [
-                        AIMessage(
-                            content=(
-                                "Researchが必要な要件ですが、Plannerに明示的なResearcherステップがありません。"
-                                "要件を明示して再依頼してください（例: 出典調査を含める）。"
-                            ),
-                            name="planner",
-                        )
-                    ]
-                },
-                goto="__end__",
+            logger.warning(
+                "Planner output missing explicit researcher step (soft warning in hybrid mode): %s",
+                reason,
             )
 
         logger.info(f"Plan generated successfully with {len(plan_data)} steps.")
@@ -407,6 +438,7 @@ async def planner_node(state: State, config: RunnableConfig) -> Command[Literal[
                         name="planner_ui"
                     )
                 ],
+                "request_intent": request_intent,
                 "plan": plan_data,
                 "artifacts": {}
             },

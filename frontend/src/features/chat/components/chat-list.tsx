@@ -11,7 +11,7 @@ import { ImageSearchResults } from "./image-search-results";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { useArtifactStore } from "@/features/preview/stores/artifact";
-import { CheckCircle2, ChevronDown, ChevronUp, Circle, Loader2 } from "lucide-react";
+import { ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Circle, Loader2, MessageSquare } from "lucide-react";
 import { TimelineEvent } from "../types/timeline";
 import type { PlanStepStatus, PlanUpdateData } from "../types/plan";
 import { normalizePlanStepStatus, normalizePlanUpdateData } from "../types/plan";
@@ -28,6 +28,7 @@ interface ChatListProps {
     queuedUserMessage?: string | null;
     isLoading?: boolean;
     status?: "ready" | "submitted" | "streaming" | "error";
+    onSendFollowup?: (prompt: string) => void;
     className?: string;
 }
 
@@ -52,6 +53,7 @@ export function ChatList({
     queuedUserMessage,
     isLoading,
     status,
+    onSendFollowup,
     className,
 }: ChatListProps) {
     const { artifacts } = useArtifactStore(
@@ -369,6 +371,18 @@ export function ChatList({
             )
         }
 
+        if (item.type === "coordinator_followups") {
+            return (
+                <div key={key} className="py-2">
+                    <CoordinatorFollowupsCard
+                        options={item.options}
+                        onSendFollowup={onSendFollowup}
+                        disabled={Boolean(isLoading)}
+                    />
+                </div>
+            );
+        }
+
         return null;
     };
 
@@ -455,6 +469,44 @@ export function ChatList({
                 )}
             </div>
         </ScrollArea>
+    );
+}
+
+interface CoordinatorFollowupsCardProps {
+    options: Array<{ id: string; prompt: string }>;
+    onSendFollowup?: (prompt: string) => void;
+    disabled?: boolean;
+}
+
+function CoordinatorFollowupsCard({ options, onSendFollowup, disabled = false }: CoordinatorFollowupsCardProps) {
+    if (!options || options.length === 0) return null;
+
+    return (
+        <div className="w-full max-w-3xl py-2">
+            <p className="text-[14px] font-medium text-slate-500/80 mb-1 px-1">Suggested follow-ups</p>
+            <div className="flex flex-col border-t border-slate-100">
+                {options.map((option) => (
+                    <button
+                        key={option.id}
+                        type="button"
+                        onClick={() => onSendFollowup?.(option.prompt)}
+                        disabled={disabled}
+                        className={cn(
+                            "group w-full flex items-start gap-4 py-4 px-1 border-b border-slate-100 transition-colors text-left",
+                            "hover:bg-slate-50/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        )}
+                    >
+                        <MessageSquare className="h-5 w-5 mt-0.5 shrink-0 text-slate-400 group-hover:text-slate-600 transition-colors" />
+                        <div className="flex-1 min-w-0">
+                            <p className="text-[16px] font-medium text-slate-700 leading-snug group-hover:text-slate-900 transition-colors">
+                                {option.prompt}
+                            </p>
+                        </div>
+                        <ArrowRight className="h-5 w-5 mt-0.5 shrink-0 text-slate-300 group-hover:text-slate-500 transition-colors" />
+                    </button>
+                ))}
+            </div>
+        </div>
     );
 }
 

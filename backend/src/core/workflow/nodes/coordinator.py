@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Literal
 
 from langchain_core.messages import AIMessage
@@ -11,7 +12,7 @@ from src.infrastructure.llm.llm import get_llm_by_type
 from src.shared.config import AGENT_LLM_MAP
 from src.resources.prompts.template import apply_prompt_template
 from src.core.workflow.state import State
-from src.core.workflow.nodes.orchestration import (
+from src.core.workflow.nodes.supervisor import (
     _detect_intent,
     _detect_target_scope,
     _extract_latest_user_text,
@@ -19,21 +20,35 @@ from src.core.workflow.nodes.orchestration import (
 )
 
 logger = logging.getLogger(__name__)
-SUPPORTED_PRODUCT_TYPES = ("slide_infographic", "document_design", "comic")
+SUPPORTED_PRODUCT_TYPES = ("slide", "design", "comic")
+
+
+class CoordinatorFollowupOption(BaseModel):
+    """Quick-reply option shown when coordinator asks a follow-up question."""
+
+    id: str | None = Field(
+        None,
+        description="Stable option id. If omitted, server will fill it."
+    )
+    prompt: str = Field(
+        ...,
+        description="User reply text sent immediately when this option is clicked."
+    )
+
 
 class CoordinatorOutput(BaseModel):
     """Structured output for coordinator in a single LLM call."""
-    product_type: Literal["slide_infographic", "document_design", "comic", "unsupported"] = Field(
+    product_type: Literal["slide", "design", "comic", "unsupported"] = Field(
         ...,
         description=(
             "Classified product category. "
-            "Use slide_infographic/document_design/comic for supported requests; "
+            "Use slide/design/comic for supported requests; "
             "use unsupported for out-of-scope categories."
         ),
     )
     response: str = Field(
         ...,
-        description="User-facing response in Japanese. Must be polite and actionable."
+        description="User-facing response in Japanese. Use concise plain style (常体), actionable."
     )
     goto: Literal["planner", "__end__"] = Field(
         ...,
@@ -43,8 +58,15 @@ class CoordinatorOutput(BaseModel):
         None,
         description="Short title (<=20 chars) only when goto is 'planner'. Use null otherwise."
     )
+    followup_options: list[CoordinatorFollowupOption] = Field(
+        default_factory=list,
+        description=(
+            "When goto is '__end__', provide exactly 3 follow-up options for Socratic clarification. "
+            "Each option must include prompt. Keep this empty when goto is 'planner'."
+        ),
+    )
 
-async def coordinator_node(state: State, config: RunnableConfig) -> Command[Literal["plan_manager", "__end__"]]:
+async def coordinator_node(state: State, config: RunnableConfig) -> Command[Literal["planner", "__end__"]]:
     """
     Coordinator Node: Unified scope + intent pre-processing and UX gatekeeper.
     Uses structured output to classify category and decide execution flow.
@@ -73,10 +95,11 @@ async def coordinator_node(state: State, config: RunnableConfig) -> Command[Lite
     result: CoordinatorOutput = await structured_llm.ainvoke(messages, config=stream_config)
 
     logger.debug(
-        "Coordinator Structured Response: product_type='%s', goto='%s', title='%s', response_len=%s",
+        "Coordinator Structured Response: product_type='%s', goto='%s', title='%s', followups=%s, response_len=%s",
         result.product_type,
         result.goto,
         result.title,
+        len(result.followup_options),
         len(result.response or "")
     )
 
@@ -93,13 +116,20 @@ async def coordinator_node(state: State, config: RunnableConfig) -> Command[Lite
     else:
         effective_product_type = result.product_type
 
-    goto_destination = "plan_manager" if result.goto == "planner" else "__end__"
+    goto_destination = "planner" if result.goto == "planner" else "__end__"
     if effective_product_type == "unsupported" or effective_product_type not in SUPPORTED_PRODUCT_TYPES:
         goto_destination = "__end__"
 
     updates: dict = {
         "messages": [AIMessage(content=result.response)],
     }
+
+    if goto_destination == "__end__":
+        followup_options = _normalize_followup_options(result.followup_options)
+        if len(followup_options) < 3:
+            followup_options = _fill_followup_options(followup_options)
+        updates["coordinator_followup_options"] = followup_options
+
     if effective_product_type in SUPPORTED_PRODUCT_TYPES:
         updates["product_type"] = effective_product_type
     if not state.get("request_intent"):
@@ -112,7 +142,7 @@ async def coordinator_node(state: State, config: RunnableConfig) -> Command[Lite
                 state.get("asset_unit_ledger"),
             )
 
-    if goto_destination == "plan_manager":
+    if goto_destination == "planner":
         thread_id = config.get("configurable", {}).get("thread_id")
         user_uid = config.get("configurable", {}).get("user_uid")
         title = result.title or _derive_fallback_title(state)  # CHANGED: deterministic fallback
@@ -137,6 +167,66 @@ def _derive_fallback_title(state: State) -> str:
         if getattr(msg, "type", None) == "human" and isinstance(msg.content, str) and msg.content.strip():
             return msg.content.strip()[:20]
     return "プレゼン資料"
+
+
+def _normalize_followup_options(
+    options: list[CoordinatorFollowupOption],
+) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    seen_prompts: set[str] = set()
+
+    for index, option in enumerate(options, start=1):
+        prompt = (option.prompt or "").strip()
+        if not prompt:
+            continue
+
+        dedupe_key = prompt.lower()
+        if dedupe_key in seen_prompts:
+            continue
+        seen_prompts.add(dedupe_key)
+
+        raw_id = (option.id or f"followup_{index}").strip()
+        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_id) or f"followup_{index}"
+        normalized.append({
+            "id": safe_id,
+            "prompt": prompt,
+        })
+        if len(normalized) >= 3:
+            break
+
+    return normalized
+
+
+def _fill_followup_options(existing: list[dict[str, str]]) -> list[dict[str, str]]:
+    defaults = [
+        {
+            "id": "followup_goal_specific",
+            "prompt": "作成する資料の具体的な利用シーンと、読み手に与えたい印象の共有",
+        },
+        {
+            "id": "followup_tone_constraints",
+            "prompt": "希望するデザインのトーン（ビジネス、カジュアル、未来的など）の指定",
+        },
+        {
+            "id": "followup_content_structure",
+            "prompt": "盛り込みたい具体的な項目や、重視したい情報の優先順位の提示",
+        },
+    ]
+    result = list(existing)
+    existing_prompts = {item.get("prompt", "").strip().lower() for item in result}
+
+    for candidate in defaults:
+        prompt_key = candidate["prompt"].strip().lower()
+        if prompt_key in existing_prompts:
+            continue
+        if any(item.get("id") == candidate["id"] for item in result):
+            candidate = {**candidate, "id": f"{candidate['id']}_{len(result) + 1}"}
+        result.append(candidate)
+        existing_prompts.add(prompt_key)
+        if len(result) >= 3:
+            break
+
+    return result[:3]
 
 async def _save_title(
     thread_id: str | None,

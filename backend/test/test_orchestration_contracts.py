@@ -4,7 +4,6 @@ from pydantic import ValidationError
 from src.shared.schemas.outputs import (
     ArtifactEnvelope,
     OrchestrationTaskStep,
-    PlanPatchOp,
     QualityReport,
     ResearchImageCandidate,
     TargetScope,
@@ -34,11 +33,6 @@ def test_orchestration_task_step_defaults() -> None:
     assert step.target_scope is not None
     assert step.target_scope.slide_numbers == [3]
     assert step.target_scope.asset_unit_ids == ["slide:3"]
-
-
-def test_plan_patch_op_rejects_unknown_op() -> None:
-    with pytest.raises(ValidationError):
-        PlanPatchOp(op="rebuild_all", payload={})  # type: ignore[arg-type]
 
 
 def test_artifact_envelope_rejects_unknown_product_type() -> None:

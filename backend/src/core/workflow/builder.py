@@ -5,9 +5,6 @@ from src.core.workflow.nodes import (
     supervisor_node,
     build_researcher_subgraph,
     coordinator_node,
-    plan_manager_node,
-    patch_planner_node,
-    patch_gate_node,
     retry_or_alt_mode_node,
     writer_node,
     visualizer_node,
@@ -26,9 +23,6 @@ def build_graph(checkpointer=None):
     builder = StateGraph(State)
     builder.add_edge(START, "coordinator")
     builder.add_node("coordinator", coordinator_node)
-    builder.add_node("plan_manager", plan_manager_node)
-    builder.add_node("patch_planner", patch_planner_node)
-    builder.add_node("patch_gate", patch_gate_node)
     builder.add_node("planner", planner_node)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("retry_or_alt_mode", retry_or_alt_mode_node)

@@ -105,7 +105,7 @@ class ChatInput(BaseModel):
         default=False,
         description="実行中にユーザーが送信した割り込み指示かどうか"
     )
-    product_type: Optional[Literal["slide_infographic", "document_design", "comic"]] = Field(
+    product_type: Optional[Literal["slide", "design", "comic"]] = Field(
         default=None,
         description="初回リクエスト時に固定する制作カテゴリ"
     )

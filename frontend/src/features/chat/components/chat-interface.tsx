@@ -68,6 +68,7 @@ const DATA_EVENTS_TO_STORE = new Set([
     'data-analyst-complete',
     'data-writer-output',
     'data-image-search-results',
+    'data-coordinator-followups',
 ])
 
 const WRITER_ARTIFACT_TITLES: Record<string, string> = {
@@ -840,6 +841,11 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         void submitMessage(value)
     }, [authLoading, historyReady, isBusy, user, token, submitMessage, selectedImageInputs])
 
+    const handleSendFollowup = useCallback((prompt: string) => {
+        if (!prompt.trim()) return
+        handleSend(prompt)
+    }, [handleSend])
+
     const handleStop = useCallback(() => {
         if (!isBusy) return
         stop()
@@ -891,6 +897,7 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                         queuedUserMessage={queuedInterrupt?.text || null}
                         isLoading={isLoading}
                         status={status}
+                        onSendFollowup={handleSendFollowup}
                         className="h-full"
                     />
                 </div>

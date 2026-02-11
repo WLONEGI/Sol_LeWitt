@@ -70,7 +70,7 @@ def test_coordinator_sets_product_intent_and_scope_for_supported_category() -> N
     ):
         cmd = asyncio.run(coordinator_node(state, {"configurable": {}}))
 
-    assert cmd.goto == "plan_manager"
+    assert cmd.goto == "planner"
     assert cmd.update["product_type"] == "comic"
     assert cmd.update["request_intent"] == "refine"
     assert cmd.update["target_scope"]["page_numbers"] == [3]
@@ -85,7 +85,7 @@ def test_coordinator_keeps_existing_product_type_locked() -> None:
         "product_type": "comic",
     }
     output = CoordinatorOutput(
-        product_type="document_design",
+        product_type="design",
         response="承知しました。制作を続行します。",
         goto="planner",
         title="制作続行",
@@ -100,5 +100,39 @@ def test_coordinator_keeps_existing_product_type_locked() -> None:
     ):
         cmd = asyncio.run(coordinator_node(state, {"configurable": {}}))
 
-    assert cmd.goto == "plan_manager"
+    assert cmd.goto == "planner"
     assert cmd.update["product_type"] == "comic"
+
+
+def test_coordinator_end_route_includes_three_followup_options() -> None:
+    state = {
+        "messages": [HumanMessage(content="まだ方向性が決まっていません")],
+        "plan": [],
+        "artifacts": {},
+    }
+    output = CoordinatorOutput(
+        product_type="slide",
+        response="方向性を明確にするため、まず目的を確認させてください。",
+        goto="__end__",
+        title=None,
+        followup_options=[
+            {
+                "prompt": "まずは目的を整理したいです。成果のゴールは〇〇です。",
+            }
+        ],
+    )
+
+    with patch("src.core.workflow.nodes.coordinator.get_llm_by_type", return_value=_LLMStub(output)), patch(
+        "src.core.workflow.nodes.coordinator.apply_prompt_template",
+        return_value=[HumanMessage(content="coordinator prompt")],
+    ), patch(
+        "src.core.workflow.nodes.coordinator._save_title",
+        new=AsyncMock(return_value=None),
+    ):
+        cmd = asyncio.run(coordinator_node(state, {"configurable": {}}))
+
+    assert cmd.goto == "__end__"
+    options = cmd.update.get("coordinator_followup_options")
+    assert isinstance(options, list)
+    assert len(options) == 3
+    assert all("prompt" in option for option in options)

@@ -56,6 +56,10 @@ export function useChatTimeline(
                 ? rawSeq
                 : fallbackIndex
 
+        if (event?.type === 'data-coordinator-followups') {
+            return msgCountAtEmit * MESSAGE_ORDER_UNIT + 999 + (seq / 1_000_000)
+        }
+
         return msgCountAtEmit * MESSAGE_ORDER_UNIT - 0.5 + (seq / 1_000_000)
     }
 
@@ -76,6 +80,228 @@ export function useChatTimeline(
     // Convert messages to timeline items
     const timeline = useMemo<TimelineEvent[]>(() => {
         const items: TimelineEvent[] = [];
+        const analystMap = new Map<string, { item: any; lastTimestamp: number }>();
+        const outlineMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
+        const writerArtifactMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
+        const imageSearchMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
+        const researchMap = new Map<string, ResearchReportTimelineItem>();
+
+        const ingestStructuredEvent = (
+            type: string,
+            payload: any,
+            timestamp: number,
+            idSeed: string
+        ) => {
+            const eventPayload = payload && typeof payload === 'object' ? payload : {};
+
+            if (type === 'data-plan_step_started') {
+                const stepTitle = typeof eventPayload.title === 'string' ? eventPayload.title.trim() : '';
+                if (!stepTitle) return;
+                items.push({
+                    id: `${idSeed}-plan-step-start-${String(eventPayload.step_id ?? 'unknown')}`,
+                    type: 'plan_step_marker',
+                    timestamp,
+                    stepId: String(eventPayload.step_id ?? idSeed),
+                    title: stepTitle,
+                });
+                return;
+            }
+
+            if (type === 'data-plan_step_ended') {
+                items.push({
+                    id: `${idSeed}-plan-step-end-${String(eventPayload.step_id ?? 'unknown')}`,
+                    type: 'plan_step_end_marker',
+                    timestamp,
+                    stepId: String(eventPayload.step_id ?? idSeed),
+                });
+                return;
+            }
+
+            if (type === 'data-research-start') {
+                const taskId = String(eventPayload.task_id ?? idSeed);
+                const nextItem: ResearchReportTimelineItem = {
+                    id: `${idSeed}-research-${taskId}`,
+                    type: 'research_report',
+                    timestamp,
+                    taskId,
+                    perspective: typeof eventPayload.perspective === 'string' ? eventPayload.perspective : '',
+                    status: 'running',
+                };
+                researchMap.set(taskId, nextItem);
+                items.push(nextItem);
+                return;
+            }
+
+            if (type === 'data-research-complete') {
+                const taskId = String(eventPayload.task_id ?? idSeed);
+                const startItem = researchMap.get(taskId);
+                if (startItem) {
+                    startItem.status = 'completed';
+                }
+                return;
+            }
+
+            if (type.startsWith('data-analyst-')) {
+                const artifactId = eventPayload.artifact_id || 'data_analyst';
+                const existing = analystMap.get(artifactId);
+                if (existing) {
+                    existing.lastTimestamp = timestamp;
+                    if (eventPayload.title) existing.item.title = eventPayload.title;
+                    return;
+                }
+
+                analystMap.set(artifactId, {
+                    item: {
+                        id: `data-analyst-${artifactId}`,
+                        type: 'artifact',
+                        timestamp,
+                        artifactId,
+                        title: eventPayload.title || 'Data Analyst',
+                        icon: 'BarChart'
+                    },
+                    lastTimestamp: timestamp
+                });
+                return;
+            }
+
+            if (type === 'data-outline') {
+                const artifactId = typeof eventPayload.artifact_id === 'string' ? eventPayload.artifact_id : '';
+                const mapKey = artifactId.trim().length > 0 ? `artifact:${artifactId}` : 'default';
+                const existing = outlineMap.get(mapKey);
+
+                if (existing) {
+                    existing.lastTimestamp = timestamp;
+                    existing.item = {
+                        ...(existing.item as any),
+                        timestamp,
+                        slides: Array.isArray(eventPayload.slides) ? eventPayload.slides : [],
+                        title: eventPayload.title || 'Slide Outline',
+                    } as TimelineEvent;
+                    return;
+                }
+
+                outlineMap.set(mapKey, {
+                    item: {
+                        id: `outline-${mapKey}`,
+                        type: 'slide_outline',
+                        timestamp,
+                        slides: Array.isArray(eventPayload.slides) ? eventPayload.slides : [],
+                        title: eventPayload.title || 'Slide Outline',
+                    } as TimelineEvent,
+                    lastTimestamp: timestamp,
+                });
+                return;
+            }
+
+            // Suppress per-image timeline cards to reduce cognitive load.
+            if (type === 'data-visual-image') {
+                return;
+            }
+
+            if (type === 'data-image-search-results') {
+                const candidates = Array.isArray(eventPayload.candidates) ? eventPayload.candidates : [];
+                const artifactId = typeof eventPayload.artifact_id === 'string' ? eventPayload.artifact_id : undefined;
+                const taskId = String(eventPayload.task_id ?? idSeed);
+                const query = typeof eventPayload.query === 'string' ? eventPayload.query : '';
+                const mapKey = artifactId?.trim()
+                    ? `artifact:${artifactId}`
+                    : `task:${taskId}`;
+                const existing = imageSearchMap.get(mapKey);
+
+                if (existing) {
+                    existing.lastTimestamp = timestamp;
+                    existing.item = {
+                        ...(existing.item as any),
+                        timestamp,
+                        taskId,
+                        artifactId,
+                        query,
+                        perspective: typeof eventPayload.perspective === 'string' ? eventPayload.perspective : undefined,
+                        candidates,
+                    } as any;
+                    return;
+                }
+
+                imageSearchMap.set(mapKey, {
+                    item: {
+                        id: `image-search-${mapKey}`,
+                        type: 'image_search_results',
+                        timestamp,
+                        taskId,
+                        artifactId,
+                        query,
+                        perspective: typeof eventPayload.perspective === 'string' ? eventPayload.perspective : undefined,
+                        candidates,
+                    } as any,
+                    lastTimestamp: timestamp,
+                });
+                return;
+            }
+
+            if (type === 'data-coordinator-followups') {
+                const options = Array.isArray(eventPayload.options)
+                    ? eventPayload.options
+                        .map((option: any, index: number) => ({
+                            id: typeof option?.id === 'string' && option.id.trim().length > 0
+                                ? option.id.trim()
+                                : `${idSeed}-followup-${index + 1}`,
+                            prompt: typeof option?.prompt === 'string' ? option.prompt.trim() : '',
+                        }))
+                        .filter((option: any) => option.prompt.length > 0)
+                        .slice(0, 3)
+                    : [];
+
+                if (options.length === 0) return;
+
+                items.push({
+                    id: `${idSeed}-coordinator-followups`,
+                    type: 'coordinator_followups',
+                    timestamp,
+                    question: typeof eventPayload.question === 'string' ? eventPayload.question : undefined,
+                    options,
+                } as any);
+                return;
+            }
+
+            if (type === 'data-writer-output') {
+                const artifactType = typeof eventPayload.artifact_type === 'string' ? eventPayload.artifact_type : 'report';
+                if (artifactType === 'outline') return;
+
+                const artifactId = eventPayload.artifact_id || `${idSeed}-writer`;
+                const existing = writerArtifactMap.get(artifactId);
+                if (existing) {
+                    existing.lastTimestamp = timestamp;
+                    existing.item = {
+                        ...(existing.item as any),
+                        timestamp,
+                        artifactId,
+                        title: eventPayload.title || 'Writer Output',
+                        icon: 'BookOpen',
+                        kind: artifactType,
+                    } as any;
+                    return;
+                }
+
+                writerArtifactMap.set(artifactId, {
+                    item: {
+                        id: `writer-${artifactId}`,
+                        type: 'artifact',
+                        timestamp,
+                        artifactId,
+                        title: eventPayload.title || 'Writer Output',
+                        icon: 'BookOpen',
+                        kind: artifactType,
+                    } as any,
+                    lastTimestamp: timestamp,
+                });
+                return;
+            }
+        };
+
+        const hasDataPartsInMessages = messages.some((msg) =>
+            Array.isArray(msg.parts) &&
+            msg.parts.some((part: any) => typeof part?.type === 'string' && part.type.startsWith('data-'))
+        );
 
         messages.forEach((msg, msgIndex) => {
             const messageId = `msg-${msg.id}`;
@@ -185,27 +411,12 @@ export function useChatTimeline(
                     flushReasoning(partIndex);
 
                     if (typeof p.type === 'string' && p.type.startsWith('data-')) {
-                        const eventData = p.data;
-                        if (eventData && typeof eventData === 'object') {
-                            if (p.type === 'data-research-start') {
-                                items.push({
-                                    id: `${partId}-research-${eventData.task_id}`,
-                                    type: 'research_report',
-                                    timestamp: baseTimestamp + partIndex,
-                                    taskId: eventData.task_id.toString(),
-                                    perspective: eventData.perspective,
-                                    status: 'running'
-                                });
-                            } else if (p.type === 'data-research-complete') {
-                                const startItem = items.find(
-                                    item => item.type === 'research_report' && item.taskId === eventData.task_id.toString()
-                                ) as ResearchReportTimelineItem | undefined;
-
-                                if (startItem) {
-                                    startItem.status = 'completed';
-                                }
-                            }
-                        }
+                        ingestStructuredEvent(
+                            p.type,
+                            p.data,
+                            baseTimestamp + partIndex,
+                            partId
+                        );
                     }
                 });
 
@@ -234,201 +445,37 @@ export function useChatTimeline(
             }
         });
 
-        // Data events from stream
-        if (data && data.length > 0) {
-            const analystMap = new Map<string, { item: any; lastTimestamp: number }>();
-            const outlineMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
-            const writerArtifactMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
-            const imageSearchMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
-
+        // Fallback for snapshots or environments where data-* parts are not attached to messages.
+        if (!hasDataPartsInMessages && data && data.length > 0) {
             data.forEach((event, idx) => {
                 if (!event || typeof event !== 'object') return;
                 const type = event.type as string;
-                const payload = (event as any).data || {};
-                const timestamp = getDataEventTimestamp(event, idx);
-
-                // 0. Planner step start -> inject a bold chat line
-                if (type === 'data-plan_step_started') {
-                    const stepTitle = typeof payload.title === 'string' ? payload.title.trim() : '';
-                    if (!stepTitle) return;
-
-                    // Use the natural timestamp from the event
-                    // This ensures plan steps appear in the order they were generated
-                    items.push({
-                        id: `plan-step-start-${idx}`,
-                        type: 'plan_step_marker',
-                        timestamp,
-                        stepId: String(payload.step_id ?? idx),
-                        title: stepTitle,
-                    });
-                    return;
-                }
-
-                if (type === 'data-plan_step_ended') {
-                    items.push({
-                        id: `plan-step-end-${idx}`,
-                        type: 'plan_step_end_marker',
-                        timestamp,
-                        stepId: String(payload.step_id ?? idx),
-                    });
-                    return;
-                }
-
-                // 1. Data Analyst
-                if (type.startsWith('data-analyst-')) {
-                    const artifactId = payload.artifact_id || 'data_analyst';
-                    const existing = analystMap.get(artifactId);
-                    if (existing) {
-                        existing.lastTimestamp = timestamp;
-                        if (payload.title) existing.item.title = payload.title;
-                        return;
-                    }
-
-                    analystMap.set(artifactId, {
-                        item: {
-                            id: `data-analyst-${artifactId}`,
-                            type: 'artifact',
-                            timestamp,
-                            artifactId,
-                            title: payload.title || 'Data Analyst',
-                            icon: 'BarChart'
-                        },
-                        lastTimestamp: timestamp
-                    });
-                }
-
-                // 2. Slide Outline (keep one per artifact, with latest state)
-                else if (type === 'data-outline') {
-                    const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id : '';
-                    const mapKey = artifactId.trim().length > 0 ? `artifact:${artifactId}` : 'default';
-                    const existing = outlineMap.get(mapKey);
-
-                    if (existing) {
-                        existing.lastTimestamp = timestamp;
-                        existing.item = {
-                            ...(existing.item as any),
-                            timestamp,
-                            slides: Array.isArray(payload.slides) ? payload.slides : [],
-                            title: payload.title || 'Slide Outline',
-                        } as TimelineEvent;
-                        return;
-                    }
-
-                    outlineMap.set(mapKey, {
-                        item: {
-                            id: `outline-${mapKey}`,
-                            type: 'slide_outline',
-                            timestamp,
-                            slides: Array.isArray(payload.slides) ? payload.slides : [],
-                            title: payload.title || 'Slide Outline',
-                        } as TimelineEvent,
-                        lastTimestamp: timestamp,
-                    });
-                    return;
-                }
-
-                // 3. Visual image result
-                else if (type === 'data-visual-image') {
-                    // Suppress per-image timeline cards to reduce cognitive load.
-                    // A unified slide deck UI is rendered from `latestSlideDeck`.
-                    return;
-                }
-
-                // 4. Image Search results
-                else if (type === 'data-image-search-results') {
-                    const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
-                    const artifactId = typeof payload.artifact_id === 'string' ? payload.artifact_id : undefined;
-                    const taskId = String(payload.task_id ?? idx);
-                    const query = typeof payload.query === 'string' ? payload.query : '';
-                    const mapKey = artifactId?.trim()
-                        ? `artifact:${artifactId}`
-                        : `task:${taskId}`;
-                    const existing = imageSearchMap.get(mapKey);
-
-                    if (existing) {
-                        existing.lastTimestamp = timestamp;
-                        existing.item = {
-                            ...(existing.item as any),
-                            timestamp,
-                            taskId,
-                            artifactId,
-                            query,
-                            perspective: typeof payload.perspective === 'string' ? payload.perspective : undefined,
-                            candidates,
-                        } as any;
-                        return;
-                    }
-
-                    imageSearchMap.set(mapKey, {
-                        item: {
-                            id: `image-search-${mapKey}`,
-                            type: 'image_search_results',
-                            timestamp,
-                            taskId,
-                            artifactId,
-                            query,
-                            perspective: typeof payload.perspective === 'string' ? payload.perspective : undefined,
-                            candidates,
-                        } as any,
-                        lastTimestamp: timestamp,
-                    });
-                    return;
-                }
-
-                // 5. Writer outputs (keep one per artifact, with latest state)
-                else if (type === 'data-writer-output') {
-                    const artifactType = typeof payload.artifact_type === 'string' ? payload.artifact_type : 'report';
-                    if (artifactType === 'outline') return;
-
-                    const artifactId = payload.artifact_id || `writer-${idx}`;
-                    const existing = writerArtifactMap.get(artifactId);
-                    if (existing) {
-                        existing.lastTimestamp = timestamp;
-                        existing.item = {
-                            ...(existing.item as any),
-                            timestamp,
-                            artifactId,
-                            title: payload.title || 'Writer Output',
-                            icon: 'BookOpen',
-                            kind: artifactType,
-                        } as any;
-                        return;
-                    }
-
-                    writerArtifactMap.set(artifactId, {
-                        item: {
-                            id: `writer-${artifactId}`,
-                            type: 'artifact',
-                            timestamp,
-                            artifactId,
-                            title: payload.title || 'Writer Output',
-                            icon: 'BookOpen',
-                            kind: artifactType,
-                        } as any,
-                        lastTimestamp: timestamp,
-                    });
-                    return;
-                }
-            });
-
-            analystMap.forEach(({ item, lastTimestamp }) => {
-                item.timestamp = lastTimestamp;
-                items.push(item);
-            });
-            outlineMap.forEach(({ item, lastTimestamp }) => {
-                item.timestamp = lastTimestamp;
-                items.push(item);
-            });
-            imageSearchMap.forEach(({ item, lastTimestamp }) => {
-                item.timestamp = lastTimestamp;
-                items.push(item);
-            });
-            writerArtifactMap.forEach(({ item, lastTimestamp }) => {
-                item.timestamp = lastTimestamp;
-                items.push(item);
+                if (!type.startsWith('data-')) return;
+                ingestStructuredEvent(
+                    type,
+                    (event as any).data || {},
+                    getDataEventTimestamp(event, idx),
+                    `stream-${idx}`
+                );
             });
         }
 
+        analystMap.forEach(({ item, lastTimestamp }) => {
+            item.timestamp = lastTimestamp;
+            items.push(item);
+        });
+        outlineMap.forEach(({ item, lastTimestamp }) => {
+            item.timestamp = lastTimestamp;
+            items.push(item);
+        });
+        imageSearchMap.forEach(({ item, lastTimestamp }) => {
+            item.timestamp = lastTimestamp;
+            items.push(item);
+        });
+        writerArtifactMap.forEach(({ item, lastTimestamp }) => {
+            item.timestamp = lastTimestamp;
+            items.push(item);
+        });
 
         // Add any remaining research events from the global data stream that might not be in parts
         // (This is a safety net for other custom events like plan_update or data-outline)

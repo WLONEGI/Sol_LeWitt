@@ -1,5 +1,8 @@
 import logging
 import uuid
+from urllib.parse import urlparse
+
+import httpx
 from google.cloud import storage
 from src.shared.config.settings import settings
 
@@ -82,11 +85,53 @@ def download_blob_as_bytes(url: str) -> bytes | None:
     """
     Downloads a blob from a URL (e.g., GCS public URL).
     """
-    import httpx
+    if not isinstance(url, str) or not url.strip():
+        return None
+
+    source = url.strip()
+
+    bucket_name, blob_name = _parse_gcs_blob_ref(source)
+    if bucket_name and blob_name:
+        try:
+            storage_client = storage.Client()
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(blob_name)
+            return blob.download_as_bytes()
+        except Exception as e:
+            logger.error(f"Failed to download GCS object gs://{bucket_name}/{blob_name}: {e}")
+            return None
+
     try:
-        response = httpx.get(url, follow_redirects=True)
+        response = httpx.get(source, follow_redirects=True)
         response.raise_for_status()
         return response.content
     except Exception as e:
-        logger.error(f"Failed to download from {url}: {e}")
+        logger.error(f"Failed to download from {source}: {e}")
         return None
+
+
+def _parse_gcs_blob_ref(url: str) -> tuple[str | None, str | None]:
+    """Parse gs:// or storage.googleapis.com URLs into (bucket, blob)."""
+    parsed = urlparse(url)
+
+    # gs://bucket/path/to/file
+    if parsed.scheme == "gs":
+        bucket = parsed.netloc or None
+        blob = parsed.path.lstrip("/") or None
+        return bucket, blob
+
+    # https://storage.googleapis.com/bucket/path/to/file
+    if parsed.scheme in {"http", "https"} and parsed.netloc == "storage.googleapis.com":
+        path = parsed.path.lstrip("/")
+        if "/" not in path:
+            return None, None
+        bucket, blob = path.split("/", 1)
+        return bucket or None, blob or None
+
+    # https://bucket.storage.googleapis.com/path/to/file
+    if parsed.scheme in {"http", "https"} and parsed.netloc.endswith(".storage.googleapis.com"):
+        bucket = parsed.netloc.replace(".storage.googleapis.com", "")
+        blob = parsed.path.lstrip("/") or None
+        return (bucket or None), blob
+
+    return None, None

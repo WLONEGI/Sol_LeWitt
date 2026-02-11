@@ -119,7 +119,7 @@ def _find_latest_character_sheet(artifacts: dict[str, Any]) -> dict[str, Any] | 
 def _default_visualizer_mode(product_type: str | None) -> str:
     if product_type == "comic":
         return "comic_page_render"
-    if product_type == "document_design":
+    if product_type == "design":
         return "document_layout_render"
     return "slide_render"
 
@@ -147,7 +147,7 @@ def _resolve_asset_unit_meta(
     product_type: str | None,
     slide_number: int,
 ) -> tuple[str, str, int]:
-    if mode == "comic_page_render" or mode == "document_layout_render" or product_type in {"comic", "document_design"}:
+    if mode == "comic_page_render" or mode == "document_layout_render" or product_type in {"comic", "design"}:
         unit_kind = "page"
     elif mode == "character_sheet_render":
         unit_kind = "image"

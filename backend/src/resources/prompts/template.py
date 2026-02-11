@@ -1,9 +1,4 @@
-"""
-プロンプトテンプレートローダー
-
-Markdownファイルからプロンプトテンプレートを読み込み、
-LangChainのPromptTemplateとして利用するためのユーティリティ。
-"""
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -13,32 +8,18 @@ from langchain_core.messages import SystemMessage
 from langchain_core.prompts import PromptTemplate
 from langgraph.prebuilt.chat_agent_executor import AgentState
 
+logger = logging.getLogger(__name__)
 
 # プロンプトファイルが格納されているディレクトリ
 _PROMPTS_DIR: Path = Path(__file__).parent
 
 
-def get_prompt_template(prompt_name: str) -> str:
+def _format_prompt_for_langchain(template: str) -> str:
     """
-    指定されたプロンプト名のMarkdownファイルを読み込み、
-    LangChain用のテンプレート文字列に変換する。
-
-    変換ルール:
+    LangChain用にテンプレート文字列を変換する。
     - `{` `}` は `{{` `}}` にエスケープ
     - `<<VAR>>` は `{VAR}` に置換
-
-    Args:
-        prompt_name: プロンプトファイル名（拡張子なし）
-
-    Returns:
-        LangChain PromptTemplate用の文字列
-
-    Raises:
-        FileNotFoundError: 指定されたプロンプトファイルが存在しない場合
     """
-    filepath: Path = _PROMPTS_DIR / f"{prompt_name}.md"
-    template: str = filepath.read_text(encoding="utf-8")
-
     # LangChain用にエスケープ
     template = template.replace("{", "{{").replace("}", "}}")
 
@@ -48,38 +29,103 @@ def get_prompt_template(prompt_name: str) -> str:
     return template
 
 
+def get_prompt_template(prompt_name: str) -> str:
+    """
+    [互換性維持用] 指定されたプロンプト名に対応するファイルを読み込み、テンプレート文字列を返す。
+    新構造では {prompt_name}/default.md または {prompt_name}/base.md を優先的に探す。
+    """
+    prompt_dir = _PROMPTS_DIR / prompt_name
+    if not prompt_dir.is_dir():
+        # 旧構造へのフォールバック（ファイルが直下にある場合）
+        filepath = _PROMPTS_DIR / f"{prompt_name}.md"
+        if filepath.exists():
+            return _format_prompt_for_langchain(filepath.read_text(encoding="utf-8"))
+        raise FileNotFoundError(f"Prompt file or directory not found: {prompt_name}")
+
+    # 新構造での優先順位: default.md > base.md
+    for filename in ["default.md", "base.md"]:
+        filepath = prompt_dir / filename
+        if filepath.exists():
+            return _format_prompt_for_langchain(filepath.read_text(encoding="utf-8"))
+
+    # 何も見つからない場合はディレクトリ内の最初の .md を返す
+    first_md = next(prompt_dir.glob("*.md"), None)
+    if first_md:
+        return _format_prompt_for_langchain(first_md.read_text(encoding="utf-8"))
+
+    raise FileNotFoundError(f"No .md files found in prompt directory: {prompt_name}")
+
+
 def load_prompt_markdown(prompt_name: str) -> str:
     """
-    プロンプトMarkdownファイルを変数置換なしでプレーンテキストとして読み込む。
-
-    Args:
-        prompt_name: プロンプトファイル名（拡張子なし）
-
-    Returns:
-        ファイルの内容（文字列）
-
-    Raises:
-        FileNotFoundError: 指定されたプロンプトファイルが存在しない場合
+    [互換性維持用] プロンプトMarkdownファイルを変数置換なしでプレーンテキストとして読み込む。
     """
-    filepath: Path = _PROMPTS_DIR / f"{prompt_name}.md"
-    return filepath.read_text(encoding="utf-8")
+    prompt_dir = _PROMPTS_DIR / prompt_name
+    if not prompt_dir.is_dir():
+        filepath = _PROMPTS_DIR / f"{prompt_name}.md"
+        if filepath.exists():
+            return filepath.read_text(encoding="utf-8")
+        raise FileNotFoundError(f"Prompt content not found: {prompt_name}")
+
+    for filename in ["default.md", "base.md"]:
+        filepath = prompt_dir / filename
+        if filepath.exists():
+            return filepath.read_text(encoding="utf-8")
+
+    first_md = next(prompt_dir.glob("*.md"), None)
+    if first_md:
+        return first_md.read_text(encoding="utf-8")
+
+    raise FileNotFoundError(f"No .md files found in prompt directory: {prompt_name}")
+
 
 def apply_prompt_template(prompt_name: str, state: AgentState) -> list[Any]:
     """
-    プロンプトテンプレートを読み込み、状態変数を適用してシステムメッセージを生成する。
-
-    Args:
-        prompt_name: プロンプトファイル名（拡張子なし）
-        state: LangGraphのAgentState（メッセージ履歴と変数を含む）
-
-    Returns:
-        システムメッセージとメッセージ履歴を含むリスト
+    プロンプト構成を結合し、状態変数を適用してシステムメッセージを生成する。
+    1. {prompt_name}/base.md
+    2. {prompt_name}/{product_type}.md
+    3. どちらもない場合は default.md または既存ファイル
     """
+    product_type = state.get("product_type")
+    prompt_dir = _PROMPTS_DIR / prompt_name
+    
+    parts = []
+    
+    if prompt_dir.is_dir():
+        # 1. Base (共通指示)
+        base_path = prompt_dir / "base.md"
+        if base_path.exists():
+            parts.append(base_path.read_text(encoding="utf-8"))
+            
+        # 2. Specific (製品固有指示)
+        if product_type:
+            specific_path = prompt_dir / f"{product_type}.md"
+            if specific_path.exists():
+                parts.append(specific_path.read_text(encoding="utf-8"))
+                
+        # 3. Fallback (単一指示)
+        if not parts:
+            default_path = prompt_dir / "default.md"
+            if default_path.exists():
+                parts.append(default_path.read_text(encoding="utf-8"))
+    else:
+        # ディレクトリがない場合は旧形式の単一ファイルとして読み込む
+        try:
+            parts.append(load_prompt_markdown(prompt_name))
+        except FileNotFoundError:
+            logger.warning(f"Prompt name '{prompt_name}' could not be resolved.")
+
+    if not parts:
+        logger.error(f"Failed to load any prompt parts for: {prompt_name}")
+        full_content = f"Error: Prompt {prompt_name} not found."
+    else:
+        full_content = "\n\n".join(parts)
+
     system_prompt: str = PromptTemplate(
         input_variables=["CURRENT_TIME"],
-        template=get_prompt_template(prompt_name),
+        template=_format_prompt_for_langchain(full_content),
     ).format(
         CURRENT_TIME=datetime.now().strftime("%a %b %d %Y %H:%M:%S %z"),
         **state
     )
-    return [SystemMessage(content=system_prompt)] + state["messages"]
+    return [SystemMessage(content=system_prompt)] + state.get("messages", [])

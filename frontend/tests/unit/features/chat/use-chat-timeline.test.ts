@@ -21,6 +21,60 @@ const baseMessages: any[] = [
 ];
 
 describe('useChatTimeline aggregation', () => {
+  it('prioritizes message-part ordering for step markers, text/reasoning, and custom data', () => {
+    const messages: any[] = [
+      ...baseMessages,
+      {
+        id: 'a1',
+        role: 'assistant',
+        parts: [
+          { type: 'data-plan_step_started', data: { step_id: 1, title: 'Step 1' } },
+          { type: 'text', text: 'alpha' },
+          { type: 'reasoning', text: 'thinking' },
+          {
+            type: 'data-image-search-results',
+            data: {
+              task_id: 't1',
+              query: 'query',
+              candidates: [],
+            },
+          },
+          { type: 'text', text: 'beta' },
+          { type: 'data-plan_step_ended', data: { step_id: 1 } },
+        ],
+      },
+    ];
+
+    // Include stream data as well to ensure we do not duplicate when data-* parts exist in messages.
+    const data = [
+      event('data-plan_step_started', { step_id: 1, title: 'Step 1' }, 1),
+      event('data-plan_step_ended', { step_id: 1 }, 2),
+    ];
+
+    const { result } = renderHook(() => useChatTimeline(messages, data));
+    const timeline = result.current.timeline;
+
+    const stepStartCount = timeline.filter((item) => item.type === 'plan_step_marker').length;
+    const stepEndCount = timeline.filter((item) => item.type === 'plan_step_end_marker').length;
+    expect(stepStartCount).toBe(1);
+    expect(stepEndCount).toBe(1);
+
+    const stepScoped = timeline.filter((item) => item.timestamp >= 1000);
+    expect(stepScoped.map((item) => item.type)).toEqual([
+      'plan_step_marker',
+      'message',
+      'message',
+      'image_search_results',
+      'message',
+      'plan_step_end_marker',
+    ]);
+
+    const messageContents = stepScoped
+      .filter((item: any) => item.type === 'message')
+      .map((item: any) => item.message.content || item.message.reasoning);
+    expect(messageContents).toEqual(['alpha', 'thinking', 'beta']);
+  });
+
   it('keeps one latest slide outline per artifact id', () => {
     const data = [
       event(
@@ -190,5 +244,40 @@ describe('useChatTimeline aggregation', () => {
       imageSearchItems.some((item) => item.artifactId === 'step_3_research_2')
     ).toBe(true);
   });
-});
 
+  it('adds coordinator follow-up options as timeline item', () => {
+    const messages: any[] = [
+      ...baseMessages,
+      {
+        id: 'a1',
+        role: 'assistant',
+        parts: [{ type: 'text', text: '要件を明確化するため質問です。' }],
+      },
+    ];
+
+    const data = [
+      event(
+        'data-coordinator-followups',
+        {
+          question: '要件を明確化するため質問です。',
+          options: [
+            { id: 'f1', prompt: '目的は〇〇です。' },
+            { id: 'f2', prompt: '範囲は〇〇です。' },
+            { id: 'f3', prompt: '制約は〇〇です。' },
+          ],
+        },
+        1
+      ),
+    ];
+
+    const { result } = renderHook(() => useChatTimeline(messages, data));
+    const followups = result.current.timeline.filter(
+      (item: any) => item.type === 'coordinator_followups'
+    ) as any[];
+
+    expect(followups).toHaveLength(1);
+    expect(followups[0].options).toHaveLength(3);
+    expect(followups[0].options[0].prompt).toBe('目的は〇〇です。');
+    expect(followups[0].timestamp).toBeGreaterThan(1000);
+  });
+});

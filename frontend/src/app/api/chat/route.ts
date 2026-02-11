@@ -8,7 +8,7 @@ import { normalizePlanUpdateData } from '@/features/chat/types/plan';
 // Node.js runtime for longer timeouts (Pro plan: up to 5 mins)
 export const runtime = 'nodejs';
 export const maxDuration = 300;
-const ALLOWED_PRODUCT_TYPES = new Set(['slide_infographic', 'document_design', 'comic']);
+const ALLOWED_PRODUCT_TYPES = new Set(['slide', 'design', 'comic']);
 
 export async function POST(req: NextRequest) {
     try {
@@ -95,6 +95,8 @@ export async function POST(req: NextRequest) {
                     let writerTextBuffer = '';
                     let coordinatorTextBuffer = '';
                     let supervisorTextBuffer = '';
+                    let coordinatorRenderedResponse = '';
+                    let coordinatorResponseCompleted = false;
 
                     // Track tool calls to associate results
                     const toolCallMap = new Map<string, string>(); // run_id -> toolCallId
@@ -102,6 +104,127 @@ export async function POST(req: NextRequest) {
                     const extractFirstJson = (input: string) => {
                         const match = input.match(/\{[\s\S]*\}/);
                         return match ? match[0] : null;
+                    };
+
+                    const normalizeCoordinatorFollowups = (raw: any) => {
+                        if (!Array.isArray(raw)) return [] as Array<{ id: string; prompt: string }>;
+                        const normalized: Array<{ id: string; prompt: string }> = [];
+                        const seenPrompt = new Set<string>();
+
+                        for (const entry of raw) {
+                            if (!entry || typeof entry !== 'object') continue;
+                            const prompt = typeof entry.prompt === 'string' ? entry.prompt.trim() : '';
+                            if (!prompt) continue;
+                            const dedupeKey = prompt.toLowerCase();
+                            if (seenPrompt.has(dedupeKey)) continue;
+                            seenPrompt.add(dedupeKey);
+                            const safeId =
+                                typeof entry.id === 'string' && entry.id.trim()
+                                    ? entry.id.trim()
+                                    : `followup_${normalized.length + 1}`;
+                            normalized.push({
+                                id: safeId,
+                                prompt,
+                            });
+                            if (normalized.length >= 3) break;
+                        }
+
+                        return normalized;
+                    };
+
+                    const extractCoordinatorResponseFromJsonBuffer = (jsonBuffer: string) => {
+                        const keyMatch = /"response"\s*:\s*"/.exec(jsonBuffer);
+                        if (!keyMatch || typeof keyMatch.index !== 'number') {
+                            return { decoded: '', completed: false };
+                        }
+
+                        const start = keyMatch.index + keyMatch[0].length;
+                        let decoded = '';
+                        let escapeMode = false;
+                        let unicodeMode = 0;
+                        let unicodeDigits = '';
+
+                        for (let i = start; i < jsonBuffer.length; i++) {
+                            const ch = jsonBuffer[i];
+
+                            if (unicodeMode > 0) {
+                                if (!/[0-9a-fA-F]/.test(ch)) {
+                                    unicodeMode = 0;
+                                    unicodeDigits = '';
+                                    continue;
+                                }
+                                unicodeDigits += ch;
+                                unicodeMode -= 1;
+                                if (unicodeMode === 0 && unicodeDigits.length === 4) {
+                                    decoded += String.fromCharCode(parseInt(unicodeDigits, 16));
+                                    unicodeDigits = '';
+                                }
+                                continue;
+                            }
+
+                            if (escapeMode) {
+                                if (ch === 'n') decoded += '\n';
+                                else if (ch === 'r') decoded += '\r';
+                                else if (ch === 't') decoded += '\t';
+                                else if (ch === 'b') decoded += '\b';
+                                else if (ch === 'f') decoded += '\f';
+                                else if (ch === '"' || ch === '\\' || ch === '/') decoded += ch;
+                                else if (ch === 'u') {
+                                    unicodeMode = 4;
+                                    unicodeDigits = '';
+                                }
+                                escapeMode = false;
+                                continue;
+                            }
+
+                            if (ch === '\\') {
+                                escapeMode = true;
+                                continue;
+                            }
+
+                            if (ch === '"') {
+                                return { decoded, completed: true };
+                            }
+
+                            decoded += ch;
+                        }
+
+                        return { decoded, completed: false };
+                    };
+
+                    const emitCoordinatorResponseDeltaFromBuffer = () => {
+                        if (coordinatorResponseCompleted) return;
+                        const { decoded, completed } = extractCoordinatorResponseFromJsonBuffer(coordinatorTextBuffer);
+                        if (!decoded) {
+                            if (completed) {
+                                coordinatorResponseCompleted = true;
+                            }
+                            return;
+                        }
+
+                        if (!currentTextId) {
+                            currentTextId = uuidv4();
+                            controller.enqueue({
+                                type: 'text-start',
+                                id: currentTextId
+                            } as any);
+                        }
+
+                        if (decoded.startsWith(coordinatorRenderedResponse)) {
+                            const delta = decoded.slice(coordinatorRenderedResponse.length);
+                            if (delta) {
+                                controller.enqueue({
+                                    type: 'text-delta',
+                                    id: currentTextId,
+                                    delta
+                                } as any);
+                                coordinatorRenderedResponse = decoded;
+                            }
+                        }
+
+                        if (completed) {
+                            coordinatorResponseCompleted = true;
+                        }
                     };
 
                     const logToFile = (message: string) => {
@@ -321,6 +444,7 @@ export async function POST(req: NextRequest) {
                                                         }
                                                         if (isCoordinator) {
                                                             coordinatorTextBuffer += part.text;
+                                                            emitCoordinatorResponseDeltaFromBuffer();
                                                             continue;
                                                         }
                                                         if (isSupervisor) {
@@ -363,6 +487,7 @@ export async function POST(req: NextRequest) {
                                                 }
                                                 if (isCoordinator) {
                                                     coordinatorTextBuffer += content;
+                                                    emitCoordinatorResponseDeltaFromBuffer();
                                                     break;
                                                 }
                                                 if (isSupervisor) {
@@ -427,13 +552,31 @@ export async function POST(req: NextRequest) {
                                                         const parsed = JSON.parse(jsonText);
                                                         const responseText = parsed?.response ?? '';
                                                         const title = parsed?.title;
+                                                        const followupOptions = normalizeCoordinatorFollowups(parsed?.followup_options);
 
                                                         if (currentReasoningId) {
                                                             controller.enqueue({ type: 'reasoning-end', id: currentReasoningId } as any);
                                                             currentReasoningId = null;
                                                         }
 
-                                                        if (responseText) {
+                                                        if (responseText && responseText.startsWith(coordinatorRenderedResponse)) {
+                                                            const tailDelta = responseText.slice(coordinatorRenderedResponse.length);
+                                                            if (tailDelta) {
+                                                                if (!currentTextId) {
+                                                                    currentTextId = uuidv4();
+                                                                    controller.enqueue({
+                                                                        type: 'text-start',
+                                                                        id: currentTextId
+                                                                    } as any);
+                                                                }
+                                                                controller.enqueue({
+                                                                    type: 'text-delta',
+                                                                    id: currentTextId,
+                                                                    delta: tailDelta
+                                                                } as any);
+                                                            }
+                                                            coordinatorRenderedResponse = responseText;
+                                                        } else if (responseText && !coordinatorRenderedResponse) {
                                                             if (!currentTextId) {
                                                                 currentTextId = uuidv4();
                                                                 controller.enqueue({
@@ -446,6 +589,7 @@ export async function POST(req: NextRequest) {
                                                                 id: currentTextId,
                                                                 delta: responseText
                                                             } as any);
+                                                            coordinatorRenderedResponse = responseText;
                                                         }
 
                                                         if (title) {
@@ -454,11 +598,23 @@ export async function POST(req: NextRequest) {
                                                                 data: { title }
                                                             } as any);
                                                         }
+
+                                                        if (followupOptions.length > 0) {
+                                                            controller.enqueue({
+                                                                type: 'data-coordinator-followups',
+                                                                data: {
+                                                                    question: responseText,
+                                                                    options: followupOptions,
+                                                                }
+                                                            } as any);
+                                                        }
                                                     } catch (parseErr) {
                                                         console.error('[Stream] Coordinator JSON parse failed:', parseErr);
                                                         logToFile(`[${new Date().toISOString()}] [ParseError] coordinator JSON parse failed: ${String(parseErr)}\n`);
                                                     }
                                                     coordinatorTextBuffer = '';
+                                                    coordinatorRenderedResponse = '';
+                                                    coordinatorResponseCompleted = false;
                                                 }
 
                                                 if (isSupervisor) {

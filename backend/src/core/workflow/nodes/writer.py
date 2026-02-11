@@ -60,7 +60,7 @@ WRITER_MODE_TO_ARTIFACT_TYPE = {
 def _default_writer_mode(product_type: str | None) -> str:
     if product_type == "comic":
         return "comic_script"
-    if product_type == "document_design":
+    if product_type == "design":
         return "document_blueprint"
     return "slide_outline"
 

@@ -1,8 +1,13 @@
 import logging
 import json
+import os
 import re
 import uuid
 import asyncio
+import mimetypes
+import tempfile
+from pathlib import Path
+from urllib.parse import urlparse
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -14,6 +19,7 @@ from src.infrastructure.llm.llm import get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
 from src.shared.schemas import DataAnalystOutput
 from src.core.workflow.state import State
+from src.infrastructure.storage.gcs import download_blob_as_bytes, upload_to_gcs
 from .common import (
     build_worker_error_payload,
     create_worker_response,
@@ -21,6 +27,12 @@ from .common import (
     split_content_parts,
 )
 from langchain_core.runnables import RunnableConfig
+from src.core.tools import (
+    bash_tool,
+    package_visual_assets_tool,
+    python_repl_tool,
+    render_pptx_master_images_tool,
+)
 
 logger = logging.getLogger(__name__)
 MAX_DATA_ANALYST_ROUNDS = 3
@@ -213,6 +225,160 @@ async def _dispatch_text_delta(
             config=config
         )
 
+
+def _is_remote_url(value: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value.strip())
+    if parsed.scheme == "gs":
+        return bool(parsed.netloc and parsed.path)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _looks_like_file_url(value: str) -> bool:
+    if not _is_remote_url(value):
+        return False
+    lowered = value.lower()
+    file_exts = (
+        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg",
+        ".pdf", ".pptx", ".zip", ".csv", ".json", ".txt", ".md",
+    )
+    if lowered.endswith(file_exts):
+        return True
+    parsed = urlparse(value)
+    host = (parsed.netloc or "").lower()
+    return (
+        parsed.scheme == "gs"
+        or "storage.googleapis.com" in host
+        or "googleusercontent.com" in host
+    )
+
+
+def _collect_file_urls(value: object, output: set[str]) -> None:
+    if isinstance(value, str):
+        if _looks_like_file_url(value):
+            output.add(value.strip())
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_file_urls(item, output)
+        return
+    if isinstance(value, dict):
+        for nested in value.values():
+            _collect_file_urls(nested, output)
+
+
+def _safe_filename_from_url(url: str, index: int) -> str:
+    parsed = urlparse(url)
+    name = os.path.basename(parsed.path or "")
+    if not name:
+        name = f"file_{index:03d}.bin"
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name).strip("._")
+    if not safe:
+        safe = f"file_{index:03d}.bin"
+    return f"{index:03d}_{safe}"
+
+
+async def _download_input_files(
+    *,
+    workspace_dir: str,
+    urls: list[str],
+) -> tuple[dict[str, str], list[dict[str, str]]]:
+    inputs_dir = os.path.join(workspace_dir, "inputs")
+    os.makedirs(inputs_dir, exist_ok=True)
+
+    url_to_local: dict[str, str] = {}
+    manifest: list[dict[str, str]] = []
+
+    for index, source_url in enumerate(urls, start=1):
+        payload = await asyncio.to_thread(download_blob_as_bytes, source_url)
+        if payload is None:
+            logger.warning("Data Analyst failed to fetch input file: %s", source_url)
+            continue
+
+        filename = _safe_filename_from_url(source_url, index)
+        local_path = os.path.join(inputs_dir, filename)
+        with open(local_path, "wb") as fp:
+            fp.write(payload)
+
+        url_to_local[source_url] = local_path
+        manifest.append(
+            {
+                "source_url": source_url,
+                "local_path": local_path,
+            }
+        )
+
+    return url_to_local, manifest
+
+
+def _replace_urls_with_local_paths(value: object, url_to_local: dict[str, str]) -> object:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return url_to_local.get(stripped, value)
+    if isinstance(value, list):
+        return [_replace_urls_with_local_paths(item, url_to_local) for item in value]
+    if isinstance(value, dict):
+        return {k: _replace_urls_with_local_paths(v, url_to_local) for k, v in value.items()}
+    return value
+
+
+def _resolve_local_file_path(value: str, workspace_dir: str) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    source = value.strip()
+    if _is_remote_url(source):
+        return None
+
+    candidate = Path(source)
+    if not candidate.is_absolute():
+        candidate = Path(workspace_dir) / candidate
+
+    resolved = str(candidate.resolve())
+    workspace_root = str(Path(workspace_dir).resolve())
+    if not resolved.startswith(workspace_root):
+        return None
+    if not os.path.isfile(resolved):
+        return None
+    return resolved
+
+
+async def _upload_result_files_to_gcs(
+    *,
+    result: DataAnalystOutput,
+    workspace_dir: str,
+    output_prefix: str,
+) -> list[str]:
+    upload_trace: list[str] = []
+    for item in result.output_files:
+        original_url = item.url
+        local_path = _resolve_local_file_path(original_url, workspace_dir)
+        if not local_path:
+            continue
+
+        file_name = os.path.basename(local_path)
+        object_name = f"{output_prefix}/data_analyst/{file_name}"
+        guessed_type = item.mime_type or mimetypes.guess_type(local_path)[0] or "application/octet-stream"
+
+        with open(local_path, "rb") as fp:
+            payload = fp.read()
+
+        uploaded_url = await asyncio.to_thread(
+            upload_to_gcs,
+            payload,
+            guessed_type,
+            None,
+            None,
+            object_name,
+        )
+        item.url = uploaded_url
+        if not item.mime_type:
+            item.mime_type = guessed_type
+        upload_trace.append(f"uploaded {original_url} -> {uploaded_url}")
+
+    return upload_trace
+
 async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Literal["supervisor"]]:
     """
     Node for the Data Analyst agent.
@@ -256,11 +422,37 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     session_id = thread_id or str(uuid.uuid4())
     safe_title = _sanitize_filename(str(deck_title))
     output_prefix = f"generated_assets/{session_id}/{safe_title}"
+
+    source_urls: set[str] = set()
+    _collect_file_urls(artifacts, source_urls)
+    _collect_file_urls(selected_image_inputs, source_urls)
+    _collect_file_urls(attachments, source_urls)
+    _collect_file_urls(pptx_context, source_urls)
+
+    workspace_dir_obj = tempfile.TemporaryDirectory(prefix=f"data_analyst_{session_id}_")
+    workspace_dir = workspace_dir_obj.name
+    try:
+        url_to_local_path, local_file_manifest = await _download_input_files(
+            workspace_dir=workspace_dir,
+            urls=sorted(source_urls),
+        )
+    except Exception as file_err:
+        logger.warning("Data Analyst input file prefetch failed: %s", file_err)
+        url_to_local_path = {}
+        local_file_manifest = []
+
     context += (
         "\n\nMode Policy:\n"
         "- python_pipeline: execute general python processing only.\n"
         "- asset_packaging: execute packaging tasks explicitly requested by Planner.\n"
         "- Never auto-insert packaging tasks from available artifacts.\n"
+        "\n\nFile I/O Policy:\n"
+        "- All remote files are already downloaded into local workspace.\n"
+        "- Use local paths only when calling tools.\n"
+        "- Put local output file paths into DataAnalystOutput.output_files[].url.\n"
+        "- Data Analyst runtime will upload those local files to GCS automatically.\n"
+        f"\nWorkspace Directory: {workspace_dir}\n"
+        f"Local File Manifest: {json.dumps(local_file_manifest, ensure_ascii=False)}\n"
     )
 
     artifact_id = f"step_{current_step['id']}_data"
@@ -274,6 +466,8 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
         "output_prefix": output_prefix,
         "deck_title": deck_title,
         "session_id": session_id,
+        "workspace_dir": workspace_dir,
+        "local_file_manifest": local_file_manifest,
     }
 
     try:
@@ -293,21 +487,24 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     messages = apply_prompt_template("data_analyst", state)
     messages.append(HumanMessage(content=context, name="supervisor"))
 
-    from langchain_experimental.tools import PythonREPLTool
-    
     llm = get_llm_by_type(AGENT_LLM_MAP["data_analyst"])
     
-    # Use standard PythonREPLTool
-    repl_tool = PythonREPLTool()
+    # Use restricted local-processing tools. GCS I/O is managed by this node.
+    tools = [
+        python_repl_tool,
+        bash_tool,
+        render_pptx_master_images_tool,
+        package_visual_assets_tool,
+    ]
     
-    # Bind tool to LLM
-    llm_with_code_exec = llm.bind_tools([repl_tool])
+    # Bind tools to LLM
+    llm_with_tools = llm.bind_tools(tools)
 
     try:
         messages[-1].content += (
             "\n\nIMPORTANT: Only output the final result as valid JSON matching DataAnalystOutput "
             "when the Planner instruction is fully completed. If more processing is needed, "
-            "call the python_repl tool.\n"
+            "call an appropriate tool (python_repl_tool, render_pptx_master_images_tool, package_visual_assets_tool, bash_tool).\n"
             f"Current mode is `{execution_mode}` and must be respected strictly."
         )
 
@@ -323,7 +520,7 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
         tool_error_occurred = False
 
         for round_index in range(MAX_DATA_ANALYST_ROUNDS):
-            response = await llm_with_code_exec.ainvoke(messages, config=stream_config)
+            response = await llm_with_tools.ainvoke(messages, config=stream_config)
 
             tool_calls = getattr(response, "tool_calls", None) or []
             if tool_calls:
@@ -335,45 +532,90 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
                     tool_args = tool_call.get("args")
                     output = ""
                     tool_key = (tool_name or "").lower()
-                    if tool_key == "python_repl":
-                        code_text = _extract_python_code(tool_args)
+
+                    if isinstance(tool_args, dict):
+                        normalized_args = dict(tool_args)
+                    elif isinstance(tool_args, str):
+                        normalized_args = {"input": tool_args}
+                    else:
+                        normalized_args = {}
+                    normalized_args = _replace_urls_with_local_paths(normalized_args, url_to_local_path)
+
+                    if "python_repl" in tool_key:
+                        code_text = _extract_python_code(normalized_args)
                         if code_text:
-                            code_block = f"\n# Run {round_index + 1}\n{code_text}\n"
+                            code_block = f"\n# Python Run {round_index + 1}\n{code_text}\n"
                             try:
-                                await _dispatch_text_delta(
-                                    "data-analyst-code-delta",
-                                    artifact_id,
-                                    code_block,
-                                    config
-                                )
+                                await _dispatch_text_delta("data-analyst-code-delta", artifact_id, code_block, config)
                             except Exception as e:
                                 logger.warning(f"Failed to dispatch code delta: {e}")
                         try:
-                            output = await asyncio.to_thread(
-                                repl_tool.invoke,
-                                tool_args,
-                                config=config
-                            )
+                            expected_files = current_step.get("outputs", [])
+                            if "query" in normalized_args and "code" not in normalized_args:
+                                normalized_args = {
+                                    "code": normalized_args["query"],
+                                    **{k: v for k, v in normalized_args.items() if k != "query"},
+                                }
+                            if "code" not in normalized_args and "input" in normalized_args:
+                                normalized_args["code"] = normalized_args["input"]
+                            normalized_args["work_dir"] = workspace_dir
+                            normalized_args["expected_files"] = expected_files if isinstance(expected_files, list) else None
+
+                            output = await python_repl_tool.ainvoke(normalized_args, config=config)
                         except Exception as e:
-                            logger.error(f"Tool execution failed: {e}")
+                            logger.error(f"Python execution failed: {e}")
                             output = f"Error executing python_repl: {e}"
+                            tool_error_occurred = True
+                    elif "bash" in tool_key:
+                        cmd_text = normalized_args.get("cmd") or normalized_args.get("command") or str(normalized_args)
+                        if cmd_text:
+                            cmd_block = f"\n# Bash Run {round_index + 1}\n{cmd_text}\n"
+                            try:
+                                await _dispatch_text_delta("data-analyst-code-delta", artifact_id, cmd_block, config)
+                            except Exception as e:
+                                logger.warning(f"Failed to dispatch bash delta: {e}")
+                        try:
+                            if "command" in normalized_args and "cmd" not in normalized_args:
+                                normalized_args = {
+                                    "cmd": normalized_args["command"],
+                                    **{k: v for k, v in normalized_args.items() if k != "command"},
+                                }
+                            normalized_args.setdefault("work_dir", workspace_dir)
+                            output = await bash_tool.ainvoke(normalized_args, config=config)
+                        except Exception as e:
+                            logger.error(f"Bash execution failed: {e}")
+                            output = f"Error executing bash: {e}"
+                            tool_error_occurred = True
+                    elif "render_pptx_master_images" in tool_key:
+                        try:
+                            normalized_args.setdefault("work_dir", workspace_dir)
+                            normalized_args.setdefault("output_dir", "outputs/master_images")
+                            output = await render_pptx_master_images_tool.ainvoke(normalized_args, config=config)
+                        except Exception as e:
+                            logger.error(f"PPTX render tool failed: {e}")
+                            output = f"Error executing render_pptx_master_images_tool: {e}"
+                            tool_error_occurred = True
+                    elif "package_visual_assets" in tool_key:
+                        try:
+                            normalized_args.setdefault("work_dir", workspace_dir)
+                            normalized_args.setdefault("output_dir", "outputs/packaged_assets")
+                            normalized_args.setdefault("deck_title", str(deck_title))
+                            output = await package_visual_assets_tool.ainvoke(normalized_args, config=config)
+                        except Exception as e:
+                            logger.error(f"Asset packaging tool failed: {e}")
+                            output = f"Error executing package_visual_assets_tool: {e}"
                             tool_error_occurred = True
                     else:
                         output = f"Unsupported tool: {tool_name}"
 
                     tool_trace.append(f"{tool_name} -> {output}")
-                    tool_call_id = tool_call.get("id") or tool_call.get("tool_call_id") or tool_name or "python_repl"
+                    tool_call_id = tool_call.get("id") or tool_call.get("tool_call_id") or tool_name or "tool"
                     messages.append(ToolMessage(content=str(output), tool_call_id=tool_call_id))
 
                     if output:
-                        log_block = f"\n# Run {round_index + 1}\n{output}\n"
+                        log_block = f"\n# Output {round_index + 1}\n{output}\n"
                         try:
-                            await _dispatch_text_delta(
-                                "data-analyst-log-delta",
-                                artifact_id,
-                                log_block,
-                                config
-                            )
+                            await _dispatch_text_delta("data-analyst-log-delta", artifact_id, log_block, config)
                         except Exception as e:
                             logger.warning(f"Failed to dispatch log delta: {e}")
 
@@ -409,6 +651,18 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
         if result:
             failed_checks = _normalize_failed_checks(result.failed_checks)
             if tool_error_occurred and "tool_execution" not in failed_checks:
+                failed_checks = _normalize_failed_checks(failed_checks + ["tool_execution"])
+
+            try:
+                upload_trace = await _upload_result_files_to_gcs(
+                    result=result,
+                    workspace_dir=workspace_dir,
+                    output_prefix=output_prefix,
+                )
+                if upload_trace:
+                    tool_trace.extend(upload_trace)
+            except Exception as upload_err:
+                logger.error("Failed to upload output files to GCS: %s", upload_err)
                 failed_checks = _normalize_failed_checks(failed_checks + ["tool_execution"])
 
             if execution_mode == "asset_packaging" and not result.output_files:
@@ -550,6 +804,7 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     except Exception as e:
         logger.warning(f"Failed to dispatch data-analyst-complete: {e}")
 
+    workspace_dir_obj.cleanup()
     current_step["result_summary"] = result_summary
     
     return create_worker_response(

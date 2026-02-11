@@ -62,29 +62,6 @@ When reference policy is `explicit` or `previous`, add a note in `generation_not
 Assume downstream generation must render all user-facing text (title/subtitle/body) unless explicitly impossible.
 Reflect this in `generation_notes` with concise wording.
 
-# Mode-specific Planning Guidance
-- `slide_render` / `infographic_render`:
-  - readability and hierarchy first
-  - reserve clear text area
-  - include composition intent (e.g., right-side negative space, split screen)
-- `document_layout_render`:
-  - editorial balance and section legibility first
-  - preserve page-level rhythm and margin consistency
-- `comic_page_render`:
-  - panel flow, action readability, and dialogue placement first
-  - include shot intention and continuity hints
-- `character_sheet_render`:
-  - set `layout_type` to `other` (fixed)
-  - style source is `story_framework`, identity source is `character_sheet`
-  - if `layout_template_id` exists in input, use template-first planning
-  - generation_notes must mention these five content groups:
-    - メインビジュアル
-    - デザイン詳細
-    - 表情集
-    - 三面図
-    - アクションポーズ
-  - generation_notes must also mention immutable identity lock (face/hair/body/costume anchors)
-
 # generation_notes Format
 Keep concise and actionable. Include:
 - visual priority

@@ -7,9 +7,9 @@ import { cn } from "@/lib/utils"
 
 const getIconForProduct = (productType?: string) => {
     switch (productType) {
-        case "slide_infographic":
+        case "slide":
             return Presentation;
-        case "document_design":
+        case "design":
             return Palette;
         case "comic":
             return BookOpen;

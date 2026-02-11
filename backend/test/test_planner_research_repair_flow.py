@@ -42,7 +42,7 @@ def _planner_output_json_without_research() -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def test_planner_rejects_plan_when_research_is_required_but_not_explicit():
+def test_planner_allows_plan_when_research_is_required_but_not_explicit_in_hybrid_mode():
     state = {
         "messages": [HumanMessage(content="中世情報の出典を明示して漫画化して")],
         "plan": [],
@@ -61,6 +61,19 @@ def test_planner_rejects_plan_when_research_is_required_but_not_explicit():
     ) as mock_structured_output:
         cmd = asyncio.run(planner_node(state, {}))
 
-    assert cmd.goto == "__end__"
-    assert "明示的なResearcherステップ" in cmd.update["messages"][0].content
+    assert cmd.goto == "supervisor"
+    assert cmd.update["plan"][0]["capability"] == "writer"
     assert mock_structured_output.await_count == 0
+
+
+def test_planner_ends_when_product_type_is_missing():
+    state = {
+        "messages": [HumanMessage(content="スライドを作成して")],
+        "plan": [],
+        "artifacts": {},
+    }
+
+    cmd = asyncio.run(planner_node(state, {}))
+
+    assert cmd.goto == "__end__"
+    assert "プロダクト種別が未確定" in cmd.update["messages"][0].content

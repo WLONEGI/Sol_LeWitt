@@ -32,13 +32,13 @@ def default_mode_for_capability(
     if capability == "writer":
         if product_type == "comic":
             return "comic_script"
-        if product_type == "document_design":
+        if product_type == "design":
             return "document_blueprint"
         return "slide_outline"
     if capability == "visualizer":
         if product_type == "comic":
             return "comic_page_render"
-        if product_type == "document_design":
+        if product_type == "design":
             return "document_layout_render"
         return "slide_render"
     if capability == "researcher":

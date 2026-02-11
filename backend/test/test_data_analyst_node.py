@@ -1,11 +1,12 @@
 import asyncio
 import json
+from pathlib import Path
 
 from langchain_core.messages import AIMessage
-import langchain_experimental.tools as lc_tools
 
 from src.core.workflow.nodes import data_analyst as data_analyst_module
 from src.core.workflow.nodes import common as common_module
+from src.shared.schemas import DataAnalystOutput
 
 
 class FakeLLM:
@@ -100,8 +101,8 @@ def test_data_analyst_node_streams_code_and_log(monkeypatch):
     payload = _output_payload()
     responses = [
         AIMessage(content="", tool_calls=[{
-            "name": "python_repl",
-            "args": {"query": "print('hi')"},
+            "name": "python_repl_tool",
+            "args": {"code": "print('hi')"},
             "id": "call-1"
         }]),
         AIMessage(content=json.dumps(payload))
@@ -111,11 +112,12 @@ def test_data_analyst_node_streams_code_and_log(monkeypatch):
     monkeypatch.setattr(data_analyst_module, "get_llm_by_type", lambda _: fake_llm)
     monkeypatch.setattr(data_analyst_module, "adispatch_custom_event", fake_dispatch)
     monkeypatch.setattr(common_module.settings, "RESPONSE_FORMAT", "{role}:{content}")
-    monkeypatch.setattr(
-        lc_tools.PythonREPLTool,
-        "invoke",
-        lambda self, args, config=None: "ok"
-    )
+
+    class _FakePythonTool:
+        async def ainvoke(self, args, config=None):
+            return "ok"
+
+    monkeypatch.setattr(data_analyst_module, "python_repl_tool", _FakePythonTool())
 
     cmd = asyncio.run(data_analyst_module.data_analyst_node(_base_state(), {}))
 
@@ -136,8 +138,8 @@ def test_data_analyst_partial_success_is_treated_as_failure(monkeypatch):
     payload = _output_payload()
     responses = [
         AIMessage(content="", tool_calls=[{
-            "name": "python_repl",
-            "args": {"query": "print('boom')"},
+            "name": "python_repl_tool",
+            "args": {"code": "print('boom')"},
             "id": "call-1"
         }]),
         AIMessage(content=json.dumps(payload))
@@ -148,10 +150,11 @@ def test_data_analyst_partial_success_is_treated_as_failure(monkeypatch):
     monkeypatch.setattr(data_analyst_module, "adispatch_custom_event", fake_dispatch)
     monkeypatch.setattr(common_module.settings, "RESPONSE_FORMAT", "{role}:{content}")
 
-    def _raise_error(self, args, config=None):
-        raise RuntimeError("repl failed")
+    class _FailingPythonTool:
+        async def ainvoke(self, args, config=None):
+            raise RuntimeError("repl failed")
 
-    monkeypatch.setattr(lc_tools.PythonREPLTool, "invoke", _raise_error)
+    monkeypatch.setattr(data_analyst_module, "python_repl_tool", _FailingPythonTool())
 
     cmd = asyncio.run(data_analyst_module.data_analyst_node(_base_state(), {}))
     assert cmd.goto == "supervisor"
@@ -161,3 +164,37 @@ def test_data_analyst_partial_success_is_treated_as_failure(monkeypatch):
     assert stored["execution_summary"].startswith("Error:")
     assert "tool_execution" in stored["failed_checks"]
     assert stored["output_files"] == []
+
+
+def test_upload_result_files_rewrites_local_path_to_gcs(monkeypatch, tmp_path):
+    output_path = tmp_path / "deck.pdf"
+    output_path.write_bytes(b"%PDF-1.4 mock")
+
+    result = DataAnalystOutput(
+        execution_summary="done",
+        analysis_report="report",
+        failed_checks=[],
+        output_files=[{"url": "deck.pdf", "title": "Deck", "mime_type": "application/pdf"}],
+        blueprints=[],
+        visualization_code=None,
+        data_sources=[],
+    )
+
+    def _fake_upload(file_data, content_type, session_id=None, slide_number=None, object_name=None):
+        assert file_data.startswith(b"%PDF")
+        assert content_type == "application/pdf"
+        assert isinstance(object_name, str)
+        return "https://example.com/generated/deck.pdf"
+
+    monkeypatch.setattr(data_analyst_module, "upload_to_gcs", _fake_upload)
+
+    trace = asyncio.run(
+        data_analyst_module._upload_result_files_to_gcs(
+            result=result,
+            workspace_dir=str(Path(tmp_path)),
+            output_prefix="generated_assets/session/title",
+        )
+    )
+
+    assert result.output_files[0].url == "https://example.com/generated/deck.pdf"
+    assert trace and "uploaded deck.pdf" in trace[0]

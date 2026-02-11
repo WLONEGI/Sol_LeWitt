@@ -26,11 +26,10 @@ class TaskStep(TypedDict, total=False):
     origin_step_id: int
 
 
-ProductType = Literal["slide_infographic", "document_design", "comic"]
+ProductType = Literal["slide", "design", "comic"]
 IntentType = Literal["new", "refine", "regenerate"]
 TaskCapability = Literal["writer", "visualizer", "researcher", "data_analyst"]
 TaskStatus = Literal["pending", "in_progress", "completed", "blocked"]
-PlanPatchOpType = Literal["edit_pending", "split_pending", "append_tail"]
 
 
 class TargetScope(TypedDict, total=False):
@@ -58,13 +57,6 @@ class OrchestrationTaskStep(TypedDict, total=False):
     status: TaskStatus
     result_summary: str | None
     retries_used: int
-
-
-class PlanPatchOp(TypedDict):
-    """Allowed patch operation against frozen plan."""
-    op: PlanPatchOpType
-    payload: dict[str, Any]
-    target_step_id: NotRequired[int | None]
 
 
 class TaskBoard(TypedDict):
@@ -146,9 +138,7 @@ class State(MessagesState):
     pptx_context: NotRequired[dict[str, Any]]
     pptx_template_base64: NotRequired[str]
     aspect_ratio: NotRequired[str]
-    plan_status: NotRequired[Literal["frozen"]]
-    plan_baseline_hash: NotRequired[str]
-    plan_patch_log: NotRequired[list[PlanPatchOp]]
+    coordinator_followup_options: NotRequired[list[dict[str, str]]]
     rethink_used_turn: NotRequired[int]
     rethink_used_by_step: NotRequired[dict[int, int]]
     task_board: NotRequired[TaskBoard]

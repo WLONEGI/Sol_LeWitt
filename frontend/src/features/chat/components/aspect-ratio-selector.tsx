@@ -117,7 +117,7 @@ export function AspectRatioSelector({ value, onChange, disabled }: AspectRatioSe
             </Button>
 
             {isOpen && (
-                <div className="absolute top-full left-0 mt-2 w-64 rounded-xl border border-gray-200 bg-white p-1 shadow-lg animate-in fade-in zoom-in-95 duration-200 z-50">
+                <div className="absolute bottom-full left-0 mb-2 w-64 rounded-xl border border-gray-200 bg-white p-1 shadow-lg animate-in fade-in zoom-in-95 duration-200 z-50">
                     <div className="flex flex-col gap-0.5">
                         {OPTIONS.map((option) => (
                             <button
