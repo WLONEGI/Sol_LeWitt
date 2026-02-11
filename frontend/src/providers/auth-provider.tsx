@@ -42,7 +42,9 @@ const getAuthErrorMessage = (code?: string, fallback?: string) => {
         case "auth/network-request-failed":
             return "ネットワークエラーが発生しました。接続を確認してください"
         default:
-            return fallback || (code ? `ログインに失敗しました (${code})` : "ログインに失敗しました")
+            return code
+                ? `ログインに失敗しました (${code})`
+                : (fallback ? `ログインに失敗しました: ${fallback}` : "ログインに失敗しました")
     }
 }
 
@@ -119,21 +121,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         try {
             await signInWithPopup(auth, googleProvider)
         } catch (error: unknown) {
+            console.error("Login failed:", error)
             const authError = toFirebaseError(error)
             const code = authError?.code
+            const message = authError?.message || (error instanceof Error ? error.message : String(error))
+
             if (code === "auth/operation-not-supported-in-this-environment") {
                 try {
                     await signInWithRedirect(auth, googleProvider)
                 } catch (redirectError: unknown) {
+                    console.error("Redirect login failed:", redirectError)
                     const redirectAuthError = toFirebaseError(redirectError)
-                    setError(getAuthErrorMessage(redirectAuthError?.code, redirectAuthError?.message))
+                    const redirectMessage = redirectAuthError?.message || (redirectError instanceof Error ? redirectError.message : String(redirectError))
+                    setError(getAuthErrorMessage(redirectAuthError?.code, redirectMessage))
                 }
                 return
             }
-            setError(getAuthErrorMessage(code, authError?.message))
+            setError(getAuthErrorMessage(code, message))
         }
     }
-
     const signOutUser = async () => {
         if (bypassAuthForE2E) {
             setUser(null)
@@ -143,8 +149,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         try {
             await signOut(auth)
         } catch (error: unknown) {
+            console.error("Sign out failed:", error)
             const authError = toFirebaseError(error)
-            setError(getAuthErrorMessage(authError?.code, authError?.message))
+            const message = authError?.message || (error instanceof Error ? error.message : String(error))
+            setError(getAuthErrorMessage(authError?.code, message))
         }
     }
 
