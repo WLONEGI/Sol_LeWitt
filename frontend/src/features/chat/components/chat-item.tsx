@@ -4,7 +4,6 @@ import { cn } from "@/lib/utils"
 import { Markdown } from "@/components/ui/markdown"
 import { motion } from "framer-motion";
 import { SlideDeckPreview } from "./slide-deck-preview"; // Assuming relative path
-import { TypewriterText } from "@/components/ui/typewriter-text";
 import { ToolInvocationBlock } from "./tool-invocation";
 import { TimelineReasoning } from "./timeline-reasoning";
 import { WaveText } from "@/components/ui/wave-text";
@@ -16,7 +15,7 @@ interface ChatItemProps {
     avatar?: string;
     name?: string;
     className?: string;
-    /** ストリーミング中かどうか。trueの場合タイプライターエフェクトを適用 */
+    /** ストリーミング中かどうか。trueの場合は逐次更新表示を適用 */
     isStreaming?: boolean;
     loadingText?: string;
     // Optional artifact for rendering specific UI components within the chat stream
@@ -26,6 +25,7 @@ interface ChatItemProps {
         id: string;
         slides?: any[];
         status?: string;
+        aspectRatio?: string;
     };
     toolInvocations?: any[];
 }
@@ -61,6 +61,7 @@ export function ChatItem({ role, content, parts, avatar, name, className, isStre
                         slides={artifact.slides || []}
                         title={artifact.title}
                         isStreaming={artifact.status === 'streaming'}
+                        aspectRatio={artifact.aspectRatio}
                     />
                 </div>
             </motion.div>
@@ -92,12 +93,12 @@ export function ChatItem({ role, content, parts, avatar, name, className, isStre
                             />
                         </div>
                     ) : isStreaming && !isUser && !hasReasoningPart ? (
-                        <div className="prose prose-base dark:prose-invert max-w-none text-foreground font-medium font-typewriter">
-                            <TypewriterText
-                                text={streamedText}
-                                speed={18}
-                                showCursor={true}
-                            />
+                        <div>
+                            <Markdown className={cn(
+                                "prose prose-base prose-tight max-w-none text-gray-800 leading-normal font-medium",
+                                "font-sans",
+                                "prose-p:text-gray-800 prose-p:leading-normal prose-p:font-medium prose-headings:text-gray-900 prose-strong:text-gray-900 prose-li:text-gray-800 prose-li:font-medium prose-code:text-blue-600 prose-code:bg-blue-50 prose-code:px-1 prose-code:rounded prose-code:before:content-none prose-code:after:content-none"
+                            )}>{streamedText}</Markdown>
                         </div>
                     ) : (
                         <div className="flex flex-col w-full">

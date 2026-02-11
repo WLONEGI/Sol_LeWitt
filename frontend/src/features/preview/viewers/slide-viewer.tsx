@@ -7,9 +7,12 @@ import { useArtifactStore } from "@/features/preview/stores/artifact"
 import { cn } from "@/lib/utils"
 import { InpaintCanvas } from "@/features/preview/components/inpaint-canvas"
 
+import { getAspectRatioClass } from "../utils/aspect-ratio"
+
 interface SlideViewerProps {
     content: any // Expecting string (URL) or object with url
     imageId?: string
+    aspectRatio?: string
 }
 
 function getVersionState(content: any) {
@@ -48,7 +51,7 @@ function buildVersionedContent(content: any, url: string, versions: string[], cu
     }
 }
 
-export function SlideViewer({ content, imageId }: SlideViewerProps) {
+export function SlideViewer({ content, imageId, aspectRatio }: SlideViewerProps) {
     const { updateArtifactContent } = useArtifactStore()
 
     const versionState = useMemo(() => getVersionState(content), [content])
@@ -98,7 +101,10 @@ export function SlideViewer({ content, imageId }: SlideViewerProps) {
 
                 {/* Image Container with Cinematic Glow */}
                 <div
-                    className="relative max-h-full max-w-full aspect-[16/9] shadow-2xl rounded-sm transition-transform duration-500 ease-out group-hover:scale-[1.01]"
+                    className={cn(
+                        "relative max-h-full max-w-full shadow-2xl rounded-sm transition-transform duration-500 ease-out group-hover:scale-[1.01]",
+                        getAspectRatioClass(aspectRatio)
+                    )}
                     style={{
                         boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 40px rgba(124, 58, 237, 0.1)"
                     }}

@@ -4,6 +4,7 @@ import { Layout, Loader2, Maximize2 } from "lucide-react"
 import { useArtifactStore } from "@/features/preview/stores/artifact"
 import { cn } from "@/lib/utils"
 import { motion } from "framer-motion"
+import { getAspectRatioClass } from "@/features/preview/utils/aspect-ratio"
 
 export interface SlideDeckItem {
     slide_number: number;
@@ -17,9 +18,10 @@ interface SlideDeckPreviewProps {
     slides: SlideDeckItem[];
     title?: string;
     isStreaming?: boolean;
+    aspectRatio?: string;
 }
 
-export function SlideDeckPreview({ artifactId, slides, title = "Slides", isStreaming }: SlideDeckPreviewProps) {
+export function SlideDeckPreview({ artifactId, slides, title = "Slides", isStreaming, aspectRatio }: SlideDeckPreviewProps) {
     const { setActiveContextId, setPreviewOpen } = useArtifactStore();
 
     if (!slides || slides.length === 0) return null;
@@ -61,7 +63,10 @@ export function SlideDeckPreview({ artifactId, slides, title = "Slides", isStrea
                     </div>
 
                     {/* Content: Main Image */}
-                    <div className="relative aspect-video w-full bg-muted/20 cursor-pointer overflow-hidden group">
+                    <div className={cn(
+                        "relative w-full bg-muted/20 cursor-pointer overflow-hidden group",
+                        getAspectRatioClass(aspectRatio)
+                    )}>
                         {slide.image_url ? (
                             <img
                                 src={slide.image_url}

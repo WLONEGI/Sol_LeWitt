@@ -179,6 +179,7 @@ export function ChatList({
 
     const renderEntries = useMemo<TimelineRenderEntry[]>(() => {
         const entries: TimelineRenderEntry[] = [];
+        const stepOccurrenceById = new Map<string, number>();
         let currentGroup:
             | { stepId: string; title: string; items: TimelineEvent[] }
             | null = null;
@@ -187,10 +188,15 @@ export function ChatList({
             const statusFromPlan = planStepStatusById.get(group.stepId);
             const fallbackStatus: PlanStepStatus =
                 statusFromPlan ?? (isLastGroup && isLoading ? "in_progress" : "completed");
+            const occurrence = stepOccurrenceById.get(group.stepId) ?? 0;
+            stepOccurrenceById.set(group.stepId, occurrence + 1);
+            const stepKey = occurrence === 0
+                ? `step-${group.stepId}`
+                : `step-${group.stepId}-${occurrence}`;
 
             entries.push({
                 kind: "step_group",
-                key: `step-${group.stepId}-${entries.length}`,
+                key: stepKey,
                 stepId: group.stepId,
                 title: group.title,
                 items: group.items,
@@ -288,6 +294,7 @@ export function ChatList({
                                 title: item.title,
                                 slides: (item as any).slides,
                                 status: (item as any).status,
+                                aspectRatio: (item as any).aspectRatio || (item as any).metadata?.aspect_ratio,
                             }}
                             isStreaming={(item as any).status === "streaming"}
                         />
@@ -340,14 +347,12 @@ export function ChatList({
 
         if (item.type === "research_report") {
             return (
-                <div key={key} className="flex w-full gap-4 p-4 justify-start">
-                    <div className="flex flex-col items-start w-full">
-                        <ResearchStatusButton
-                            taskId={item.taskId}
-                            perspective={item.perspective}
-                            status={item.status}
-                        />
-                    </div>
+                <div key={key} className="flex w-full justify-start">
+                    <ResearchStatusButton
+                        taskId={item.taskId}
+                        perspective={item.perspective}
+                        status={item.status}
+                    />
                 </div>
             );
         }
@@ -421,6 +426,7 @@ export function ChatList({
                                 title: effectiveLatestSlideDeck.title || "Generated Slides",
                                 slides: Array.isArray(effectiveLatestSlideDeck.slides) ? effectiveLatestSlideDeck.slides : [],
                                 status: effectiveLatestSlideDeck.status,
+                                aspectRatio: (effectiveLatestSlideDeck as any).aspectRatio || (effectiveLatestSlideDeck as any).metadata?.aspect_ratio,
                             }}
                             isStreaming={effectiveLatestSlideDeck.status === "streaming"}
                         />
@@ -489,7 +495,7 @@ function PlanStepSection({ stepId, title, status, children }: PlanStepSectionPro
             data-step-id={stepId}
         >
             <div className={cn(
-                "absolute left-[14px] top-9 bottom-2 border-l border-dashed border-slate-300/80",
+                "absolute left-[14px] top-9 bottom-2 border-l-2 border-dashed border-slate-400/90",
                 !open && "bottom-auto h-3"
             )} />
             <CollapsibleTrigger asChild>

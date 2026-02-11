@@ -15,6 +15,8 @@ import { useArtifactStore } from "@/features/preview/stores/artifact"
 import { QUICK_ACTIONS } from "@/features/chat/constants/quick-actions"
 import { useAuth } from "@/providers/auth-provider"
 
+import { useResearchStore } from "@/features/preview/stores/research"
+
 export function ChatClient({ id }: { id: string }) {
     const { user, loading } = useAuth()
 
@@ -24,16 +26,31 @@ export function ChatClient({ id }: { id: string }) {
         }))
     )
 
-    const { isPreviewOpen } = useArtifactStore(
+    const { isPreviewOpen, currentArtifact, activeContextId } = useArtifactStore(
         useShallow((state) => ({
             isPreviewOpen: state.isPreviewOpen,
+            currentArtifact: state.currentArtifact,
+            activeContextId: state.activeContextId,
         }))
     )
+
+    const tasks = useResearchStore(state => state.tasks)
+    const activeResearchTask = activeContextId ? tasks[activeContextId] : null
 
     const selectedAction = useMemo(
         () => QUICK_ACTIONS.find((action) => action.id === selectedActionId) ?? null,
         [selectedActionId]
     )
+
+    // Layout configuration
+    const isReportOrOutline = useMemo(() => {
+        if (activeResearchTask) return true
+        if (!currentArtifact) return false
+        return ['report', 'outline', 'log'].includes(currentArtifact.type)
+    }, [activeResearchTask, currentArtifact])
+
+    const isFullScreen = isPreviewOpen && !isReportOrOutline
+    const isSplitScreen = isPreviewOpen && isReportOrOutline
 
     if (loading) {
         return (
@@ -61,9 +78,9 @@ export function ChatClient({ id }: { id: string }) {
                             <ChatInterface key={id} threadId={id} />
                         </div>
 
-                        {/* Preview Panel - appears on right when open */}
+                        {/* Split-Screen Preview Panel (Reports/Outlines) */}
                         <AnimatePresence mode="wait">
-                            {isPreviewOpen && (
+                            {isSplitScreen && (
                                 <motion.div
                                     initial={{ width: 0, opacity: 0 }}
                                     animate={{ width: 450, opacity: 1 }}
@@ -71,7 +88,25 @@ export function ChatClient({ id }: { id: string }) {
                                     transition={{ duration: 0.3, ease: "easeInOut" }}
                                     className={cn(
                                         "shrink-0 overflow-hidden border-l border-border",
-                                        "bg-background"
+                                        "bg-white"
+                                    )}
+                                >
+                                    <ArtifactView />
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+
+                        {/* Full-Screen Preview Overlay (Visualizer/Slides) */}
+                        <AnimatePresence mode="wait">
+                            {isFullScreen && (
+                                <motion.div
+                                    initial={{ opacity: 0, y: 20 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    exit={{ opacity: 0, y: 20 }}
+                                    transition={{ duration: 0.2, ease: "easeOut" }}
+                                    className={cn(
+                                        "absolute inset-0 z-50 overflow-hidden",
+                                        "bg-white"
                                     )}
                                 >
                                     <ArtifactView />

@@ -7,9 +7,11 @@ import { Download, ChevronLeft, ChevronRight, Pencil } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { InpaintCanvas } from "@/features/preview/components/inpaint-canvas"
 import { useArtifactStore } from "@/features/preview/stores/artifact"
+import { getAspectRatioClass } from "../utils/aspect-ratio"
 
 interface SlideDeckViewerProps {
     artifactId: string
+    aspectRatio?: string
     content: {
         slides?: Array<{
             slide_number: number
@@ -46,7 +48,7 @@ function getSlideVersionState(slide: any) {
     return { url, versions, currentIndex }
 }
 
-export function SlideDeckViewer({ content, artifactId }: SlideDeckViewerProps) {
+export function SlideDeckViewer({ content, artifactId, aspectRatio }: SlideDeckViewerProps) {
     const [tab, setTab] = useState<"image" | "prompt" | "pdf">("image")
     const [editingSlideNumber, setEditingSlideNumber] = useState<number | null>(null)
     const { updateArtifactContent } = useArtifactStore()
@@ -235,7 +237,10 @@ export function SlideDeckViewer({ content, artifactId }: SlideDeckViewerProps) {
                                         </div>
 
                                         {tab === "image" ? (
-                                            <div className="aspect-video w-full rounded-md overflow-hidden border border-border bg-muted/30">
+                                            <div className={cn(
+                                                "w-full rounded-md overflow-hidden border border-border bg-muted/30",
+                                                getAspectRatioClass(aspectRatio)
+                                            )}>
                                                 {isEditing ? (
                                                     <InpaintCanvas
                                                         imageUrl={versionState.url || ""}

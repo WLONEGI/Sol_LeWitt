@@ -18,7 +18,7 @@ import { ArtifactContainer } from "./artifact-container"
 // Reuse Markdown component for Report/Outline
 function ReportViewer({ content, citations = [] }: { content: string, citations?: Array<{ title: string; uri: string }> }) {
     return (
-        <div className="flex flex-col flex-1 min-h-0 bg-background relative">
+        <div className="flex flex-col flex-1 min-h-0 bg-white relative">
             {/* Report Content */}
             <ScrollArea className="flex-1 min-h-0 p-6">
                 <div className="prose dark:prose-invert max-w-none pb-32"> {/* Move padding here */}
@@ -72,7 +72,7 @@ export function ArtifactView() {
 
     if (!displayArtifact && !activeResearchTask) {
         return (
-            <div className="h-full w-full flex items-center justify-center text-muted-foreground bg-background">
+            <div className="h-full w-full flex items-center justify-center text-muted-foreground bg-white">
                 <ArtifactContainer title="Preview" subtitle="No content selected">
                     <div className="h-full w-full flex items-center justify-center italic text-muted-foreground/50">
                         Select a task or artifact to preview
@@ -100,9 +100,21 @@ export function ArtifactView() {
             case 'outline':
                 return <ReportViewer content={displayArtifact.content} />
             case 'slide':
-                return <SlideViewer content={displayArtifact.content} imageId={displayArtifact.id} />
+                return (
+                    <SlideViewer
+                        content={displayArtifact.content}
+                        imageId={displayArtifact.id}
+                        aspectRatio={displayArtifact.content?.metadata?.aspect_ratio}
+                    />
+                )
             case 'slide_deck':
-                return <SlideDeckViewer content={displayArtifact.content} artifactId={displayArtifact.id} />
+                return (
+                    <SlideDeckViewer
+                        content={displayArtifact.content}
+                        artifactId={displayArtifact.id}
+                        aspectRatio={displayArtifact.content?.metadata?.aspect_ratio}
+                    />
+                )
             case 'data_analyst':
                 return <DataAnalystViewer content={displayArtifact.content} />
             case 'writer_story_framework':
