@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "prebuild": "node -v && npm -v && echo --- ENV DUMP --- && env | grep NEXT_PUBLIC || true && echo --- DIR LISITING --- && ls -la && ls -la .. || true",
+    "prebuild": "node -v && npm -v && echo --- ENV DUMP --- && env && echo --- DIR LISITING --- && ls -la && ls -la .. || true",
     "start": "next start",
     "test": "vitest",
     "pretest:e2e": "npx kill-port 3000 || true",
