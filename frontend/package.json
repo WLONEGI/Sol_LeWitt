@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": ">=20.0.0"
+    "node": "22"
   },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "prebuild": "node -v && npm -v",
     "start": "next start",
     "test": "vitest",
     "pretest:e2e": "npx kill-port 3000 || true",
