@@ -3,7 +3,11 @@
 import { cn } from "@/lib/utils"
 import { Markdown } from "@/components/ui/markdown"
 import { motion } from "framer-motion";
+import { FileCode2, FileImage, FileSpreadsheet, FileText } from "lucide-react";
+import type { ComponentType } from "react";
 import { SlideDeckPreview } from "./slide-deck-preview"; // Assuming relative path
+import { CharacterSheetDeckPreview } from "./character-sheet-deck-preview";
+import { ComicPageDeckPreview } from "./comic-page-deck-preview";
 import { ToolInvocationBlock } from "./tool-invocation";
 import { TimelineReasoning } from "./timeline-reasoning";
 import { WaveText } from "@/components/ui/wave-text";
@@ -30,9 +34,48 @@ interface ChatItemProps {
     toolInvocations?: any[];
 }
 
+type MessageFilePart = {
+    type: 'file';
+    url: string;
+    mediaType?: string;
+    filename?: string;
+};
+
+function getFileTypeMeta(mediaType?: string, filename?: string): {
+    label: string;
+    icon: ComponentType<{ className?: string }>;
+    iconClassName: string;
+} {
+    const mt = (mediaType || "").toLowerCase();
+    const ext = (filename?.split(".").pop() || "").toLowerCase();
+
+    if (mt.includes("presentationml") || ext === "pptx") {
+        return { label: "PPTX", icon: FileText, iconClassName: "bg-orange-500 text-white" };
+    }
+    if (mt.startsWith("image/")) {
+        return { label: "IMAGE", icon: FileImage, iconClassName: "bg-sky-500 text-white" };
+    }
+    if (mt.includes("html") || ext === "html" || ext === "htm") {
+        return { label: "HTML", icon: FileCode2, iconClassName: "bg-red-600 text-white" };
+    }
+    if (mt.includes("csv") || ext === "csv") {
+        return { label: "CSV", icon: FileSpreadsheet, iconClassName: "bg-emerald-600 text-white" };
+    }
+    if (mt.includes("json") || ext === "json") {
+        return { label: "JSON", icon: FileCode2, iconClassName: "bg-violet-600 text-white" };
+    }
+    if (mt.includes("pdf") || ext === "pdf") {
+        return { label: "PDF", icon: FileText, iconClassName: "bg-rose-600 text-white" };
+    }
+    return { label: "FILE", icon: FileText, iconClassName: "bg-slate-600 text-white" };
+}
+
 
 export function ChatItem({ role, content, parts, avatar, name, className, isStreaming = false, loadingText, artifact, toolInvocations }: ChatItemProps) {
     const isUser = role === 'user';
+    const fileParts = (parts ?? []).filter(
+        (part) => part?.type === 'file' && typeof part?.url === 'string' && part.url.length > 0
+    ) as MessageFilePart[];
     const streamedText =
         content ||
         (parts ?? [])
@@ -44,8 +87,20 @@ export function ChatItem({ role, content, parts, avatar, name, className, isStre
     );
     const shouldShowLoader = isStreaming && !isUser && streamedText.length === 0 && !hasReasoningPart;
 
-    // Check if this chat item is meant to display a slide deck
-    if (artifact && artifact.kind === 'slide_deck') {
+    const shouldRenderDeck =
+        artifact &&
+        (artifact.kind === 'slide_deck' ||
+            artifact.kind === 'character_sheet_deck' ||
+            artifact.kind === 'comic_page_deck');
+
+    // Render visual deck cards in chat stream.
+    if (shouldRenderDeck && artifact) {
+        const DeckPreviewComponent =
+            artifact.kind === 'character_sheet_deck'
+                ? CharacterSheetDeckPreview
+                : artifact.kind === 'comic_page_deck'
+                    ? ComicPageDeckPreview
+                    : SlideDeckPreview;
         return (
             <motion.div
                 initial={{ opacity: 0, y: 10 }}
@@ -55,8 +110,7 @@ export function ChatItem({ role, content, parts, avatar, name, className, isStre
             >
                 <div className="flex flex-col items-start w-full max-w-[80%]">
                     {name && <span className="text-xs text-muted-foreground mb-1 ml-1">{name}</span>}
-                    {/* Render the SlideDeckPreview component */}
-                    <SlideDeckPreview
+                    <DeckPreviewComponent
                         artifactId={artifact.id}
                         slides={artifact.slides || []}
                         title={artifact.title}
@@ -102,6 +156,33 @@ export function ChatItem({ role, content, parts, avatar, name, className, isStre
                         </div>
                     ) : (
                         <div className="flex flex-col w-full">
+                            {isUser && fileParts.length > 0 && (
+                                <div className="mb-3 flex flex-wrap gap-2">
+                                    {fileParts.map((file, index) => {
+                                        const meta = getFileTypeMeta(file.mediaType, file.filename);
+                                        const Icon = meta.icon;
+                                        return (
+                                            <a
+                                                key={`${file.url}-${index}`}
+                                                href={file.url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="w-[260px] max-w-full rounded-2xl border border-border bg-muted/40 px-4 py-3 transition-colors hover:bg-muted"
+                                            >
+                                                <div className="truncate text-sm font-semibold text-foreground">
+                                                    {file.filename || "添付ファイル"}
+                                                </div>
+                                                <div className="mt-3 flex items-center gap-2 text-muted-foreground">
+                                                    <span className={cn("inline-flex h-8 w-8 items-center justify-center rounded-md", meta.iconClassName)}>
+                                                        <Icon className="h-4 w-4" />
+                                                    </span>
+                                                    <span className="text-base font-semibold tracking-wide text-foreground/80">{meta.label}</span>
+                                                </div>
+                                            </a>
+                                        );
+                                    })}
+                                </div>
+                            )}
                             {parts && parts.length > 0 ? (
                                 parts.map((part, idx) => {
                                     if (part.type === 'text' && part.text) {
@@ -129,6 +210,9 @@ export function ChatItem({ role, content, parts, avatar, name, className, isStre
                                                 isStreaming={isStreaming && !isUser}
                                             />
                                         );
+                                    }
+                                    if (part.type === 'file') {
+                                        return null;
                                     }
                                     return null;
                                 })

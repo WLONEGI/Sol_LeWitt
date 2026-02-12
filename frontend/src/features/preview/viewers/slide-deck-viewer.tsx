@@ -5,8 +5,9 @@ import { cn } from "@/lib/utils"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Download, ChevronLeft, ChevronRight, Pencil } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { InpaintCanvas } from "@/features/preview/components/inpaint-canvas"
+import { InpaintCanvas, type InpaintSubmitPayload } from "@/features/preview/components/inpaint-canvas"
 import { useArtifactStore } from "@/features/preview/stores/artifact"
+import { useAuth } from "@/providers/auth-provider"
 import { getAspectRatioClass } from "../utils/aspect-ratio"
 
 interface SlideDeckViewerProps {
@@ -52,6 +53,7 @@ export function SlideDeckViewer({ content, artifactId, aspectRatio }: SlideDeckV
     const [tab, setTab] = useState<"image" | "prompt" | "pdf">("image")
     const [editingSlideNumber, setEditingSlideNumber] = useState<number | null>(null)
     const { updateArtifactContent } = useArtifactStore()
+    const { token } = useAuth()
 
     const slides = useMemo(() => {
         const list = Array.isArray(content?.slides)
@@ -85,14 +87,19 @@ export function SlideDeckViewer({ content, artifactId, aspectRatio }: SlideDeckV
         updateArtifactContent(artifactId, { ...content, slides: nextSlides })
     }
 
-    const handleInpaintSubmit = async (prompt: string) => {
+    const handleInpaintSubmit = async ({ prompt, maskImageUrl }: InpaintSubmitPayload) => {
         if (!editingSlide) return
+        if (!token) throw new Error("認証情報がありません。再ログインしてください。")
         const response = await fetch(`/api/slide-deck/${artifactId}/slides/${editingSlide.slide_number}/inpaint`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+            },
             body: JSON.stringify({
                 prompt,
                 image_url: getSlideVersionState(editingSlide).url,
+                mask_image_url: maskImageUrl,
             }),
         })
         const data = await response.json()
@@ -230,9 +237,6 @@ export function SlideDeckViewer({ content, artifactId, aspectRatio }: SlideDeckV
                                                     <Pencil className="h-3 w-3 mr-1" />
                                                     部分修正
                                                 </Button>
-                                                <div className="text-[10px] font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded">
-                                                    {String(slide.slide_number).padStart(2, "0")}
-                                                </div>
                                             </div>
                                         </div>
 

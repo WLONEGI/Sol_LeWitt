@@ -2,6 +2,7 @@ import logging
 import json
 import re
 from typing import Any, Literal
+from pydantic import BaseModel, Field
 
 from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
@@ -12,6 +13,7 @@ from src.infrastructure.llm.llm import get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
 from src.core.workflow.state import State
 from src.core.workflow.step_v2 import capability_from_any, normalize_step_v2, plan_steps_for_ui
+from .common import run_structured_output, resolve_step_dependency_context, build_step_asset_pool
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,12 @@ CAPABILITY_TO_DESTINATION = {
     "data_analyst": "data_analyst",
 }
 SUPERVISOR_RETRY_HINT_MARKER = "[SUPERVISOR_RETRY_HINT]"
+MAX_SELECTED_ASSETS_PER_STEP = 8
+
+
+class StepAssetSelection(BaseModel):
+    selected_asset_ids: list[str] = Field(default_factory=list, description="選択したasset_id一覧")
+    reason: str | None = Field(default=None, description="選択理由")
 
 
 def _extract_text_from_content(content: Any) -> str:
@@ -316,6 +324,7 @@ def _extract_failure_metadata(current_step: dict, artifact_value: object) -> tup
     failed = False
     failed_checks: list[str] = []
     notes: str | None = None
+    capability = current_step.get("capability")
 
     result_summary = current_step.get("result_summary")
     if _result_summary_indicates_failure(result_summary if isinstance(result_summary, str) else None):
@@ -347,16 +356,34 @@ def _extract_failure_metadata(current_step: dict, artifact_value: object) -> tup
             if normalized_checks:
                 failed = True
                 failed_checks.extend(normalized_checks)
-        execution_summary = parsed.get("execution_summary")
-        if _result_summary_indicates_failure(execution_summary if isinstance(execution_summary, str) else None):
-            failed = True
-            if not notes and isinstance(execution_summary, str):
-                notes = execution_summary
-        analysis_report = parsed.get("analysis_report")
-        if _result_summary_indicates_failure(analysis_report if isinstance(analysis_report, str) else None):
-            failed = True
-            if not notes and isinstance(analysis_report, str):
-                notes = analysis_report
+        if capability == "data_analyst":
+            execution_log = parsed.get("execution_log")
+            if _result_summary_indicates_failure(execution_log if isinstance(execution_log, str) else None):
+                failed = True
+                if not notes and isinstance(execution_log, str):
+                    notes = execution_log
+        else:
+            execution_summary = parsed.get("execution_summary")
+            if _result_summary_indicates_failure(execution_summary if isinstance(execution_summary, str) else None):
+                failed = True
+                if not notes and isinstance(execution_summary, str):
+                    notes = execution_summary
+
+        if capability == "visualizer":
+            prompts = parsed.get("prompts")
+            if isinstance(prompts, list):
+                generated_count = 0
+                for item in prompts:
+                    if not isinstance(item, dict):
+                        continue
+                    image_url = item.get("generated_image_url")
+                    if isinstance(image_url, str) and image_url.strip():
+                        generated_count += 1
+                if prompts and generated_count == 0:
+                    failed = True
+                    failed_checks.append("all_images_failed")
+                    if not notes:
+                        notes = "Visualizer produced no generated_image_url in prompts."
 
     if failed and not failed_checks:
         failed_checks = ["worker_execution"]
@@ -378,6 +405,111 @@ def _merge_updates(*updates: dict) -> dict:
             else:
                 merged[key] = value
     return merged
+
+
+def _fallback_selected_asset_ids(
+    step: dict[str, Any],
+    asset_pool: dict[str, dict[str, Any]],
+) -> list[str]:
+    capability = capability_from_any(step)
+    items = list(asset_pool.values())
+    if capability == "visualizer":
+        items = [item for item in items if bool(item.get("is_image"))]
+    elif capability == "writer":
+        items = [item for item in items if not bool(item.get("is_image")) or item.get("source_type") == "user_upload"] or items
+
+    # Prefer newer upstream artifacts when producer_step_id is available.
+    items.sort(key=lambda item: int(item.get("producer_step_id") or 0), reverse=True)
+    selected: list[str] = []
+    for item in items:
+        asset_id = item.get("asset_id")
+        if isinstance(asset_id, str) and asset_id not in selected:
+            selected.append(asset_id)
+        if len(selected) >= MAX_SELECTED_ASSETS_PER_STEP:
+            break
+    return selected
+
+
+async def _select_assets_for_step(
+    *,
+    state: State,
+    step: dict[str, Any],
+    dependency_context: dict[str, Any],
+    config: RunnableConfig,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    asset_pool = build_step_asset_pool(state, current_step=step, dependency_context=dependency_context)
+    if not asset_pool:
+        return asset_pool, []
+
+    step_id = step.get("id")
+    candidate_assets = []
+    for item in asset_pool.values():
+        candidate_assets.append(
+            {
+                "asset_id": item.get("asset_id"),
+                "source_type": item.get("source_type"),
+                "mime_type": item.get("mime_type"),
+                "is_image": bool(item.get("is_image")),
+                "producer_step_id": item.get("producer_step_id"),
+                "producer_capability": item.get("producer_capability"),
+                "label": item.get("label"),
+                "title": item.get("title"),
+            }
+        )
+
+    selector_input = {
+        "step_id": step_id,
+        "capability": step.get("capability"),
+        "mode": step.get("mode"),
+        "instruction": step.get("instruction"),
+        "description": step.get("description"),
+        "inputs": step.get("inputs") or [],
+        "depends_on": step.get("depends_on") or [],
+        "candidate_assets": candidate_assets,
+    }
+
+    selector_messages = [
+        SystemMessage(
+            content=(
+                "あなたは実行ステップに渡すアセット選択器です。"
+                "候補から必要なasset_idだけ選び、JSONで返してください。"
+                "capabilityとmodeに応じて必要な形式を選択し、不要なアセットは除外してください。"
+                "visualizerは画像を優先し、writer/data_analystは指示に必要なファイルを優先してください。"
+                "出力はStepAssetSelectionスキーマに厳密準拠してください。"
+            )
+        ),
+        HumanMessage(content=json.dumps(selector_input, ensure_ascii=False), name="supervisor"),
+    ]
+
+    selected_ids: list[str] = []
+    try:
+        llm = get_llm_by_type("reasoning")
+        stream_config = config.copy()
+        stream_config["run_name"] = "supervisor_asset_selector"
+        selection = await run_structured_output(
+            llm=llm,
+            schema=StepAssetSelection,
+            messages=selector_messages,
+            config=stream_config,
+            repair_hint="Schema: StepAssetSelection. No extra text.",
+        )
+        valid_ids = [
+            asset_id
+            for asset_id in selection.selected_asset_ids
+            if isinstance(asset_id, str) and asset_id in asset_pool
+        ]
+        deduped: list[str] = []
+        for asset_id in valid_ids:
+            if asset_id not in deduped:
+                deduped.append(asset_id)
+        selected_ids = deduped[:MAX_SELECTED_ASSETS_PER_STEP]
+    except Exception as e:
+        logger.warning("Supervisor asset selection failed, fallback selection is applied: %s", e)
+
+    if not selected_ids:
+        selected_ids = _fallback_selected_asset_ids(step, asset_pool)
+
+    return asset_pool, selected_ids
 
 def _format_messages_for_summary(messages: list) -> str:
     lines = []
@@ -807,9 +939,36 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command:
             )
 
         logger.info(f"Starting Step {current_step_index} ({destination})")
-        
+
+        dependency_context = resolve_step_dependency_context(state, current_step)
+        step_asset_pool, selected_asset_ids = await _select_assets_for_step(
+            state=state,
+            step=current_step,
+            dependency_context=dependency_context,
+            config=config,
+        )
+        merged_asset_pool = dict(state.get("asset_pool") or {})
+        merged_asset_pool.update(step_asset_pool)
+        selected_assets_by_step = dict(state.get("selected_assets_by_step") or {})
+        step_id = current_step.get("id")
+        if isinstance(step_id, int):
+            selected_assets_by_step[str(step_id)] = selected_asset_ids
+
         plan[current_step_index]["status"] = "in_progress"
         await _dispatch_plan_step_started(current_step, config)
+        try:
+            await adispatch_custom_event(
+                "data-step-assets-selected",
+                {
+                    "step_id": current_step.get("id"),
+                    "capability": current_step.get("capability"),
+                    "mode": current_step.get("mode"),
+                    "selected_asset_ids": selected_asset_ids,
+                },
+                config=config,
+            )
+        except Exception as e:
+            logger.warning("Failed to dispatch selected assets event: %s", e)
 
         await _dispatch_plan_update(plan, config)
         
@@ -822,7 +981,12 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command:
         return Command(
             goto=destination,
             update=_merge_updates(
-                {"plan": plan, "messages": [AIMessage(content=report, name="supervisor")]},
+                {
+                    "plan": plan,
+                    "messages": [AIMessage(content=report, name="supervisor")],
+                    "asset_pool": merged_asset_pool,
+                    "selected_assets_by_step": selected_assets_by_step,
+                },
                 compact_update,
                 prune_update
             )

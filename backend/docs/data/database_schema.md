@@ -47,17 +47,14 @@ Worker が生成する主な成果物形式：
   ]
 }
 
-// Researcher(image_search)
+// Researcher(text_search)
 {
-  "perspective": "睡眠 リラックス イラスト",
-  "image_candidates": [
-    {
-      "image_url": "https://example.com/image.jpg",
-      "source_url": "https://example.com",
-      "license_note": "CC BY 4.0",
-      "provider": "google_images",
-      "caption": "候補画像の説明"
-    }
+  "task_id": 1,
+  "perspective": "市場規模と推移",
+  "report": "主要指標を比較して要点を整理...",
+  "sources": [
+    "https://example.com/source-1",
+    "https://example.com/source-2"
   ]
 }
 
@@ -86,4 +83,4 @@ Worker が生成する主な成果物形式：
 
 補足:
 - 旧 `Storywriter` 形式は廃止し、`Writer` の mode 別 JSON 出力に統一。
-- 画像検索候補は `image_url` / `source_url` / `license_note` を必須とする。
+- Researcher は現在 `text_search` のみを使用する。

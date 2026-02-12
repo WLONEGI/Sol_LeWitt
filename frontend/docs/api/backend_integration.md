@@ -39,6 +39,23 @@
 > `attachments` に `kind: "pptx"` を含めると、バックエンド側でPPTX解析が行われ、
 > 生成された `pptx_context` は Data Analyst ノードで利用されます。
 
+## 1.2 In-painting API（Visualizer編集）
+- **Endpoint**:
+  - `/api/image/{imageId}/inpaint`
+  - `/api/slide-deck/{deckId}/slides/{slideNumber}/inpaint`
+- **Method**: `POST`
+- **Usage**:
+  - `src/features/preview/viewers/slide-viewer.tsx`
+  - `src/features/preview/viewers/slide-deck-viewer.tsx`
+- **Request Body**:
+```ts
+{
+  image_url: string;      // 元画像
+  mask_image_url: string; // data URL / https / gs://
+  prompt: string;         // 修正指示
+}
+```
+
 ## 2. 履歴・管理 API
 
 ### セッション履歴の取得

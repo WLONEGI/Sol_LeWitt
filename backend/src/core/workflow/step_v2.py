@@ -42,12 +42,8 @@ def default_mode_for_capability(
             return "document_layout_render"
         return "slide_render"
     if capability == "researcher":
-        if any(keyword in text for keyword in ("画像", "写真", "イラスト")) or "image" in lowered:
-            return "image_search"
         return "text_search"
     if capability == "data_analyst":
-        if any(k in text for k in ("pdf", "PDF", "tar", "TAR", "パッケージ")):
-            return "asset_packaging"
         return "python_pipeline"
     return "generic"
 

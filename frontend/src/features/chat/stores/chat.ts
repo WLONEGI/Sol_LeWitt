@@ -9,6 +9,7 @@ interface ChatState {
     historyError: string | null;
     isSidebarOpen: boolean;
     pendingMessage: { threadId: string; text: string } | null;
+    pendingThreadFiles: Record<string, File[]>;
     pendingHomeInput: string | null;
     pendingAspectRatio: string | undefined | null;
     pendingProductType: string | undefined | null;
@@ -22,6 +23,8 @@ interface ChatState {
     updateThreadTitle: (id: string, title: string) => void;
     setPendingMessage: (threadId: string, text: string) => void;
     consumePendingMessage: (threadId: string) => string | null;
+    setPendingThreadFiles: (threadId: string, files: File[]) => void;
+    consumePendingThreadFiles: (threadId: string) => File[];
     setPendingHomeInput: (text: string | null) => void;
     consumePendingHomeInput: () => string | null;
     setPendingAspectRatio: (ratio: string | undefined | null) => void;
@@ -42,6 +45,7 @@ export const useChatStore = create<ChatState>()(
                 historyError: null,
                 isSidebarOpen: true,
                 pendingMessage: null,
+                pendingThreadFiles: {},
                 pendingHomeInput: null,
                 pendingAspectRatio: null,
                 pendingProductType: null,
@@ -90,6 +94,7 @@ export const useChatStore = create<ChatState>()(
                     historyLoading: false,
                     historyError: null,
                     pendingMessage: null,
+                    pendingThreadFiles: {},
                     pendingHomeInput: null,
                     pendingProductType: null,
                     selectedActionId: null,
@@ -118,6 +123,21 @@ export const useChatStore = create<ChatState>()(
                     set({ pendingMessage: null });
                     return pending.text;
                 },
+                setPendingThreadFiles: (threadId, files) => set((state) => ({
+                    pendingThreadFiles: {
+                        ...state.pendingThreadFiles,
+                        [threadId]: files,
+                    },
+                })),
+                consumePendingThreadFiles: (threadId) => {
+                    const pendingFiles = get().pendingThreadFiles[threadId] ?? [];
+                    set((state) => {
+                        const nextFiles = { ...state.pendingThreadFiles };
+                        delete nextFiles[threadId];
+                        return { pendingThreadFiles: nextFiles };
+                    });
+                    return pendingFiles;
+                },
                 setPendingHomeInput: (text) => set({ pendingHomeInput: text }),
                 consumePendingHomeInput: () => {
                     const pending = get().pendingHomeInput;
@@ -139,6 +159,18 @@ export const useChatStore = create<ChatState>()(
             }),
             {
                 name: 'lobe-chat-storage',
+                partialize: (state) => ({
+                    currentThreadId: state.currentThreadId,
+                    threads: state.threads,
+                    historyLoading: state.historyLoading,
+                    historyError: state.historyError,
+                    isSidebarOpen: state.isSidebarOpen,
+                    pendingMessage: state.pendingMessage,
+                    pendingHomeInput: state.pendingHomeInput,
+                    pendingAspectRatio: state.pendingAspectRatio,
+                    pendingProductType: state.pendingProductType,
+                    selectedActionId: state.selectedActionId,
+                }),
             }
         )
     )

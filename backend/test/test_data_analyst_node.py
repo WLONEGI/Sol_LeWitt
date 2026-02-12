@@ -43,19 +43,11 @@ def _base_state():
 
 def _output_payload():
     return {
-        "execution_summary": "done",
-        "analysis_report": "report",
+        "implementation_code": "print('done')",
+        "execution_log": "ok",
+        "output_value": {"status": "done"},
         "failed_checks": [],
-        "output_files": [
-            {
-                "url": "https://example.com/output.pdf",
-                "title": "output",
-                "mime_type": "application/pdf"
-            }
-        ],
-        "blueprints": [],
-        "visualization_code": None,
-        "data_sources": []
+        "output_files": [],
     }
 
 
@@ -85,11 +77,10 @@ def test_data_analyst_node_outputs_json(monkeypatch):
     artifact_id = "step_1_data"
     assert artifact_id in cmd.update["artifacts"]
     stored = json.loads(cmd.update["artifacts"][artifact_id])
-    assert stored["output_files"][0]["url"] == "https://example.com/output.pdf"
-    assert "## 入力" in stored["analysis_report"]
-    assert "## 処理" in stored["analysis_report"]
-    assert "## 結果" in stored["analysis_report"]
-    assert "## 未解決" in stored["analysis_report"]
+    assert stored["implementation_code"] == "print('done')"
+    assert stored["execution_log"] == "ok"
+    assert stored["output_value"]["status"] == "done"
+    assert stored["failed_checks"] == []
 
 
 def test_data_analyst_node_streams_code_and_log(monkeypatch):
@@ -161,7 +152,7 @@ def test_data_analyst_partial_success_is_treated_as_failure(monkeypatch):
 
     artifact_id = "step_1_data"
     stored = json.loads(cmd.update["artifacts"][artifact_id])
-    assert stored["execution_summary"].startswith("Error:")
+    assert "Error executing python_repl" in stored["execution_log"]
     assert "tool_execution" in stored["failed_checks"]
     assert stored["output_files"] == []
 
@@ -171,13 +162,11 @@ def test_upload_result_files_rewrites_local_path_to_gcs(monkeypatch, tmp_path):
     output_path.write_bytes(b"%PDF-1.4 mock")
 
     result = DataAnalystOutput(
-        execution_summary="done",
-        analysis_report="report",
+        implementation_code="print('done')",
+        execution_log="ok",
+        output_value=None,
         failed_checks=[],
         output_files=[{"url": "deck.pdf", "title": "Deck", "mime_type": "application/pdf"}],
-        blueprints=[],
-        visualization_code=None,
-        data_sources=[],
     )
 
     def _fake_upload(file_data, content_type, session_id=None, slide_number=None, object_name=None):

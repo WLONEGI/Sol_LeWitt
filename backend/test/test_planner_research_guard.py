@@ -1,4 +1,7 @@
-from src.core.workflow.nodes.planner import _missing_required_research_step
+from src.core.workflow.nodes.planner import (
+    _ensure_multi_perspective_research_steps,
+    _missing_required_research_step,
+)
 
 
 def test_missing_required_research_step_when_user_request_demands_sources() -> None:
@@ -72,3 +75,33 @@ def test_no_missing_when_research_not_required() -> None:
     )
     assert missing is False
     assert reason == ""
+
+
+def test_research_step_instruction_is_enriched_with_multiple_perspectives() -> None:
+    plan_steps = [
+        {
+            "id": 1,
+            "capability": "researcher",
+            "instruction": "SaaSのQBRについて調査する",
+            "description": "調査タスク",
+        }
+    ]
+
+    enriched = _ensure_multi_perspective_research_steps(plan_steps, product_type="slide")
+    instruction = enriched[0]["instruction"]
+    assert "調査観点" in instruction
+    assert instruction.count("- ") >= 3
+
+
+def test_research_step_instruction_is_not_overwritten_when_already_multi_perspective() -> None:
+    plan_steps = [
+        {
+            "id": 1,
+            "capability": "researcher",
+            "instruction": "調査観点:\n- 市場動向\n- 先行事例\n- リスク",
+            "description": "調査タスク",
+        }
+    ]
+
+    enriched = _ensure_multi_perspective_research_steps(plan_steps, product_type="slide")
+    assert enriched[0]["instruction"] == plan_steps[0]["instruction"]

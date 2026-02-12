@@ -20,6 +20,14 @@ import { useAuth } from "@/providers/auth-provider"
 import { AuthRequiredDialog } from "@/features/auth/components/auth-required-dialog"
 import type { PlanUpdateData } from "@/features/chat/types/plan"
 import { resolveDataEventMessageCount } from "@/features/chat/lib/data-event-order"
+import {
+    buildCharacterSheetBundleArtifact,
+    CHARACTER_SHEET_BUNDLE_ARTIFACT_ID,
+    inferVisualizerModeFromPayload,
+    isCharacterSheetVisualPayload,
+    mergeCharacterSheetBundleWithVisual,
+    mergeCharacterSheetBundleWithWriter,
+} from "@/features/preview/lib/character-sheet-bundle"
 
 // Custom data events from backend
 interface CustomDataEvent {
@@ -39,7 +47,6 @@ interface ChatSnapshot {
 
 interface QueuedInterrupt {
     text: string
-    selectedImageInputs: Array<Record<string, any>>
 }
 
 interface UploadedAttachment {
@@ -70,7 +77,6 @@ const DATA_EVENTS_TO_STORE = new Set([
     'data-research-start',
     'data-research-complete',
     'data-research-report',
-    'data-image-search-results',
     'data-coordinator-followups',
 ])
 
@@ -106,6 +112,19 @@ const normalizeMessageParts = (msg: any): any[] => {
             }
             if (type.startsWith('data-')) {
                 parts.push({ type, data: (part as any).data })
+                continue
+            }
+            if (
+                type === 'file' &&
+                typeof (part as any).url === 'string' &&
+                (part as any).url.length > 0
+            ) {
+                parts.push({
+                    type: 'file',
+                    url: (part as any).url,
+                    mediaType: typeof (part as any).mediaType === 'string' ? (part as any).mediaType : undefined,
+                    filename: typeof (part as any).filename === 'string' ? (part as any).filename : undefined,
+                })
             }
         }
     }
@@ -207,7 +226,6 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         }
     }, [pendingAspectRatio, consumePendingAspectRatio])
 
-    const [selectedImageInputs, setSelectedImageInputs] = useState<Array<Record<string, any>>>([])
     const [queuedInterrupt, setQueuedInterrupt] = useState<QueuedInterrupt | null>(null)
     const [historyReady, setHistoryReady] = useState(false)
 
@@ -218,12 +236,21 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
             completeTask: state.completeTask,
         }))
     )
-    const { currentThreadId, setCurrentThreadId, updateThreadTitle, consumePendingMessage, selectedActionId, setSelectedActionId } = useChatStore(
+    const {
+        currentThreadId,
+        setCurrentThreadId,
+        updateThreadTitle,
+        consumePendingMessage,
+        consumePendingThreadFiles,
+        selectedActionId,
+        setSelectedActionId
+    } = useChatStore(
         useShallow((state) => ({
             currentThreadId: state.currentThreadId,
             setCurrentThreadId: state.setCurrentThreadId,
             updateThreadTitle: state.updateThreadTitle,
             consumePendingMessage: state.consumePendingMessage,
+            consumePendingThreadFiles: state.consumePendingThreadFiles,
             selectedActionId: state.selectedActionId,
             setSelectedActionId: state.setSelectedActionId,
         }))
@@ -291,6 +318,11 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         const state = useArtifactStore.getState()
         const existing = state.artifacts[artifactId]
         const existingSlides = Array.isArray(existing?.content?.slides) ? existing?.content?.slides : []
+        const existingMode =
+            existing?.content && typeof existing.content === 'object' && typeof (existing.content as any).mode === 'string'
+                ? (existing.content as any).mode
+                : null
+        const inferredMode = inferVisualizerModeFromPayload(payload, existingMode)
 
         const mergeSlide = (slide_number: number, patch: any) => {
             const index = existingSlides.findIndex((s: any) => s.slide_number === slide_number)
@@ -335,6 +367,8 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
             slides: nextSlides,
             pdf_url: payload.pdf_url ?? existing?.content?.pdf_url,
             plan: payload.plan ?? existing?.content?.plan,
+            mode: inferredMode ?? undefined,
+            aspect_ratio: payload.aspect_ratio ?? existing?.content?.aspect_ratio,
         }
 
         const deckTitle = payload.deck_title || payload.title || existing?.title || "Generated Slides"
@@ -348,6 +382,19 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
             version: (existing?.version ?? 0) + 1,
             status,
         })
+
+        if (isCharacterSheetVisualPayload(payload, inferredMode)) {
+            const unifiedExisting = state.artifacts[CHARACTER_SHEET_BUNDLE_ARTIFACT_ID]
+            const unifiedContent = mergeCharacterSheetBundleWithVisual(unifiedExisting?.content, payload)
+            upsertArtifact({
+                id: CHARACTER_SHEET_BUNDLE_ARTIFACT_ID,
+                type: "writer_character_sheet",
+                title: "Character Sheet",
+                content: unifiedContent,
+                version: (unifiedExisting?.version ?? 0) + 1,
+                status,
+            })
+        }
     }, [stableId, upsertArtifact])
 
     const upsertDataAnalystArtifact = useCallback((
@@ -417,7 +464,25 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
             title: payload.title || existing?.title || WRITER_ARTIFACT_TITLES[artifactType] || 'Writer Output',
             content: nextContent,
             version: (existing?.version ?? 0) + 1,
+            status: typeof payload.status === 'string' ? payload.status : existing?.status,
         })
+
+        if (artifactType === 'writer_character_sheet') {
+            const unifiedExisting = state.artifacts[CHARACTER_SHEET_BUNDLE_ARTIFACT_ID]
+            const unifiedContent = mergeCharacterSheetBundleWithWriter(unifiedExisting?.content, {
+                artifact_id: artifactId,
+                output: rawOutput,
+                status: payload.status,
+            })
+            upsertArtifact({
+                id: CHARACTER_SHEET_BUNDLE_ARTIFACT_ID,
+                type: 'writer_character_sheet',
+                title: 'Character Sheet',
+                content: unifiedContent,
+                version: (unifiedExisting?.version ?? 0) + 1,
+                status: typeof payload.status === 'string' ? payload.status : 'completed',
+            })
+        }
     }, [stableId, upsertArtifact])
 
     const {
@@ -535,7 +600,6 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                 messageCountRef.current = 0
                 streamEventMessageCountRef.current = null
                 setData([])
-                setSelectedImageInputs([])
                 setPendingFiles([])
                 setAttachmentError(null)
                 setQueuedInterrupt(null)
@@ -554,7 +618,6 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
             messageCountRef.current = 0
             streamEventMessageCountRef.current = null
             setData([])
-            setSelectedImageInputs([])
             setPendingFiles([])
             setAttachmentError(null)
             setQueuedInterrupt(null)
@@ -595,7 +658,12 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                     const mappedMessages: UIMessage[] = historyMessages.map(mapHistoryMessageToUIMessage)
                     setMessages(mappedMessages)
                     if (snapshot?.artifacts && typeof snapshot.artifacts === 'object') {
-                        artifactState.setArtifacts(snapshot.artifacts)
+                        const nextArtifacts = { ...snapshot.artifacts }
+                        const bundleArtifact = buildCharacterSheetBundleArtifact(nextArtifacts as Record<string, any>)
+                        if (bundleArtifact) {
+                            nextArtifacts[CHARACTER_SHEET_BUNDLE_ARTIFACT_ID] = bundleArtifact
+                        }
+                        artifactState.setArtifacts(nextArtifacts)
                     }
 
                     const snapshotEvents = Array.isArray(snapshot?.ui_events) ? snapshot.ui_events : []
@@ -625,26 +693,6 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         loadHistory()
         return () => { isCancelled = true }
     }, [stableId, setMessages, authLoading, token, setData, stampDataEvent, initialProductType])
-
-    useEffect(() => {
-        if (!stableId || !historyReady) return
-        if (authLoading || !token) return
-        const pendingText = consumePendingMessage(stableId)
-        if (!pendingText) return
-        sendMessage(
-            { text: pendingText },
-            {
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                },
-                body: {
-                    thread_id: stableId,
-                    selected_image_inputs: [],
-                    ...(initialProductType ? { product_type: initialProductType } : {}),
-                },
-            }
-        )
-    }, [stableId, historyReady, authLoading, token, consumePendingMessage, sendMessage, initialProductType])
 
     useEffect(() => {
         return () => {
@@ -681,12 +729,12 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         setPendingFiles((prev) => prev.filter((_, i) => i !== index))
     }, [])
 
-    const uploadPendingFiles = useCallback(async (): Promise<UploadedAttachment[]> => {
-        if (pendingFiles.length === 0) return []
+    const uploadFiles = useCallback(async (files: File[]): Promise<UploadedAttachment[]> => {
+        if (files.length === 0) return []
         if (!token) throw new Error("認証情報がありません。再ログインしてください。")
 
         const formData = new FormData()
-        for (const file of pendingFiles) {
+        for (const file of files) {
             formData.append('files', file)
         }
         formData.append('thread_id', stableId)
@@ -708,7 +756,7 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         }
 
         return Array.isArray(payload?.attachments) ? payload.attachments as UploadedAttachment[] : []
-    }, [pendingFiles, stableId, token])
+    }, [stableId, token])
 
     const mapAttachmentToSelectedInput = useCallback((item: UploadedAttachment): Record<string, any> => {
         return {
@@ -724,7 +772,7 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         value: string,
         options?: {
             interruptIntent?: boolean
-            selectedImageInputsOverride?: Array<Record<string, any>>
+            filesOverride?: File[]
         }
     ): Promise<boolean> => {
         if (!value.trim()) return false
@@ -733,14 +781,14 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
             window.history.replaceState(null, '', `/chat/${stableId}`)
         }
 
-        const payloadSelectedImageInputs = options?.selectedImageInputsOverride ?? selectedImageInputs
         setAttachmentError(null)
 
         let uploadedAttachments: UploadedAttachment[] = []
-        if (pendingFiles.length > 0) {
+        const filesToUpload = options?.filesOverride ?? pendingFiles
+        if (filesToUpload.length > 0) {
             setIsUploadingAttachments(true)
             try {
-                uploadedAttachments = await uploadPendingFiles()
+                uploadedAttachments = await uploadFiles(filesToUpload)
             } catch (error) {
                 console.error("Attachment upload failed:", error)
                 setAttachmentError(error instanceof Error ? error.message : "添付アップロードに失敗しました。")
@@ -750,12 +798,9 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
             }
         }
 
-        const mergedSelectedImageInputs: Array<Record<string, any>> = [
-            ...payloadSelectedImageInputs,
-            ...uploadedAttachments
-                .filter((item) => item.kind === 'image')
-                .map((item) => mapAttachmentToSelectedInput(item)),
-        ]
+        const mergedSelectedImageInputs: Array<Record<string, any>> = uploadedAttachments
+            .filter((item) => item.kind === 'image')
+            .map((item) => mapAttachmentToSelectedInput(item))
 
         const dedupedImageInputs = Array.from(
             new Map(
@@ -764,6 +809,12 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                     .map((item) => [String(item.image_url), item])
             ).values()
         )
+        const messageFileParts = uploadedAttachments.map((item) => ({
+            type: 'file' as const,
+            mediaType: item.mime_type || 'application/octet-stream',
+            filename: item.filename,
+            url: item.url,
+        }))
 
         // Optimistically update message count to current + 1 (user message)
         // This ensures early data events (like plan start) are stamped with the correct
@@ -772,25 +823,48 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         messageCountRef.current = streamAnchorMessageCount
         streamEventMessageCountRef.current = streamAnchorMessageCount
 
-        sendMessage(
-            { text: value },
-            {
-                headers: token
-                    ? {
-                        Authorization: `Bearer ${token}`,
+        if (messageFileParts.length > 0) {
+            sendMessage(
+                {
+                    text: value,
+                    files: messageFileParts,
+                },
+                {
+                    headers: token
+                        ? {
+                            Authorization: `Bearer ${token}`,
+                        }
+                        : undefined,
+                    body: {
+                        thread_id: stableId,
+                        attachments: uploadedAttachments,
+                        selected_image_inputs: dedupedImageInputs,
+                        interrupt_intent: Boolean(options?.interruptIntent),
+                        aspect_ratio: aspectRatio,
+                        ...(initialProductType ? { product_type: initialProductType } : {}),
                     }
-                    : undefined,
-                body: {
-                    thread_id: stableId,
-                    attachments: uploadedAttachments,
-                    selected_image_inputs: dedupedImageInputs,
-                    interrupt_intent: Boolean(options?.interruptIntent),
-                    aspect_ratio: aspectRatio,
-                    ...(initialProductType ? { product_type: initialProductType } : {}),
                 }
-            }
-        )
-        setSelectedImageInputs([])
+            )
+        } else {
+            sendMessage(
+                { text: value },
+                {
+                    headers: token
+                        ? {
+                            Authorization: `Bearer ${token}`,
+                        }
+                        : undefined,
+                    body: {
+                        thread_id: stableId,
+                        attachments: uploadedAttachments,
+                        selected_image_inputs: dedupedImageInputs,
+                        interrupt_intent: Boolean(options?.interruptIntent),
+                        aspect_ratio: aspectRatio,
+                        ...(initialProductType ? { product_type: initialProductType } : {}),
+                    }
+                }
+            )
+        }
         setPendingFiles([])
         setInput("")
         return true
@@ -801,28 +875,34 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         currentThreadId,
         setCurrentThreadId,
         token,
-        selectedImageInputs,
         initialProductType,
         messages.length,
         pendingFiles,
-        uploadPendingFiles,
+        uploadFiles,
         mapAttachmentToSelectedInput,
         aspectRatio,
     ])
 
-    const handleToggleImageCandidate = useCallback((candidate: Record<string, any>) => {
-        const imageUrl = typeof candidate?.image_url === 'string' ? candidate.image_url : ''
-        if (!imageUrl) return
-        setSelectedImageInputs((prev) => {
-            const exists = prev.some((item) => item?.image_url === imageUrl)
-            if (exists) return prev.filter((item) => item?.image_url !== imageUrl)
-            return [...prev, candidate]
-        })
-    }, [])
+    useEffect(() => {
+        if (!stableId || !historyReady) return
+        if (authLoading || !token) return
 
-    const selectedImageUrls = selectedImageInputs
-        .map((item) => (typeof item?.image_url === 'string' ? item.image_url : ''))
-        .filter((url) => url.length > 0)
+        const pendingText = consumePendingMessage(stableId)
+        if (!pendingText) return
+        const pendingFilesFromHome = consumePendingThreadFiles(stableId)
+
+        void submitMessage(pendingText, {
+            filesOverride: pendingFilesFromHome,
+        })
+    }, [
+        stableId,
+        historyReady,
+        authLoading,
+        token,
+        consumePendingMessage,
+        consumePendingThreadFiles,
+        submitMessage,
+    ])
 
     const handleSend = useCallback((value: string) => {
         if (!value.trim()) return
@@ -835,14 +915,12 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         if (isBusy) {
             setQueuedInterrupt({
                 text: value,
-                selectedImageInputs: [...selectedImageInputs],
             })
-            setSelectedImageInputs([])
             setInput("")
             return
         }
         void submitMessage(value)
-    }, [authLoading, historyReady, isBusy, user, token, submitMessage, selectedImageInputs])
+    }, [authLoading, historyReady, isBusy, user, token, submitMessage])
 
     const handleSendFollowup = useCallback((prompt: string) => {
         if (!prompt.trim()) return
@@ -879,7 +957,6 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         void (async () => {
             const sent = await submitMessage(queuedInterrupt.text, {
                 interruptIntent: true,
-                selectedImageInputsOverride: queuedInterrupt.selectedImageInputs,
             })
             if (!sent) return
             setQueuedInterrupt(null)
@@ -895,8 +972,6 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                         latestPlan={latestPlan}
                         latestOutline={latestOutline}
                         latestSlideDeck={latestSlideDeck}
-                        selectedImageUrls={selectedImageUrls}
-                        onToggleImageCandidate={handleToggleImageCandidate}
                         queuedUserMessage={queuedInterrupt?.text || null}
                         isLoading={isLoading}
                         status={status}

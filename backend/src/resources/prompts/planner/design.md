@@ -1,14 +1,16 @@
 # Product Guidance: design
 
 ## Recommended baseline flow
-1. researcher (`image_search`) as first candidate for reference collection
+1. researcher (`text_search`) as first candidate for reference collection
 2. writer (`document_blueprint`)
 3. visualizer (`document_layout_render`)
-4. data_analyst (`asset_packaging` or `python_pipeline`) when packaging/post-processing is needed
+4. data_analyst (`python_pipeline`) when packaging/post-processing is needed
 
 ## Researcher policy for design
-- `researcher(image_search)` is strongly recommended at the beginning.
+- `researcher(text_search)` is strongly recommended at the beginning.
 - It is not mandatory. Skip only when the user already provides sufficient references and constraints.
+- When adding Researcher, specify multiple perspectives in one step instruction
+  (minimum 3 perspectives) so Researcher can decompose them into separate tasks.
 
 ## Mandatory dependency constraints
 - If writer uses researcher findings, writer must depend on researcher.

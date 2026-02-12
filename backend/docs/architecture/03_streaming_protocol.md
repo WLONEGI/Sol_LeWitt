@@ -17,7 +17,7 @@
 | `data-visual-prompt` | visualizer | 各画像の生成プロンプト。 |
 | `data-visual-image` | visualizer | 生成画像 URL とメタ情報。 |
 | `data-visual-pdf` | visualizer | 統合 PDF URL。 |
-| `data-image-search-results` | researcher | 画像検索候補（URL/出典/ライセンス含む）。 |
+| `data-research-report` | researcher | 調査レポート（本文・出典URL）。 |
 | `data-analyst-start` / `data-analyst-output` / `data-analyst-complete` | data_analyst | 実行開始・出力・完了。 |
 | `title_generated` | coordinator | スレッドタイトル候補。 |
 

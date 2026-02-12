@@ -96,3 +96,31 @@ Gemini 3 系入力フォーマットに合わせて、以下のファイルを�
   ]
 }
 ```
+
+## 5. 画像 In-painting
+Visualizer の個別画像編集向け。元画像・マスク画像・修正指示の3入力で再生成します。
+
+### 単一画像
+- **URL**: `/api/image/{image_id}/inpaint`
+- **Method**: `POST`
+- **Content-Type**: `application/json`
+- **Auth**: 必須
+
+### スライドデッキ内画像
+- **URL**: `/api/slide-deck/{deck_id}/slides/{slide_number}/inpaint`
+- **Method**: `POST`
+- **Content-Type**: `application/json`
+- **Auth**: 必須
+
+### Request Body
+```json
+{
+  "image_url": "https://storage.googleapis.com/.../source.png",
+  "mask_image_url": "data:image/png;base64,...",
+  "prompt": "白く塗った領域だけを、夕方の空に変更"
+}
+```
+
+### Notes
+- `mask_image_url` は `data URL`, `https URL`, `gs://` を受け付けます。
+- マスクは **白=編集対象 / 黒=保持** として扱います。

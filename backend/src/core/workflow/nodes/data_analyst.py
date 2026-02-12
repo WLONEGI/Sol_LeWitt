@@ -8,7 +8,7 @@ import mimetypes
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
-from typing import Literal
+from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.callbacks.manager import adispatch_custom_event
@@ -21,9 +21,9 @@ from src.shared.schemas import DataAnalystOutput
 from src.core.workflow.state import State
 from src.infrastructure.storage.gcs import download_blob_as_bytes, upload_to_gcs
 from .common import (
-    build_worker_error_payload,
     create_worker_response,
     extract_first_json,
+    resolve_selected_assets_for_step,
     split_content_parts,
 )
 from langchain_core.runnables import RunnableConfig
@@ -36,7 +36,7 @@ from src.core.tools import (
 
 logger = logging.getLogger(__name__)
 MAX_DATA_ANALYST_ROUNDS = 3
-VALID_DATA_ANALYST_MODES = {"python_pipeline", "asset_packaging"}
+VALID_DATA_ANALYST_MODES = {"python_pipeline"}
 STANDARD_FAILED_CHECKS = {
     "worker_execution",
     "tool_execution",
@@ -104,55 +104,169 @@ def _looks_like_error_text(text: str | None) -> bool:
     return "error" in lowered or "失敗" in text or "エラー" in text or "failed" in lowered
 
 
-def _truncate_line(text: str, max_length: int = 300) -> str:
-    cleaned = text.replace("\n", " ").strip()
-    if len(cleaned) <= max_length:
-        return cleaned
-    return cleaned[: max_length - 3] + "..."
+def _normalize_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
 
 
-def _build_fixed_analysis_report(
+def _discover_local_paths_from_value(
+    value: Any,
+    workspace_dir: str,
+    output: set[str],
+) -> None:
+    if isinstance(value, str):
+        local_path = _resolve_local_file_path(value, workspace_dir)
+        if local_path:
+            output.add(local_path)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _discover_local_paths_from_value(item, workspace_dir, output)
+        return
+    if isinstance(value, dict):
+        for nested in value.values():
+            _discover_local_paths_from_value(nested, workspace_dir, output)
+
+
+def _extract_created_files_from_python_output(output_text: str, workspace_dir: str) -> list[str]:
+    if not isinstance(output_text, str) or "Created files:" not in output_text:
+        return []
+    section = output_text.split("Created files:", 1)[1]
+    lines: list[str] = []
+    for raw_line in section.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if lines:
+                break
+            continue
+        if line.lower().startswith("missing expected files"):
+            break
+        lines.append(line)
+
+    resolved: list[str] = []
+    for candidate in lines:
+        local_path = _resolve_local_file_path(candidate, workspace_dir)
+        if local_path and local_path not in resolved:
+            resolved.append(local_path)
+    return resolved
+
+
+def _extract_output_paths_from_tool_output(tool_output: str, workspace_dir: str) -> list[str]:
+    discovered: set[str] = set()
+    if not isinstance(tool_output, str):
+        return []
+
+    json_candidate: Any = None
+    try:
+        json_candidate = json.loads(tool_output)
+    except Exception:
+        json_candidate = None
+
+    if json_candidate is not None:
+        _discover_local_paths_from_value(json_candidate, workspace_dir, discovered)
+
+    for candidate in _extract_created_files_from_python_output(tool_output, workspace_dir):
+        discovered.add(candidate)
+
+    return sorted(discovered)
+
+
+def _discover_workspace_output_files(workspace_dir: str) -> list[str]:
+    workspace_root = Path(workspace_dir).resolve()
+    preferred_roots = [workspace_root / "outputs"]
+    fallback_roots = [workspace_root]
+
+    discovered: list[str] = []
+
+    def _walk(root: Path, allow_inputs: bool) -> None:
+        if not root.exists():
+            return
+        for candidate in root.rglob("*"):
+            if not candidate.is_file():
+                continue
+            if not allow_inputs and "inputs" in candidate.parts:
+                continue
+            resolved = str(candidate.resolve())
+            if resolved not in discovered:
+                discovered.append(resolved)
+
+    for root in preferred_roots:
+        _walk(root, allow_inputs=False)
+    if discovered:
+        return sorted(discovered)
+
+    for root in fallback_roots:
+        _walk(root, allow_inputs=False)
+    return sorted(discovered)
+
+
+def _merge_detected_output_files(
     *,
-    mode: str,
-    instruction: str,
-    artifact_keys: list[str],
-    tool_trace: list[str],
-    llm_report: str | None,
+    result: DataAnalystOutput,
+    workspace_dir: str,
+    detected_local_paths: list[str],
+) -> None:
+    existing_items = list(result.output_files or [])
+    normalized_candidates: set[str] = set()
+    for item in existing_items:
+        local_path = _resolve_local_file_path(item.url, workspace_dir)
+        if local_path:
+            normalized_candidates.add(local_path)
+    for candidate in detected_local_paths:
+        local_path = _resolve_local_file_path(candidate, workspace_dir)
+        if local_path:
+            normalized_candidates.add(local_path)
+
+    existing_by_local: dict[str, Any] = {}
+    for item in existing_items:
+        local_path = _resolve_local_file_path(item.url, workspace_dir)
+        if local_path:
+            existing_by_local[local_path] = item
+
+    merged: list[dict[str, Any]] = []
+    workspace_root = Path(workspace_dir).resolve()
+    for local_path in sorted(normalized_candidates):
+        existing = existing_by_local.get(local_path)
+        relative_url = os.path.relpath(local_path, workspace_root)
+        if relative_url.startswith(".."):
+            relative_url = local_path
+        mime_type = None
+        title = None
+        if existing is not None:
+            mime_type = existing.mime_type
+            title = existing.title
+        if not isinstance(mime_type, str) or not mime_type:
+            mime_type = mimetypes.guess_type(local_path)[0] or "application/octet-stream"
+        if not isinstance(title, str) or not title:
+            title = os.path.basename(local_path)
+        merged.append(
+            {
+                "url": relative_url.replace("\\", "/"),
+                "title": title,
+                "mime_type": mime_type,
+            }
+        )
+
+    result.output_files = merged
+
+
+def _summarize_data_analyst_result(
+    *,
     is_error: bool,
-    error_summary: str | None,
-    output_count: int,
+    failed_checks: list[str],
+    output_files: list[Any],
+    output_value: Any,
 ) -> str:
-    input_lines = [
-        f"- mode: `{mode}`",
-        f"- instruction: {instruction or '（未指定）'}",
-        f"- artifacts: {', '.join(artifact_keys) if artifact_keys else 'なし'}",
-    ]
-
-    process_lines = [f"- python_repl実行ログ件数: {len(tool_trace)}"]
-    if tool_trace:
-        process_lines.extend(f"- {_truncate_line(line)}" for line in tool_trace[-5:])
-    else:
-        process_lines.append("- ツール実行なし")
-    if llm_report and llm_report.strip():
-        process_lines.append(f"- LLM報告: {_truncate_line(llm_report, max_length=500)}")
-
-    result_lines = [
-        f"- status: {'failed' if is_error else 'completed'}",
-        f"- output_files: {output_count}",
-    ]
-
-    unresolved_lines = [f"- {error_summary}"] if is_error and error_summary else ["- なし"]
-
-    return (
-        "## 入力\n"
-        + "\n".join(input_lines)
-        + "\n\n## 処理\n"
-        + "\n".join(process_lines)
-        + "\n\n## 結果\n"
-        + "\n".join(result_lines)
-        + "\n\n## 未解決\n"
-        + "\n".join(unresolved_lines)
-    )
+    if is_error:
+        if failed_checks:
+            return f"Error: Data analyst task failed ({', '.join(failed_checks)})."
+        return "Error: Data analyst task failed."
+    if output_files:
+        return f"Data analyst task completed ({len(output_files)} files generated)."
+    if output_value is not None:
+        return "Data analyst task completed (non-file output generated)."
+    return "Data analyst task completed."
 
 def _sanitize_filename(title: str) -> str:
     safe = re.sub(r"[\\\\/:*?\"<>|]", "_", title).strip()
@@ -390,6 +504,8 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     result: DataAnalystOutput | None = None
     is_error = False
     artifact_preview_urls: list[str] = []
+    workspace_dir_obj: tempfile.TemporaryDirectory[str] | None = None
+    artifact_id = "step_unknown_data"
 
     try:
         step_index, current_step = next(
@@ -404,6 +520,7 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     artifacts = state.get("artifacts", {}) or {}
     selected_image_inputs = state.get("selected_image_inputs") or []
     attachments = state.get("attachments") or []
+    selected_step_assets = resolve_selected_assets_for_step(state, current_step.get("id"))
     pptx_context = state.get("pptx_context")
     instruction = current_step.get("instruction", "")
     execution_mode = _resolve_data_analyst_mode(current_step)
@@ -411,6 +528,7 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
         f"Execution Mode: {execution_mode}\n\n"
         f"Instruction: {instruction}\n\n"
         f"Available Artifacts: {json.dumps(artifacts, default=str)}\n\n"
+        f"Selected Step Assets: {json.dumps(selected_step_assets, ensure_ascii=False, default=str)}\n\n"
         f"Selected Image Inputs: {json.dumps(selected_image_inputs, ensure_ascii=False, default=str)}\n\n"
         f"Attachments: {json.dumps(attachments, ensure_ascii=False, default=str)}\n\n"
         f"PPTX Context: {json.dumps(pptx_context, ensure_ascii=False, default=str)}"
@@ -424,11 +542,14 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     output_prefix = f"generated_assets/{session_id}/{safe_title}"
 
     source_urls: set[str] = set()
-    _collect_file_urls(artifacts, source_urls)
-    _collect_file_urls(selected_image_inputs, source_urls)
-    _collect_file_urls(attachments, source_urls)
-    _collect_file_urls(pptx_context, source_urls)
+    _collect_file_urls(selected_step_assets, source_urls)
+    if not source_urls:
+        _collect_file_urls(artifacts, source_urls)
+        _collect_file_urls(selected_image_inputs, source_urls)
+        _collect_file_urls(attachments, source_urls)
+        _collect_file_urls(pptx_context, source_urls)
 
+    artifact_id = f"step_{current_step['id']}_data"
     workspace_dir_obj = tempfile.TemporaryDirectory(prefix=f"data_analyst_{session_id}_")
     workspace_dir = workspace_dir_obj.name
     try:
@@ -444,22 +565,19 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     context += (
         "\n\nMode Policy:\n"
         "- python_pipeline: execute general python processing only.\n"
-        "- asset_packaging: execute packaging tasks explicitly requested by Planner.\n"
-        "- Never auto-insert packaging tasks from available artifacts.\n"
         "\n\nFile I/O Policy:\n"
         "- All remote files are already downloaded into local workspace.\n"
         "- Use local paths only when calling tools.\n"
-        "- Put local output file paths into DataAnalystOutput.output_files[].url.\n"
-        "- Data Analyst runtime will upload those local files to GCS automatically.\n"
+        "- Runtime discovers generated local files and uploads them to GCS automatically.\n"
         f"\nWorkspace Directory: {workspace_dir}\n"
         f"Local File Manifest: {json.dumps(local_file_manifest, ensure_ascii=False)}\n"
     )
 
-    artifact_id = f"step_{current_step['id']}_data"
     input_summary = {
         "mode": execution_mode,
         "instruction": instruction,
         "artifact_keys": list(artifacts.keys()),
+        "selected_step_assets": selected_step_assets,
         "selected_image_inputs": selected_image_inputs,
         "attachments": attachments,
         "pptx_context": pptx_context,
@@ -505,6 +623,7 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
             "\n\nIMPORTANT: Only output the final result as valid JSON matching DataAnalystOutput "
             "when the Planner instruction is fully completed. If more processing is needed, "
             "call an appropriate tool (python_repl_tool, render_pptx_master_images_tool, package_visual_assets_tool, bash_tool).\n"
+            "Do not include markdown wrappers.\n"
             f"Current mode is `{execution_mode}` and must be respected strictly."
         )
 
@@ -517,6 +636,9 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
         is_error = False
         error_summary = ""
         tool_trace: list[str] = []
+        code_trace_blocks: list[str] = []
+        log_trace_blocks: list[str] = []
+        detected_output_paths: set[str] = set()
         tool_error_occurred = False
 
         for round_index in range(MAX_DATA_ANALYST_ROUNDS):
@@ -545,6 +667,7 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
                         code_text = _extract_python_code(normalized_args)
                         if code_text:
                             code_block = f"\n# Python Run {round_index + 1}\n{code_text}\n"
+                            code_trace_blocks.append(code_block)
                             try:
                                 await _dispatch_text_delta("data-analyst-code-delta", artifact_id, code_block, config)
                             except Exception as e:
@@ -570,6 +693,7 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
                         cmd_text = normalized_args.get("cmd") or normalized_args.get("command") or str(normalized_args)
                         if cmd_text:
                             cmd_block = f"\n# Bash Run {round_index + 1}\n{cmd_text}\n"
+                            code_trace_blocks.append(cmd_block)
                             try:
                                 await _dispatch_text_delta("data-analyst-code-delta", artifact_id, cmd_block, config)
                             except Exception as e:
@@ -614,6 +738,9 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
 
                     if output:
                         log_block = f"\n# Output {round_index + 1}\n{output}\n"
+                        log_trace_blocks.append(log_block)
+                        for local_path in _extract_output_paths_from_tool_output(str(output), workspace_dir):
+                            detected_output_paths.add(local_path)
                         try:
                             await _dispatch_text_delta("data-analyst-log-delta", artifact_id, log_block, config)
                         except Exception as e:
@@ -653,53 +780,65 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
             if tool_error_occurred and "tool_execution" not in failed_checks:
                 failed_checks = _normalize_failed_checks(failed_checks + ["tool_execution"])
 
-            try:
-                upload_trace = await _upload_result_files_to_gcs(
-                    result=result,
-                    workspace_dir=workspace_dir,
-                    output_prefix=output_prefix,
-                )
-                if upload_trace:
-                    tool_trace.extend(upload_trace)
-            except Exception as upload_err:
-                logger.error("Failed to upload output files to GCS: %s", upload_err)
-                failed_checks = _normalize_failed_checks(failed_checks + ["tool_execution"])
+            workspace_detected_files = _discover_workspace_output_files(workspace_dir)
+            detected_output_paths.update(workspace_detected_files)
+            _merge_detected_output_files(
+                result=result,
+                workspace_dir=workspace_dir,
+                detected_local_paths=sorted(detected_output_paths),
+            )
 
-            if execution_mode == "asset_packaging" and not result.output_files:
-                failed_checks = _normalize_failed_checks(failed_checks + ["missing_dependency"])
+            implementation_code = "\n".join(block.strip() for block in code_trace_blocks if block.strip()).strip()
+            execution_log = "\n".join(block.strip() for block in log_trace_blocks if block.strip()).strip()
+            if implementation_code:
+                result.implementation_code = implementation_code
+            else:
+                result.implementation_code = _normalize_text(result.implementation_code)
+            if execution_log:
+                result.execution_log = execution_log
+            else:
+                result.execution_log = _normalize_text(result.execution_log)
 
-            summary_is_error = _looks_like_error_text(result.execution_summary)
+            summary_is_error = _looks_like_error_text(result.execution_log)
             is_error = summary_is_error or bool(failed_checks)
 
             if is_error and not failed_checks:
                 failed_checks = _data_analyst_failed_checks(kind="worker")
-
-            if is_error and not _looks_like_error_text(result.execution_summary):
-                result.execution_summary = f"Error: {result.execution_summary or 'Data analyst task failed.'}"
+            result.failed_checks = failed_checks
 
             if is_error:
-                # Policy B: partial success is treated as full failure.
+                # Policy: partial success is treated as failure.
                 result.output_files = []
-                result.blueprints = []
-                result.visualization_code = None
+                result.output_value = None
                 artifact_preview_urls = []
             else:
-                artifact_preview_urls = _extract_preview_urls(result)
+                try:
+                    upload_trace = await _upload_result_files_to_gcs(
+                        result=result,
+                        workspace_dir=workspace_dir,
+                        output_prefix=output_prefix,
+                    )
+                    if upload_trace:
+                        tool_trace.extend(upload_trace)
+                        result.execution_log = (
+                            f"{result.execution_log}\n\n# Upload Trace\n" + "\n".join(upload_trace)
+                        ).strip()
+                except Exception as upload_err:
+                    logger.error("Failed to upload output files to GCS: %s", upload_err)
+                    result.failed_checks = _normalize_failed_checks(result.failed_checks + ["tool_execution"])
+                    result.output_files = []
+                    result.output_value = None
+                    is_error = True
 
-            result.failed_checks = failed_checks
-            error_details = ", ".join(failed_checks) if failed_checks else None
-            result.analysis_report = _build_fixed_analysis_report(
-                mode=execution_mode,
-                instruction=instruction,
-                artifact_keys=list(artifacts.keys()),
-                tool_trace=tool_trace,
-                llm_report=result.analysis_report,
+                artifact_preview_urls = _extract_preview_urls(result) if not is_error else []
+
+            result_summary = _summarize_data_analyst_result(
                 is_error=is_error,
-                error_summary=error_details,
-                output_count=len(result.output_files),
+                failed_checks=result.failed_checks,
+                output_files=result.output_files,
+                output_value=result.output_value,
             )
             content_json = result.model_dump_json()
-            result_summary = result.execution_summary
             try:
                 await adispatch_custom_event(
                     "data-analyst-output",
@@ -717,28 +856,21 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
             checks = _data_analyst_failed_checks(
                 kind="tool_execution" if tool_error_occurred else "schema_validation"
             )
-            analysis_report = _build_fixed_analysis_report(
-                mode=execution_mode,
-                instruction=instruction,
-                artifact_keys=list(artifacts.keys()),
-                tool_trace=tool_trace,
-                llm_report=None,
-                is_error=True,
-                error_summary=error_summary or "不明なエラーが発生しました。",
-                output_count=0,
-            )
-
             fallback = DataAnalystOutput(
-                execution_summary=f"Error: {error_summary or 'Invalid output'}",
-                analysis_report=analysis_report,
+                implementation_code="\n".join(block.strip() for block in code_trace_blocks if block.strip()).strip(),
+                execution_log="\n".join(block.strip() for block in log_trace_blocks if block.strip()).strip()
+                or (error_summary or "No execution log."),
+                output_value=None,
                 failed_checks=checks,
                 output_files=[],
-                blueprints=[],
-                visualization_code=None,
-                data_sources=[]
             )
             content_json = fallback.model_dump_json()
-            result_summary = fallback.execution_summary
+            result_summary = _summarize_data_analyst_result(
+                is_error=True,
+                failed_checks=checks,
+                output_files=[],
+                output_value=None,
+            )
             is_error = True
             artifact_preview_urls = []
             try:
@@ -757,18 +889,20 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     except Exception as e:
         logger.error(f"Data Analyst failed: {e}")
         checks = _data_analyst_failed_checks(kind="worker")
-        analysis_report = _build_fixed_analysis_report(
-            mode=execution_mode,
-            instruction=instruction,
-            artifact_keys=list(artifacts.keys()),
-            tool_trace=[],
-            llm_report=None,
-            is_error=True,
-            error_summary=str(e),
-            output_count=0,
+        fallback = DataAnalystOutput(
+            implementation_code="",
+            execution_log=str(e),
+            output_value=None,
+            failed_checks=checks,
+            output_files=[],
         )
-        content_json = build_worker_error_payload(error_text=analysis_report, failed_checks=checks)
-        result_summary = f"Error: {str(e)}"
+        content_json = fallback.model_dump_json()
+        result_summary = _summarize_data_analyst_result(
+            is_error=True,
+            failed_checks=checks,
+            output_files=[],
+            output_value=None,
+        )
         is_error = True
         artifact_preview_urls = []
         try:
@@ -776,15 +910,7 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
                 "data-analyst-output",
                 {
                     "artifact_id": artifact_id,
-                    "output": {
-                        "execution_summary": result_summary,
-                        "analysis_report": analysis_report,
-                        "failed_checks": checks,
-                        "output_files": [],
-                        "blueprints": [],
-                        "visualization_code": None,
-                        "data_sources": []
-                    },
+                    "output": fallback.model_dump(),
                     "status": "failed"
                 },
                 config=config
@@ -804,7 +930,8 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     except Exception as e:
         logger.warning(f"Failed to dispatch data-analyst-complete: {e}")
 
-    workspace_dir_obj.cleanup()
+    if workspace_dir_obj is not None:
+        workspace_dir_obj.cleanup()
     current_step["result_summary"] = result_summary
     
     return create_worker_response(

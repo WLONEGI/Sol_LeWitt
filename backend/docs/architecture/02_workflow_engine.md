@@ -11,7 +11,7 @@
 | **Planner** | `planner` | canonical な実行計画を JSON で生成。 |
 | **Supervisor** | `supervisor` | `plan` の `pending/in_progress` を管理し、Workerへルーティング。 |
 | **Writer** | `writer` | 構成・脚本・設定などの文章系成果物を JSON 生成。 |
-| **Researcher** | `researcher` | サブグラフで調査タスクを分解・実行。画像検索結果も返却。 |
+| **Researcher** | `researcher` | サブグラフで調査タスクを分解・実行。調査レポートを返却。 |
 | **Visualizer** | `visualizer` | 画像生成計画と画像生成実行。 |
 | **Data Analyst** | `data_analyst` | Python実行やパッケージングなどの後処理。 |
 | **Retry/Alt Mode** | `retry_or_alt_mode` | blocked ステップの再試行・代替タスク追加。 |
@@ -59,13 +59,13 @@ class State(MessagesState):
 
 ### 3.3 Researcher Subgraph
 - `research_manager` がタスク分解。  
-- `research_worker` が順次実行し、必要に応じて画像候補（URL/出典/ライセンス）を返却。
+- `research_worker` が順次実行し、調査レポート（本文・出典）を返却。
 
 ## 4. ストリーミング契約（要点）
 
 - Plan: `data-plan_update`
 - Writer成果物: `data-writer-output`
-- Image Search候補: `data-image-search-results`
+- Research成果物: `data-research-report`
 - Visualizer成果物: `data-visual-*`
 - Data Analyst成果物: `data-analyst-*`
 

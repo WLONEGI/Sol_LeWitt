@@ -1,12 +1,7 @@
-import asyncio
-import hashlib
 import json
 import logging
-import mimetypes
 import re
-import uuid
 from typing import Literal, Any
-from urllib.parse import urlparse, urlunparse
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.types import Command, Send
@@ -14,7 +9,6 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.runnables import RunnableConfig
 
 from src.infrastructure.llm.llm import get_llm_by_type
-from src.infrastructure.storage.gcs import download_blob_as_bytes, upload_to_gcs
 from src.resources.prompts.template import load_prompt_markdown
 from src.shared.schemas import (
     ResearchTask,
@@ -25,45 +19,20 @@ from src.core.workflow.state import ResearchSubgraphState
 from .common import _update_artifact, run_structured_output
 
 logger = logging.getLogger(__name__)
-VALID_SEARCH_MODES = {"text_search", "image_search", "hybrid_search"}
-MAX_IMAGE_CANDIDATES = 10
-IMAGE_EXT_TO_MIME: dict[str, str] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-}
-MIME_TO_IMAGE_EXT: dict[str, str] = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/webp": ".webp",
-    "image/gif": ".gif",
-}
-
-IMAGE_REQUEST_KEYWORDS = (
-    "画像",
-    "写真",
-    "イラスト",
-    "参照画像",
-    "image",
-    "photo",
-    "illustration",
-    "reference image",
+VALID_SEARCH_MODES = {"text_search"}
+DEFAULT_RESEARCH_PERSPECTIVES = (
+    "市場動向・背景データの最新情報",
+    "先行事例・ベストプラクティス",
+    "実行時に考慮すべきリスク・制約条件",
 )
-
-
-def _contains_explicit_image_request(text: str) -> bool:
-    lowered = text.lower()
-    return any(keyword in text or keyword in lowered for keyword in IMAGE_REQUEST_KEYWORDS)
 
 
 def _normalize_search_mode(value: Any, default: str | None = "text_search") -> str | None:
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized in VALID_SEARCH_MODES:
-            return normalized
-    return default if default in VALID_SEARCH_MODES else None
+            return "text_search"
+    return "text_search" if default in VALID_SEARCH_MODES else None
 
 
 def _normalize_task_modes_by_instruction(
@@ -71,37 +40,108 @@ def _normalize_task_modes_by_instruction(
     instruction_text: str,
     preferred_mode: str | None = None,
 ) -> list[ResearchTask]:
-    explicit_image = _contains_explicit_image_request(instruction_text)
-    preferred = _normalize_search_mode(preferred_mode, default=None)
-    normalized: list[ResearchTask] = []
-    has_image_mode = False
+    del instruction_text
+    del preferred_mode
+    return [task.model_copy(update={"search_mode": "text_search"}) for task in tasks]
 
-    for task in tasks:
-        mode = _normalize_search_mode(getattr(task, "search_mode", "text_search"), default="text_search") or "text_search"
 
-        if preferred == "text_search":
-            mode = "text_search"
-        elif preferred == "image_search":
-            if mode == "text_search":
-                mode = "image_search"
-        elif preferred == "hybrid_search":
-            if mode == "text_search" and explicit_image:
-                mode = "hybrid_search"
-        elif not explicit_image and mode in {"image_search", "hybrid_search"}:
-            mode = "text_search"
+def _extract_instruction_perspectives(instruction_text: str) -> list[str]:
+    if not instruction_text:
+        return []
 
-        if mode in {"image_search", "hybrid_search"}:
-            has_image_mode = True
+    lines = [line.strip() for line in instruction_text.splitlines() if line.strip()]
+    perspectives: list[str] = []
+    in_perspective_section = False
 
-        normalized.append(task.model_copy(update={"search_mode": mode}))
+    for line in lines:
+        if "調査観点" in line:
+            in_perspective_section = True
+            continue
+        if not in_perspective_section:
+            continue
+        if "分解" in line and "調査" in line:
+            continue
 
-    if normalized and not has_image_mode:
-        if preferred in {"image_search", "hybrid_search"}:
-            normalized[0] = normalized[0].model_copy(update={"search_mode": preferred})
-        elif explicit_image:
-            normalized[0] = normalized[0].model_copy(update={"search_mode": "image_search"})
+        cleaned = re.sub(r"^(?:[-*・]|[0-9]+[.)、])\s*", "", line).strip()
+        if not cleaned:
+            continue
+        if cleaned not in perspectives:
+            perspectives.append(cleaned)
+        if len(perspectives) >= 5:
+            break
 
-    return normalized
+    if perspectives:
+        return perspectives
+
+    marker_index = instruction_text.find("調査観点")
+    if marker_index < 0:
+        return []
+
+    tail = instruction_text[marker_index:]
+    for chunk in re.split(r"[、,\n/]", tail):
+        cleaned = re.sub(r"^(?:[-*・]|[0-9]+[.)、])\s*", "", chunk).strip()
+        if not cleaned or cleaned.startswith("調査観点"):
+            continue
+        if "分解" in cleaned and "調査" in cleaned:
+            continue
+        if cleaned not in perspectives:
+            perspectives.append(cleaned)
+        if len(perspectives) >= 5:
+            break
+    return perspectives
+
+
+def _resolve_fallback_perspectives(instruction_text: str) -> list[str]:
+    extracted = _extract_instruction_perspectives(instruction_text)
+    merged: list[str] = []
+    for item in extracted + list(DEFAULT_RESEARCH_PERSPECTIVES):
+        normalized = item.strip()
+        if not normalized:
+            continue
+        if normalized in merged:
+            continue
+        merged.append(normalized)
+        if len(merged) >= 3:
+            break
+    return merged
+
+
+def _build_fallback_research_tasks(
+    instruction_text: str,
+    step_mode: str | None,
+) -> list[ResearchTask]:
+    search_mode = _normalize_search_mode(step_mode, default="text_search") or "text_search"
+    perspectives = _resolve_fallback_perspectives(instruction_text)
+    tasks: list[ResearchTask] = []
+
+    for idx, perspective in enumerate(perspectives, start=1):
+        query_base = perspective.replace("・", " ").strip()
+        query_hints = [
+            f"{query_base} 最新",
+            f"{query_base} 事例",
+            f"{query_base} 出典",
+        ]
+        tasks.append(
+            ResearchTask(
+                id=idx,
+                perspective=perspective,
+                search_mode=search_mode,
+                query_hints=query_hints[:3],
+                priority="high" if idx == 1 else "medium",
+                expected_output=f"{perspective}について、主要な事実・根拠・出典URLを整理する",
+            )
+        )
+    return tasks
+
+
+def _ensure_minimum_task_diversity(
+    tasks: list[ResearchTask],
+    instruction_text: str,
+    step_mode: str | None,
+) -> list[ResearchTask]:
+    if len(tasks) >= 2:
+        return tasks
+    return _build_fallback_research_tasks(instruction_text, step_mode)
 
 
 def _extract_text_from_content(content: Any) -> str:
@@ -141,149 +181,6 @@ def _extract_urls(text: str) -> list[str]:
     return deduped
 
 
-def _build_image_candidates(urls: list[str], search_mode: str) -> list[dict]:
-    if search_mode not in {"image_search", "hybrid_search"}:
-        return []
-
-    def normalize_source_url(url: str) -> str:
-        try:
-            parsed = urlparse(url)
-            if not parsed.scheme or not parsed.netloc:
-                return url
-            return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
-        except Exception:
-            return url
-
-    def infer_license_note(url: str) -> str:
-        lowered = url.lower()
-        if "commons.wikimedia.org" in lowered or "wikipedia.org" in lowered:
-            return "Likely CC BY-SA on Wikimedia. Verify the file detail page."
-        if "unsplash.com" in lowered or "images.unsplash.com" in lowered:
-            return "Unsplash License likely applies. Verify asset page terms."
-        if "pexels.com" in lowered or "images.pexels.com" in lowered:
-            return "Pexels License likely applies. Verify asset page terms."
-        if "pixabay.com" in lowered or "cdn.pixabay.com" in lowered:
-            return "Pixabay License likely applies. Verify asset page terms."
-        if "flickr.com" in lowered or "staticflickr.com" in lowered:
-            return "Flickr image: check photographer-selected license on source page."
-        if "githubusercontent.com" in lowered or "raw.githubusercontent.com" in lowered:
-            return "Repository license may apply. Verify repository LICENSE and asset rights."
-        if re.search(r"\bcc\b|\bcreativecommons\b", lowered):
-            return "Creative Commons reference detected in URL. Verify specific CC variant."
-        return "License unknown. Manual verification required before use."
-
-    def infer_caption(url: str) -> str:
-        try:
-            hostname = urlparse(url).netloc
-            return f"Image candidate from {hostname}" if hostname else "Image candidate"
-        except Exception:
-            return "Image candidate"
-
-    candidates: list[dict] = []
-    for url in urls:
-        lowered = url.lower()
-        is_image_like = (
-            lowered.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
-            or "/image" in lowered
-            or "images" in lowered
-            or "img" in lowered
-            or "photo" in lowered
-        )
-        if not is_image_like:
-            continue
-        candidates.append(
-            {
-                "image_url": url,
-                "source_url": normalize_source_url(url),
-                "license_note": infer_license_note(url),
-                "provider": "grounded_web",
-                "caption": infer_caption(url),
-                "relevance_score": None,
-            }
-        )
-    return candidates
-
-
-def _sanitize_filename(text: str) -> str:
-    value = re.sub(r"[^\w\s.-]", "", text).strip()
-    value = value.replace(" ", "_")
-    return value[:80] or "research"
-
-
-def _infer_image_extension(url: str) -> tuple[str, str]:
-    parsed = urlparse(url)
-    path = parsed.path.lower()
-    ext = ""
-    for candidate_ext in IMAGE_EXT_TO_MIME.keys():
-        if path.endswith(candidate_ext):
-            ext = candidate_ext
-            break
-    if not ext:
-        guessed_mime, _ = mimetypes.guess_type(path)
-        if isinstance(guessed_mime, str) and guessed_mime in MIME_TO_IMAGE_EXT:
-            ext = MIME_TO_IMAGE_EXT[guessed_mime]
-    if not ext:
-        ext = ".png"
-    return ext, IMAGE_EXT_TO_MIME.get(ext, "image/png")
-
-
-async def _store_image_candidates_to_gcs(
-    *,
-    candidates: list[dict],
-    session_id: str,
-    safe_step_title: str,
-    step_id: str | int,
-    task_id: str | int,
-) -> list[dict]:
-    stored: list[dict] = []
-    seen_hashes: set[str] = set()
-
-    for index, candidate in enumerate(candidates[:MAX_IMAGE_CANDIDATES], start=1):
-        image_url = str(candidate.get("image_url") or "").strip()
-        if not image_url:
-            continue
-
-        try:
-            payload = await asyncio.to_thread(download_blob_as_bytes, image_url)
-            if not payload:
-                continue
-
-            digest = hashlib.sha256(payload).hexdigest()
-            if digest in seen_hashes:
-                continue
-            seen_hashes.add(digest)
-
-            ext, content_type = _infer_image_extension(image_url)
-            object_name = (
-                f"generated_assets/{session_id}/{safe_step_title}/research/"
-                f"step_{step_id}/task_{task_id}/{index:02d}_{digest[:12]}{ext}"
-            )
-            uploaded_url = await asyncio.to_thread(
-                upload_to_gcs,
-                payload,
-                content_type,
-                None,
-                None,
-                object_name,
-            )
-            stored.append(
-                {
-                    "task_id": task_id,
-                    "source_url": candidate.get("source_url"),
-                    "image_url": image_url,
-                    "gcs_url": uploaded_url,
-                    "sha256": digest,
-                    "content_type": content_type,
-                    "license_note": candidate.get("license_note"),
-                    "caption": candidate.get("caption"),
-                }
-            )
-        except Exception as image_err:
-            logger.warning("Failed to store image candidate %s: %s", image_url, image_err)
-            continue
-
-    return stored
-
 async def research_worker_node(state: ResearchSubgraphState, config: RunnableConfig) -> dict:
     """
     Worker node for executing a single research task.
@@ -320,10 +217,7 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
         except (StopIteration, KeyError, TypeError):
             step_id = "unknown"
     
-    step_title = str(state.get("step_title") or "research")
     step_mode = _normalize_search_mode(state.get("step_mode"), default=None)
-    session_id = str(config.get("configurable", {}).get("thread_id") or uuid.uuid4())
-    safe_step_title = _sanitize_filename(step_title)
 
     try:
         # 1. Dispatch Start Event
@@ -378,37 +272,18 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
                 )
 
         sources = _extract_urls(full_content)
-        image_candidates = _build_image_candidates(sources, search_mode)
-        top_image_candidates = image_candidates[:MAX_IMAGE_CANDIDATES]
-        stored_images: list[dict] = []
-        if search_mode in {"image_search", "hybrid_search"} and top_image_candidates:
-            try:
-                stored_images = await _store_image_candidates_to_gcs(
-                    candidates=top_image_candidates,
-                    session_id=session_id,
-                    safe_step_title=safe_step_title,
-                    step_id=step_id,
-                    task_id=task.id,
-                )
-            except Exception as image_store_err:
-                logger.warning("Failed to persist image candidates for task %s: %s", task.id, image_store_err)
 
         result = ResearchResult(
             task_id=task.id,
             perspective=task.perspective,
             report=full_content,
             sources=sources,
-            image_candidates=top_image_candidates,
+            image_candidates=[],
             confidence=0.9
         )
-        
+
         # [Decentralized Reporting] Emit individual results immediately
         summary_text = f"【{task.perspective}】の調査が完了しました。"
-        if search_mode in {"image_search", "hybrid_search"}:
-            summary_text += (
-                f" 画像候補 {len(top_image_candidates)} 件を抽出し、"
-                f"{len(stored_images)} 件を保存しました。"
-            )
         artifact_id = f"step_{step_id}_research_{task.id}"
 
         await adispatch_custom_event(
@@ -424,19 +299,6 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
             },
             config=config,
         )
-
-        if search_mode in {"image_search", "hybrid_search"}:
-            await adispatch_custom_event(
-                "data-image-search-results",
-                {
-                    "artifact_id": artifact_id,
-                    "task_id": task.id,
-                    "query": task.query_hints[0] if task.query_hints else task.perspective,
-                    "perspective": task.perspective,
-                    "candidates": top_image_candidates,
-                },
-                config=config,
-            )
 
         # 3. Dispatch Complete Event
         await adispatch_custom_event(
@@ -454,7 +316,6 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
                     {
                         **result.model_dump(exclude_none=True),
                         "search_mode": search_mode,
-                        "stored_images": stored_images,
                     },
                     ensure_ascii=False,
                 ),
@@ -478,7 +339,6 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
                         "artifact_id": artifact_id,
                         "title": f"調査レポート: {task.perspective}",
                         "icon": "BookOpen",
-                        "preview_urls": [c["image_url"] for c in top_image_candidates],
                     },
                     name=f"researcher_{task.id}_artifact"
                 )
@@ -583,21 +443,12 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
                 step_instruction,
                 preferred_mode=step_mode,
             )
+            tasks = _ensure_minimum_task_diversity(tasks, step_instruction, step_mode)
             if not tasks:
                  raise ValueError("No tasks generated")
         except Exception as e:
-            logger.warning(f"Decomposition failed: {e}. Fallback to single task.")
-            fallback_mode = step_mode or ("image_search" if _contains_explicit_image_request(step_instruction) else "text_search")
-            tasks = [
-                ResearchTask(
-                   id=1, 
-                   perspective="General Investigation", 
-                   search_mode=fallback_mode,
-                   query_hints=[], 
-                   priority="high", 
-                   expected_output="Detailed report."
-                )
-            ]
+            logger.warning(f"Decomposition failed: {e}. Fallback to multi-perspective tasks.")
+            tasks = _build_fallback_research_tasks(step_instruction, step_mode)
 
         logger.info(f"Manager: Decomposition complete. {len(tasks)} tasks generated.")
         # [Serialization] Start sequential execution from the first task

@@ -755,7 +755,7 @@ class ResearchTask(BaseModel):
     """調査タスク（Plannerが生成）"""
     id: int = Field(description="タスクID")
     perspective: str = Field(description="調査観点（例: 市場規模、技術動向）")
-    search_mode: Optional[Literal["text_search", "image_search", "hybrid_search"]] = Field(
+    search_mode: Optional[Literal["text_search"]] = Field(
         default="text_search",
         description="調査モード"
     )
@@ -772,7 +772,7 @@ class ResearchResult(BaseModel):
     sources: List[str] = Field(description="参照URL一覧")
     image_candidates: List[ResearchImageCandidate] = Field(
         default_factory=list,
-        description="画像候補一覧（image/hybrid search時）"
+        description="互換目的の未使用フィールド（現在は常に空）"
     )
     confidence: float = Field(description="信頼度スコア (0.0-1.0)")
 
@@ -802,8 +802,9 @@ class OutputFile(BaseModel):
 
 class DataAnalystOutput(BaseModel):
     """DataAnalystノードの出力"""
-    execution_summary: str = Field(description="実行結果の要約")
-    analysis_report: str = Field(description="Markdown形式の分析レポート")
+    implementation_code: str = Field(default="", description="実装したPython/Bashコード")
+    execution_log: str = Field(default="", description="実行ログ")
+    output_value: Any | None = Field(default=None, description="ファイル以外の出力値（JSON互換）")
     failed_checks: List[str] = Field(
         default_factory=list,
         description="失敗時の明示チェックコード（例: missing_research）"
@@ -812,9 +813,3 @@ class DataAnalystOutput(BaseModel):
         default_factory=list,
         description="生成された成果物ファイルのリスト"
     )
-    blueprints: List[VisualBlueprint] = Field(
-        default_factory=list,
-        description="生成されたビジュアル・ブループリントのリスト"
-    )
-    visualization_code: Optional[str] = Field(default=None, description="可視化用のPythonコード（オプション）")
-    data_sources: List[str] = Field(default_factory=list, description="使用したデータソース")

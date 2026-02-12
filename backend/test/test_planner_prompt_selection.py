@@ -26,7 +26,7 @@ def test_planner_prompt_loads_slide_specific_rules() -> None:
 def test_planner_prompt_loads_design_specific_rules() -> None:
     prompt = _render_planner_prompt("design")
     assert "Product Guidance: design" in prompt
-    assert "researcher (`image_search`) as first candidate" in prompt
+    assert "researcher (`text_search`) as first candidate" in prompt
 
 
 def test_planner_prompt_loads_comic_specific_rules() -> None:

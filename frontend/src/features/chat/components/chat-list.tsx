@@ -7,7 +7,7 @@ import { ResearchTaskCard } from "./message/research-task-card";
 import { ArtifactPreview } from "./artifact-preview";
 import { CodeExecutionBlock } from "./code-execution-block";
 import { SlideOutline } from "./slide-outline";
-import { ImageSearchResults } from "./image-search-results";
+import { CharacterSheetSummary } from "./character-sheet-summary";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { useArtifactStore } from "@/features/preview/stores/artifact";
@@ -17,14 +17,17 @@ import type { PlanStepStatus, PlanUpdateData } from "../types/plan";
 import { normalizePlanStepStatus, normalizePlanUpdateData } from "../types/plan";
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
+import {
+    CHARACTER_SHEET_BUNDLE_ARTIFACT_ID,
+    inferVisualizerModeFromPayload,
+    normalizeCharacterSheetBundle,
+} from "@/features/preview/lib/character-sheet-bundle";
 
 interface ChatListProps {
     timeline: TimelineEvent[];
     latestPlan?: PlanUpdateData | null;
     latestOutline?: any;
     latestSlideDeck?: any;
-    selectedImageUrls?: string[];
-    onToggleImageCandidate?: (candidate: any) => void;
     queuedUserMessage?: string | null;
     isLoading?: boolean;
     status?: "ready" | "submitted" | "streaming" | "error";
@@ -43,13 +46,42 @@ type TimelineRenderEntry =
         status: PlanStepStatus;
     };
 
+type VisualDeckKind = "slide_deck" | "character_sheet_deck" | "comic_page_deck";
+
+const DEFAULT_ASPECT_RATIO_BY_MODE: Record<string, string> = {
+    slide_render: "16:9",
+    document_layout_render: "4:5",
+    comic_page_render: "9:16",
+    character_sheet_render: "2:3",
+};
+
+function resolveVisualDeckKind(mode?: string | null): VisualDeckKind {
+    if (mode === "character_sheet_render") return "character_sheet_deck";
+    if (mode === "comic_page_render") return "comic_page_deck";
+    return "slide_deck";
+}
+
+function resolveVisualAspectRatio(
+    mode?: string | null,
+    rawAspectRatio?: string | null,
+    kind?: VisualDeckKind | null,
+): string {
+    if (typeof rawAspectRatio === "string" && rawAspectRatio.trim().length > 0) {
+        return rawAspectRatio.trim();
+    }
+    if (kind === "character_sheet_deck") return "2:3";
+    if (kind === "comic_page_deck") return "9:16";
+    if (typeof mode === "string" && mode in DEFAULT_ASPECT_RATIO_BY_MODE) {
+        return DEFAULT_ASPECT_RATIO_BY_MODE[mode];
+    }
+    return "16:9";
+}
+
 export function ChatList({
     timeline,
     latestPlan,
     latestOutline,
     latestSlideDeck,
-    selectedImageUrls = [],
-    onToggleImageCandidate,
     queuedUserMessage,
     isLoading,
     status,
@@ -121,7 +153,11 @@ export function ChatList({
     const hasSlideDeckInTimeline = useMemo(
         () =>
             processedTimeline.some(
-                (item) => item.type === "artifact" && (item as any).kind === "slide_deck"
+                (item) =>
+                    item.type === "artifact" &&
+                    ((item as any).kind === "slide_deck" ||
+                        (item as any).kind === "character_sheet_deck" ||
+                        (item as any).kind === "comic_page_deck")
             ),
         [processedTimeline]
     );
@@ -137,15 +173,38 @@ export function ChatList({
             .sort((a, b) => (b?.version ?? 0) - (a?.version ?? 0))[0];
         if (!latestArtifact) return null;
         const content = latestArtifact.content && typeof latestArtifact.content === "object" ? latestArtifact.content : {};
+        const mode = inferVisualizerModeFromPayload(content, typeof (content as any).mode === "string" ? (content as any).mode : null);
         return {
             artifactId: latestArtifact.id,
             title: latestArtifact.title || "Generated Slides",
             slides: Array.isArray(content.slides) ? content.slides : [],
             status: latestArtifact.status || "completed",
             pdf_url: typeof content.pdf_url === "string" ? content.pdf_url : undefined,
+            mode,
+            aspectRatio:
+                typeof (content as any).aspect_ratio === "string"
+                    ? (content as any).aspect_ratio
+                    : typeof (content as any).metadata?.aspect_ratio === "string"
+                        ? (content as any).metadata.aspect_ratio
+                        : undefined,
         };
     }, [artifacts]);
     const effectiveLatestSlideDeck = latestSlideDeck ?? latestSlideDeckFromArtifactStore;
+    const characterSheetVisualRunArtifactIds = useMemo(() => {
+        const bundleArtifact = artifacts[CHARACTER_SHEET_BUNDLE_ARTIFACT_ID];
+        const bundle = normalizeCharacterSheetBundle(bundleArtifact?.content);
+        const ids = new Set<string>();
+
+        bundle.versions.forEach((version) => {
+            version.visual_runs.forEach((run) => {
+                if (typeof run.visual_artifact_id === "string" && run.visual_artifact_id.trim().length > 0) {
+                    ids.add(run.visual_artifact_id.trim());
+                }
+            });
+        });
+
+        return ids;
+    }, [artifacts]);
     const writerArtifactIdsInTimeline = useMemo(() => {
         const ids = new Set<string>();
         processedTimeline.forEach((item) => {
@@ -163,6 +222,9 @@ export function ChatList({
             .filter((artifact) => {
                 if (!artifact || typeof artifact.type !== "string") return false;
                 if (!artifact.type.startsWith("writer_")) return false;
+                if (artifact.type === "writer_character_sheet" && artifact.id !== CHARACTER_SHEET_BUNDLE_ARTIFACT_ID) {
+                    return false;
+                }
                 return !writerArtifactIdsInTimeline.has(artifact.id);
             })
             .sort((a, b) => (b?.version ?? 0) - (a?.version ?? 0));
@@ -283,7 +345,30 @@ export function ChatList({
         }
 
         if (item.type === "artifact") {
-            if ((item as any).kind === "slide_deck") {
+            if (
+                (item as any).kind === "slide_deck" ||
+                (item as any).kind === "character_sheet_deck" ||
+                (item as any).kind === "comic_page_deck"
+            ) {
+                const itemKind = typeof (item as any).kind === "string" ? (item as any).kind : "slide_deck";
+                const mode = typeof (item as any).mode === "string" ? (item as any).mode : null;
+                const baseArtifactId =
+                    typeof item.artifactId === "string" && item.artifactId.trim().length > 0
+                        ? item.artifactId
+                        : "visual_deck";
+                const previewArtifactId =
+                    mode === "character_sheet_render" && characterSheetVisualRunArtifactIds.has(baseArtifactId)
+                        ? CHARACTER_SHEET_BUNDLE_ARTIFACT_ID
+                        : baseArtifactId;
+                const deckKind: VisualDeckKind =
+                    itemKind === "character_sheet_deck" || itemKind === "comic_page_deck"
+                        ? itemKind
+                        : resolveVisualDeckKind(mode);
+                const aspectRatio = resolveVisualAspectRatio(
+                    mode,
+                    (item as any).aspectRatio || (item as any).metadata?.aspect_ratio,
+                    deckKind
+                );
                 return (
                     <div key={key} className="flex flex-col gap-2">
                         <ChatItem
@@ -291,16 +376,25 @@ export function ChatList({
                             content=""
                             name="Visualizer"
                             artifact={{
-                                kind: "slide_deck",
-                                id: item.artifactId,
+                                kind: deckKind,
+                                id: previewArtifactId,
                                 title: item.title,
                                 slides: (item as any).slides,
                                 status: (item as any).status,
-                                aspectRatio: (item as any).aspectRatio || (item as any).metadata?.aspect_ratio,
+                                aspectRatio,
                             }}
                             isStreaming={(item as any).status === "streaming"}
                         />
                     </div>
+                );
+            }
+
+            if ((item as any).kind === "writer_character_sheet") {
+                return (
+                    <CharacterSheetSummary
+                        key={key}
+                        artifactId={item.artifactId || CHARACTER_SHEET_BUNDLE_ARTIFACT_ID}
+                    />
                 );
             }
 
@@ -362,18 +456,6 @@ export function ChatList({
             );
         }
 
-        if (item.type === "image_search_results") {
-            return (
-                <ImageSearchResults
-                    key={key}
-                    query={item.query || item.perspective || "image search"}
-                    candidates={item.candidates || []}
-                    selectedUrls={selectedImageUrls}
-                    onToggleSelect={(candidate) => onToggleImageCandidate?.(candidate)}
-                />
-            )
-        }
-
         if (item.type === "coordinator_followups") {
             return (
                 <div key={key} className="py-2">
@@ -422,31 +504,57 @@ export function ChatList({
                 ) : null}
 
                 {fallbackWriterArtifacts.map((artifact) => (
-                    <div key={`fallback-writer-${artifact.id}`} className="flex flex-col gap-1 pl-4 md:pl-10">
-                        <ArtifactButton
+                    artifact.type === "writer_character_sheet" ? (
+                        <CharacterSheetSummary
+                            key={`fallback-writer-${artifact.id}`}
                             artifactId={artifact.id}
-                            title={artifact.title || "Writer Output"}
-                            icon="BookOpen"
                         />
-                    </div>
+                    ) : (
+                        <div key={`fallback-writer-${artifact.id}`} className="flex flex-col gap-1 pl-4 md:pl-10">
+                            <ArtifactButton
+                                artifactId={artifact.id}
+                                title={artifact.title || "Writer Output"}
+                                icon="BookOpen"
+                            />
+                        </div>
+                    )
                 ))}
 
                 {effectiveLatestSlideDeck && !hasSlideDeckInTimeline ? (
                     <div className="flex flex-col gap-2">
-                        <ChatItem
-                            role="assistant"
-                            content=""
-                            name="Visualizer"
-                            artifact={{
-                                kind: "slide_deck",
-                                id: effectiveLatestSlideDeck.artifactId || "visual_deck",
-                                title: effectiveLatestSlideDeck.title || "Generated Slides",
-                                slides: Array.isArray(effectiveLatestSlideDeck.slides) ? effectiveLatestSlideDeck.slides : [],
-                                status: effectiveLatestSlideDeck.status,
-                                aspectRatio: (effectiveLatestSlideDeck as any).aspectRatio || (effectiveLatestSlideDeck as any).metadata?.aspect_ratio,
-                            }}
-                            isStreaming={effectiveLatestSlideDeck.status === "streaming"}
-                        />
+                        {(() => {
+                            const mode = typeof effectiveLatestSlideDeck.mode === "string"
+                                ? effectiveLatestSlideDeck.mode
+                                : null;
+                            const deckKind = resolveVisualDeckKind(mode);
+                            const aspectRatio = resolveVisualAspectRatio(
+                                mode,
+                                (effectiveLatestSlideDeck as any).aspectRatio || (effectiveLatestSlideDeck as any).metadata?.aspect_ratio,
+                                deckKind
+                            );
+                            const previewArtifactId =
+                                mode === "character_sheet_render" &&
+                                    typeof effectiveLatestSlideDeck.artifactId === "string" &&
+                                    characterSheetVisualRunArtifactIds.has(effectiveLatestSlideDeck.artifactId)
+                                    ? CHARACTER_SHEET_BUNDLE_ARTIFACT_ID
+                                    : (effectiveLatestSlideDeck.artifactId || "visual_deck");
+                            return (
+                                <ChatItem
+                                    role="assistant"
+                                    content=""
+                                    name="Visualizer"
+                                    artifact={{
+                                        kind: deckKind,
+                                        id: previewArtifactId,
+                                        title: effectiveLatestSlideDeck.title || "Generated Slides",
+                                        slides: Array.isArray(effectiveLatestSlideDeck.slides) ? effectiveLatestSlideDeck.slides : [],
+                                        status: effectiveLatestSlideDeck.status,
+                                        aspectRatio,
+                                    }}
+                                    isStreaming={effectiveLatestSlideDeck.status === "streaming"}
+                                />
+                            );
+                        })()}
                     </div>
                 ) : null}
 

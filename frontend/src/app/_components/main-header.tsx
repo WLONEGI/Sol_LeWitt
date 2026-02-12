@@ -1,5 +1,6 @@
 "use client"
 
+import Image from "next/image"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/providers/auth-provider"
@@ -20,8 +21,15 @@ export function MainHeader({ className }: { className?: string }) {
             )}
         >
             <div className="mx-auto flex w-full max-w-5xl items-center justify-between px-6">
-                <div className="flex items-center gap-2 text-sm font-semibold tracking-[0.2em] text-foreground">
-                    Sol LeWitt
+                <div className="inline-flex items-center gap-2 text-sm font-semibold tracking-[0.2em] text-foreground">
+                    <Image
+                        src="/logo.svg"
+                        alt="Sol LeWitt logo"
+                        width={20}
+                        height={20}
+                        className="h-5 w-5 shrink-0"
+                    />
+                    <span>Sol LeWitt</span>
                 </div>
                 <div className="flex items-center justify-end gap-2">
                     {!loading && !user ? (

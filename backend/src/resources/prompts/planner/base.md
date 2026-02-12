@@ -24,6 +24,62 @@ Create an executable plan that improves output quality while keeping execution s
   - `success_criteria`, `depends_on`, `target_scope`(optional), `status`
 - `instruction` / `title` / `description` must be Japanese and user-facing.
 
+# Type Constraints (Hard)
+- `steps` is an array of step objects.
+- `id` must be integer (`1,2,3...`). Never output string ids like `"step_001"`.
+- `depends_on` must be an array of integer ids. Never output string references.
+- `validation` must be an array of strings. Never output object.
+- `fallback` must be an array of strings. Never output single string.
+- `inputs` / `outputs` / `preconditions` / `success_criteria` are arrays of strings.
+- `status` must be one of `pending`, `in_progress`, `completed`, `blocked`.
+
+# Strict Few-shot (Schema-valid shape)
+Example (shape reference):
+{
+  "steps": [
+    {
+      "id": 1,
+      "capability": "writer",
+      "mode": "slide_outline",
+      "instruction": "製品紹介スライドのアウトラインを作成する",
+      "title": "アウトライン作成",
+      "description": "目的と対象読者に沿った構成案を作る",
+      "inputs": ["user_request"],
+      "outputs": ["outline:draft"],
+      "preconditions": ["ユーザー要件が確定している"],
+      "validation": ["想定読者と目的に整合する"],
+      "fallback": [
+        "retry_with_tighter_constraints",
+        "reduce_scope_to_target_units",
+        "switch_mode_minimal_safe_output"
+      ],
+      "success_criteria": ["スライド構成が実行可能である"],
+      "depends_on": [],
+      "status": "pending"
+    },
+    {
+      "id": 2,
+      "capability": "visualizer",
+      "mode": "slide_render",
+      "instruction": "確定アウトラインをもとにスライド画像を生成する",
+      "title": "画像生成",
+      "description": "構成に沿って各スライドを可視化する",
+      "inputs": ["outline:draft"],
+      "outputs": ["slides:images"],
+      "preconditions": ["アウトラインが確定している"],
+      "validation": ["レイアウトと内容が整合する"],
+      "fallback": [
+        "retry_with_tighter_constraints",
+        "reduce_scope_to_target_units",
+        "switch_mode_minimal_safe_output"
+      ],
+      "success_criteria": ["必要枚数のスライド画像が生成される"],
+      "depends_on": [1],
+      "status": "pending"
+    }
+  ]
+}
+
 # Replanning Policy (Important)
 - If `planning_mode` is `replan`, do NOT rebuild everything from scratch.
 - Respect execution progress and keep already valid work:
@@ -39,11 +95,12 @@ Create an executable plan that improves output quality while keeping execution s
 
 # Researcher Insertion Policy
 - Insert Researcher proactively when downstream success is uncertain.
-- Especially insert when facts/sources/licenses/reference images affect quality or correctness.
+- Especially insert when facts/sources affect quality or correctness.
 - Researcher mode:
   - `text_search`: evidence/facts
-  - `image_search`: visual references
-  - `hybrid_search`: both needed
+- A single `researcher` step should contain multiple perspectives in its `instruction`.
+  - Include at least 3 concrete perspectives under a clear section (e.g. `調査観点:` with bullet points).
+  - The Researcher subgraph will decompose those perspectives into multiple research tasks.
 
 # Research Hand-off Contract (Important)
 - If you add a `researcher` step, define explicit reusable output labels in `outputs`.

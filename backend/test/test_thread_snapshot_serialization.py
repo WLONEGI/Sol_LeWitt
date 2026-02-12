@@ -67,8 +67,9 @@ def test_build_snapshot_payload_generates_ui_events_and_artifacts() -> None:
             ),
             "step_3_data": json.dumps(
                 {
-                    "execution_summary": "completed",
-                    "analysis_report": "report",
+                    "implementation_code": "print('ok')",
+                    "execution_log": "completed",
+                    "output_value": {"status": "ok"},
                     "output_files": [],
                 },
                 ensure_ascii=False,

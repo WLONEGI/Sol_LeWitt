@@ -9,8 +9,7 @@ You must choose one:
 
 # Output Contract
 - Output MUST be valid JSON only.
-- `response` must be concise Japanese in plain style (常体).
-- Avoid "です/ます" tone.
+- `response` must be concise Japanese in polite style (です・ます調).
 - `title` is required only when `goto="planner"` (<=20 chars). Otherwise null.
 - `followup_options`:
   - If `goto="__end__"`: generate exactly 3 options.

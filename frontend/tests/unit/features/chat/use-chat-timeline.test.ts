@@ -32,11 +32,13 @@ describe('useChatTimeline aggregation', () => {
           { type: 'text', text: 'alpha' },
           { type: 'reasoning', text: 'thinking' },
           {
-            type: 'data-image-search-results',
+            type: 'data-research-report',
             data: {
               task_id: 't1',
-              query: 'query',
-              candidates: [],
+              perspective: '市場調査',
+              status: 'completed',
+              report: 'report-body',
+              sources: ['https://example.com/source'],
             },
           },
           { type: 'text', text: 'beta' },
@@ -64,7 +66,7 @@ describe('useChatTimeline aggregation', () => {
       'plan_step_marker',
       'message',
       'message',
-      'image_search_results',
+      'research_report',
       'message',
       'plan_step_end_marker',
     ]);
@@ -174,74 +176,52 @@ describe('useChatTimeline aggregation', () => {
     ).toBe(false);
   });
 
-  it('keeps one latest image search result per artifact key and preserves multiple keys', () => {
+  it('keeps one latest research report per task and preserves multiple tasks', () => {
     const data = [
       event(
-        'data-image-search-results',
+        'data-research-report',
         {
-          artifact_id: 'step_3_research_1',
           task_id: 'r1',
-          query: 'q-old',
-          perspective: 'p1',
-          candidates: [
-            {
-              image_url: 'https://example.com/old.png',
-              source_url: 'https://example.com/src-old',
-              license_note: 'CC BY 4.0',
-            },
-          ],
+          perspective: '市場規模',
+          report: 'old-report',
+          sources: ['https://example.com/src-old'],
         },
         1
       ),
       event(
-        'data-image-search-results',
+        'data-research-report',
         {
-          artifact_id: 'step_3_research_1',
           task_id: 'r1',
-          query: 'q-new',
-          perspective: 'p1',
-          candidates: [
-            {
-              image_url: 'https://example.com/new.png',
-              source_url: 'https://example.com/src-new',
-              license_note: 'CC BY-SA 4.0',
-            },
-          ],
+          perspective: '市場規模',
+          report: 'new-report',
+          sources: ['https://example.com/src-new'],
         },
         2
       ),
       event(
-        'data-image-search-results',
+        'data-research-report',
         {
-          artifact_id: 'step_3_research_2',
           task_id: 'r2',
-          query: 'q-other',
-          perspective: 'p2',
-          candidates: [
-            {
-              image_url: 'https://example.com/other.png',
-              source_url: 'https://example.com/src-other',
-              license_note: 'CC0',
-            },
-          ],
+          perspective: '競合比較',
+          report: 'other-report',
+          sources: ['https://example.com/src-other'],
         },
         3
       ),
     ];
 
     const { result } = renderHook(() => useChatTimeline(baseMessages, data));
-    const imageSearchItems = result.current.timeline.filter(
-      (item) => item.type === 'image_search_results'
+    const researchItems = result.current.timeline.filter(
+      (item) => item.type === 'research_report'
     ) as any[];
 
-    expect(imageSearchItems).toHaveLength(2);
-    const updated = imageSearchItems.find((item) => item.artifactId === 'step_3_research_1');
+    expect(researchItems).toHaveLength(2);
+    const updated = researchItems.find((item) => item.taskId === 'r1');
     expect(updated).toBeTruthy();
-    expect(updated.query).toBe('q-new');
-    expect(updated.candidates?.[0]?.image_url).toBe('https://example.com/new.png');
-    expect(updated.candidates?.[0]?.image_url).not.toBe('https://example.com/old.png');
+    expect(updated.report).toBe('new-report');
+    expect(updated.report).not.toBe('old-report');
     expect(
-      imageSearchItems.some((item) => item.artifactId === 'step_3_research_2')
+      researchItems.some((item) => item.taskId === 'r2')
     ).toBe(true);
   });
 
@@ -279,5 +259,41 @@ describe('useChatTimeline aggregation', () => {
     expect(followups[0].options).toHaveLength(3);
     expect(followups[0].options[0].prompt).toBe('目的は〇〇です。');
     expect(followups[0].timestamp).toBeGreaterThan(1000);
+  });
+
+  it('keeps user file attachments on user message timeline item', () => {
+    const messages: any[] = [
+      {
+        id: 'u-attach',
+        role: 'user',
+        parts: [
+          {
+            type: 'file',
+            url: 'https://storage.googleapis.com/demo/file1.html',
+            filename: 'download (2).html',
+            mediaType: 'text/html',
+          },
+          {
+            type: 'file',
+            url: 'https://storage.googleapis.com/demo/file2.pptx',
+            filename: 'proposal.pptx',
+            mediaType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          },
+          { type: 'text', text: '添付を確認してください。' },
+        ],
+      },
+    ];
+
+    const { result } = renderHook(() => useChatTimeline(messages, []));
+    const messageItems = result.current.timeline.filter((item: any) => item.type === 'message') as any[];
+
+    expect(messageItems).toHaveLength(1);
+    expect(messageItems[0].message.role).toBe('user');
+    expect(messageItems[0].message.content).toContain('添付を確認してください。');
+    const parts = Array.isArray(messageItems[0].message.parts) ? messageItems[0].message.parts : [];
+    const fileParts = parts.filter((part: any) => part?.type === 'file');
+    expect(fileParts).toHaveLength(2);
+    expect(fileParts[0].filename).toBe('download (2).html');
+    expect(fileParts[1].filename).toBe('proposal.pptx');
   });
 });

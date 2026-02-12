@@ -1,5 +1,6 @@
 import logging
 import json
+import re
 from copy import deepcopy
 from typing import Any, Literal
 
@@ -342,6 +343,92 @@ def _missing_required_research_step(
     return True, "Research requirement was detected but no explicit researcher step is included."
 
 
+def _has_multiple_research_perspectives(instruction: str) -> bool:
+    if not instruction:
+        return False
+    lines = [line.strip() for line in instruction.splitlines() if line.strip()]
+    bullet_count = 0
+    for line in lines:
+        if re.match(r"^(?:[-*・]|[0-9]+[.)、])\s*", line):
+            bullet_count += 1
+    if bullet_count >= 2:
+        return True
+
+    if "調査観点" in instruction:
+        marker_index = instruction.find("調査観点")
+        tail = instruction[marker_index:]
+        candidate_count = 0
+        for raw in re.split(r"[、,\n/]", tail):
+            text = re.sub(r"^(?:[-*・]|[0-9]+[.)、])\s*", "", raw).strip()
+            if not text:
+                continue
+            if text.startswith("調査観点"):
+                continue
+            if "分解" in text or "調査する" in text:
+                continue
+            candidate_count += 1
+        return candidate_count >= 2
+
+    return False
+
+
+def _default_research_perspectives(product_type: str | None) -> list[str]:
+    if product_type == "comic":
+        return [
+            "題材・時代背景の事実関係と参照可能な根拠",
+            "近い作風・演出の先行事例と再現ポイント",
+            "表現上のリスク・制約（権利/倫理/文化的配慮）",
+        ]
+    if product_type == "design":
+        return [
+            "業界動向・主要論点の最新情報",
+            "類似ドキュメントの構成パターンとベストプラクティス",
+            "意思決定時に注意すべき制約・リスク要因",
+        ]
+    return [
+        "市場動向・背景データの最新情報",
+        "先行事例・ベストプラクティスと示唆",
+        "実行時に考慮すべきリスク・制約条件",
+    ]
+
+
+def _ensure_multi_perspective_research_steps(
+    plan_steps: list[dict[str, Any]],
+    product_type: str | None,
+) -> list[dict[str, Any]]:
+    updated: list[dict[str, Any]] = []
+    for step in plan_steps:
+        next_step = dict(step)
+        if capability_from_any(next_step) != "researcher":
+            updated.append(next_step)
+            continue
+
+        instruction = str(next_step.get("instruction") or "").strip()
+        if _has_multiple_research_perspectives(instruction):
+            updated.append(next_step)
+            continue
+
+        perspectives = _default_research_perspectives(product_type)
+        perspective_lines = "\n".join(f"- {item}" for item in perspectives)
+        instruction_head = instruction if instruction else "依頼テーマを調査する"
+        next_step["instruction"] = (
+            f"{instruction_head}\n\n"
+            "調査観点:\n"
+            f"{perspective_lines}\n\n"
+            "上記の観点を個別タスクに分解し、それぞれ根拠付きで調査する。"
+        )
+
+        description = next_step.get("description")
+        if isinstance(description, str) and description.strip():
+            if "複数観点" not in description:
+                next_step["description"] = f"{description.strip()}（複数観点を分解して調査）"
+        else:
+            next_step["description"] = "複数観点を分解して調査する"
+
+        updated.append(next_step)
+    return updated
+
+
 async def planner_node(state: State, config: RunnableConfig) -> Command[Literal["supervisor", "__end__"]]:
     """Planner node - uses structured output for reliable JSON execution plan."""
     logger.info("Planner creating execution plan")
@@ -414,6 +501,7 @@ async def planner_node(state: State, config: RunnableConfig) -> Command[Literal[
         logger.debug(f"[DEBUG] Planner Output: {planner_output}")
         plan_data = [step.model_dump(exclude_none=True) for step in planner_output.steps]
         plan_data = _normalize_plan_steps(plan_data, product_type=product_type)
+        plan_data = _ensure_multi_perspective_research_steps(plan_data, product_type=product_type)
 
         missing_research, reason = _missing_required_research_step(plan_data, latest_user_text)
         if missing_research:

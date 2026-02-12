@@ -28,54 +28,33 @@ test('aggregates timeline cards by artifact and keeps latest payload', async ({ 
         },
       },
       {
-        type: 'data-image-search-results',
+        type: 'data-research-report',
         data: {
-          artifact_id: 'step_5_research_1',
           task_id: 'r1',
-          query: 'old-query',
           perspective: 'sleep',
-          candidates: [
-            {
-              image_url: 'https://example.com/old.png',
-              source_url: 'https://example.com/source-old',
-              license_note: 'CC BY 4.0',
-              caption: 'old-candidate',
-            },
-          ],
+          status: 'completed',
+          report: 'old-report',
+          sources: ['https://example.com/source-old'],
         },
       },
       {
-        type: 'data-image-search-results',
+        type: 'data-research-report',
         data: {
-          artifact_id: 'step_5_research_1',
           task_id: 'r1',
-          query: 'new-query',
           perspective: 'sleep',
-          candidates: [
-            {
-              image_url: 'https://example.com/new.png',
-              source_url: 'https://example.com/source-new',
-              license_note: 'CC BY-SA 4.0',
-              caption: 'new-candidate',
-            },
-          ],
+          status: 'completed',
+          report: 'new-report',
+          sources: ['https://example.com/source-new'],
         },
       },
       {
-        type: 'data-image-search-results',
+        type: 'data-research-report',
         data: {
-          artifact_id: 'step_5_research_2',
           task_id: 'r2',
-          query: 'other-query',
           perspective: 'calm',
-          candidates: [
-            {
-              image_url: 'https://example.com/other.png',
-              source_url: 'https://example.com/source-other',
-              license_note: 'CC0',
-              caption: 'other-candidate',
-            },
-          ],
+          status: 'completed',
+          report: 'other-report',
+          sources: ['https://example.com/source-other'],
         },
       },
       {
@@ -126,14 +105,16 @@ test('aggregates timeline cards by artifact and keeps latest payload', async ({ 
   await expect(page.getByText('other-outline')).toBeVisible();
   await expect(page.getByText('old-outline')).toHaveCount(0);
 
-  await expect(page.getByText('Using Tool | Image Search new-query')).toBeVisible();
-  await expect(page.getByText('Using Tool | Image Search other-query')).toBeVisible();
-  await expect(page.getByText('Using Tool | Image Search old-query')).toHaveCount(0);
-  await expect(page.getByAltText('new-candidate')).toBeVisible();
-  await expect(page.getByAltText('other-candidate')).toBeVisible();
+  const expandReportButtons = page.getByRole('button', { name: 'Expand report' });
+  while ((await expandReportButtons.count()) > 0) {
+    await expandReportButtons.first().click();
+  }
+
+  await expect(page.getByText('new-report')).toBeVisible();
+  await expect(page.getByText('other-report')).toBeVisible();
+  await expect(page.getByText('old-report')).toHaveCount(0);
 
   await expect(page.getByText('Writer V2')).toBeVisible();
-  await expect(page.getByText('Writer Character')).toBeVisible();
+  await expect(page.getByRole('button', { name: /Character Sheet Writer:/ })).toBeVisible();
   await expect(page.getByText('Writer V1')).toHaveCount(0);
 });
-

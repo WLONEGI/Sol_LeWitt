@@ -207,7 +207,7 @@ def test_supervisor_marks_failed_checks_only_artifact_as_failed() -> None:
         "artifacts": {
             "step_12_data": json.dumps(
                 {
-                    "execution_summary": "処理は完了しました。",
+                    "execution_log": "処理は完了しました。",
                     "failed_checks": ["tool_execution"],
                 }
             )
@@ -218,6 +218,39 @@ def test_supervisor_marks_failed_checks_only_artifact_as_failed() -> None:
     assert cmd.goto == "retry_or_alt_mode"
     assert cmd.update["plan"][0]["status"] == "blocked"
     assert cmd.update["quality_reports"][12]["failed_checks"] == ["tool_execution"]
+
+
+def test_supervisor_routes_visualizer_all_images_failed_to_retry_node() -> None:
+    state = {
+        "messages": [],
+        "plan": [
+            {
+                "id": 13,
+                "capability": "visualizer",
+                "status": "in_progress",
+                "title": "Visual",
+                "description": "Render visual assets",
+                "instruction": "Render visuals",
+                "result_summary": "処理は完了しました。",
+            }
+        ],
+        "artifacts": {
+            "step_13_visual": json.dumps(
+                {
+                    "execution_summary": "画像生成を完了しました。",
+                    "prompts": [
+                        {"slide_number": 1, "generated_image_url": None},
+                        {"slide_number": 2, "generated_image_url": ""},
+                    ],
+                }
+            )
+        },
+        "quality_reports": {},
+    }
+    cmd = asyncio.run(supervisor_node(state, {}))
+    assert cmd.goto == "retry_or_alt_mode"
+    assert cmd.update["plan"][0]["status"] == "blocked"
+    assert "all_images_failed" in cmd.update["quality_reports"][13]["failed_checks"]
 
 
 def test_supervisor_emits_plan_step_started_event_for_pending_step() -> None:
@@ -280,3 +313,127 @@ def test_supervisor_emits_plan_step_ended_event_for_completed_step() -> None:
     end_call = next(call for call in dispatch_mock.await_args_list if call.args[0] == "data-plan_step_ended")
     assert end_call.args[1]["step_id"] == 1
     assert end_call.args[1]["status"] == "completed"
+
+
+def test_supervisor_selects_assets_from_research_upload_and_data_outputs() -> None:
+    research_gcs_url = "gs://demo-bucket/research/ref_01.png"
+    upload_url = "https://storage.googleapis.com/demo-bucket/user_uploads/u1.png"
+    data_image_url = "https://storage.googleapis.com/demo-bucket/generated/analysis_chart.png"
+    data_pdf_url = "https://storage.googleapis.com/demo-bucket/generated/report.pdf"
+
+    state = {
+        "messages": [],
+        "plan": [
+            {
+                "id": 1,
+                "capability": "researcher",
+                "mode": "text_search",
+                "status": "completed",
+                "title": "Research",
+            },
+            {
+                "id": 2,
+                "capability": "data_analyst",
+                "mode": "python_pipeline",
+                "status": "completed",
+                "title": "Data",
+            },
+            {
+                "id": 3,
+                "capability": "visualizer",
+                "mode": "slide_render",
+                "status": "pending",
+                "title": "Visual",
+                "description": "render visuals",
+                "instruction": "調査画像と分析結果を使って生成",
+                "inputs": ["research:reference_images", "analysis_assets"],
+                "depends_on": [1, 2],
+            },
+        ],
+        "artifacts": {
+            "step_1_research_1": json.dumps(
+                {
+                    "task_id": 1,
+                    "perspective": "参照画像",
+                    "report": "ok",
+                    "search_mode": "text_search",
+                    "stored_images": [
+                        {
+                            "gcs_url": research_gcs_url,
+                            "source_url": "https://example.com/ref",
+                            "caption": "research ref",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            "step_2_data": json.dumps(
+                {
+                    "implementation_code": "print('done')",
+                    "execution_log": "done",
+                    "output_value": None,
+                    "output_files": [
+                        {"url": data_image_url, "mime_type": "image/png"},
+                        {"url": data_pdf_url, "mime_type": "application/pdf"},
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        },
+        "attachments": [
+            {
+                "id": "a1",
+                "filename": "upload.png",
+                "mime_type": "image/png",
+                "url": upload_url,
+                "kind": "image",
+            }
+        ],
+        "selected_image_inputs": [],
+        "asset_pool": {},
+        "selected_assets_by_step": {},
+    }
+
+    async def _mock_structured_output(*args, **kwargs):
+        from src.core.workflow.nodes.supervisor import StepAssetSelection
+
+        messages = kwargs.get("messages") or []
+        selector_payload = json.loads(messages[-1].content)
+        candidate_assets = selector_payload.get("candidate_assets", [])
+        selected_ids = [
+            str(asset.get("asset_id"))
+            for asset in candidate_assets
+            if str(asset.get("uri")) in {research_gcs_url, upload_url, data_image_url, data_pdf_url}
+        ]
+        return StepAssetSelection(selected_asset_ids=selected_ids, reason="test")
+
+    with patch("src.core.workflow.nodes.supervisor.get_llm_by_type", return_value=object()), patch(
+        "src.core.workflow.nodes.supervisor.run_structured_output", new=AsyncMock(side_effect=_mock_structured_output)
+    ), patch("src.core.workflow.nodes.supervisor._generate_supervisor_report", new=AsyncMock(return_value="ok")), patch(
+        "src.core.workflow.nodes.supervisor.adispatch_custom_event", new=AsyncMock()
+    ):
+        cmd = asyncio.run(supervisor_node(state, {}))
+
+    assert cmd.goto == "visualizer"
+    assert cmd.update["plan"][2]["status"] == "in_progress"
+
+    selected_map = cmd.update.get("selected_assets_by_step") or {}
+    selected_ids = selected_map.get("3")
+    assert isinstance(selected_ids, list)
+
+    pool = cmd.update.get("asset_pool") or {}
+    assert isinstance(pool, dict)
+    uris = {str(item.get("uri")) for item in pool.values() if isinstance(item, dict)}
+    assert research_gcs_url in uris
+    assert upload_url in uris
+    assert data_image_url in uris
+    assert data_pdf_url in uris
+
+    selected_uris = {
+        str((pool.get(asset_id) or {}).get("uri"))
+        for asset_id in selected_ids
+        if isinstance(asset_id, str)
+    }
+    assert research_gcs_url in selected_uris
+    assert upload_url in selected_uris
+    assert data_image_url in selected_uris

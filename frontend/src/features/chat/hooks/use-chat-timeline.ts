@@ -5,6 +5,10 @@ import type { UIMessage } from 'ai'
 import { TimelineEvent, MessageTimelineItem, ResearchReportTimelineItem } from "../types/timeline"
 import type { PlanUpdateData } from "../types/plan"
 import { normalizePlanUpdateData } from "../types/plan"
+import {
+    CHARACTER_SHEET_BUNDLE_ARTIFACT_ID,
+    inferVisualizerModeFromPayload,
+} from "@/features/preview/lib/character-sheet-bundle"
 
 /**
  * Extracts text content from UIMessage parts array
@@ -83,7 +87,6 @@ export function useChatTimeline(
         const analystMap = new Map<string, { item: any; lastTimestamp: number }>();
         const outlineMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
         const writerArtifactMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
-        const imageSearchMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
         const researchMap = new Map<string, ResearchReportTimelineItem>();
 
         const ingestStructuredEvent = (
@@ -240,46 +243,6 @@ export function useChatTimeline(
                 return;
             }
 
-            if (type === 'data-image-search-results') {
-                const candidates = Array.isArray(eventPayload.candidates) ? eventPayload.candidates : [];
-                const artifactId = typeof eventPayload.artifact_id === 'string' ? eventPayload.artifact_id : undefined;
-                const taskId = String(eventPayload.task_id ?? idSeed);
-                const query = typeof eventPayload.query === 'string' ? eventPayload.query : '';
-                const mapKey = artifactId?.trim()
-                    ? `artifact:${artifactId}`
-                    : `task:${taskId}`;
-                const existing = imageSearchMap.get(mapKey);
-
-                if (existing) {
-                    existing.lastTimestamp = timestamp;
-                    existing.item = {
-                        ...(existing.item as any),
-                        timestamp,
-                        taskId,
-                        artifactId,
-                        query,
-                        perspective: typeof eventPayload.perspective === 'string' ? eventPayload.perspective : undefined,
-                        candidates,
-                    } as any;
-                    return;
-                }
-
-                imageSearchMap.set(mapKey, {
-                    item: {
-                        id: `image-search-${mapKey}`,
-                        type: 'image_search_results',
-                        timestamp,
-                        taskId,
-                        artifactId,
-                        query,
-                        perspective: typeof eventPayload.perspective === 'string' ? eventPayload.perspective : undefined,
-                        candidates,
-                    } as any,
-                    lastTimestamp: timestamp,
-                });
-                return;
-            }
-
             if (type === 'data-coordinator-followups') {
                 const options = Array.isArray(eventPayload.options)
                     ? eventPayload.options
@@ -309,7 +272,11 @@ export function useChatTimeline(
                 const artifactType = typeof eventPayload.artifact_type === 'string' ? eventPayload.artifact_type : 'report';
                 if (artifactType === 'outline') return;
 
-                const artifactId = eventPayload.artifact_id || `${idSeed}-writer`;
+                const baseArtifactId = eventPayload.artifact_id || `${idSeed}-writer`;
+                const artifactId =
+                    artifactType === 'writer_character_sheet'
+                        ? CHARACTER_SHEET_BUNDLE_ARTIFACT_ID
+                        : baseArtifactId;
                 const existing = writerArtifactMap.get(artifactId);
                 if (existing) {
                     existing.lastTimestamp = timestamp;
@@ -320,6 +287,7 @@ export function useChatTimeline(
                         title: eventPayload.title || 'Writer Output',
                         icon: 'BookOpen',
                         kind: artifactType,
+                        status: typeof eventPayload.status === 'string' ? eventPayload.status : undefined,
                     } as any;
                     return;
                 }
@@ -333,6 +301,7 @@ export function useChatTimeline(
                         title: eventPayload.title || 'Writer Output',
                         icon: 'BookOpen',
                         kind: artifactType,
+                        status: typeof eventPayload.status === 'string' ? eventPayload.status : undefined,
                     } as any,
                     lastTimestamp: timestamp,
                 });
@@ -358,9 +327,11 @@ export function useChatTimeline(
                 let textStartIndex = -1;
                 let reasoningBuffer = '';
                 let reasoningStartIndex = -1;
+                const userFileParts: Array<{ type: 'file'; url: string; mediaType?: string; filename?: string }> = [];
 
                 const flushText = (indexFallback: number) => {
-                    if (!textBuffer.trim()) {
+                    const hasFileParts = msg.role === 'user' && userFileParts.length > 0;
+                    if (!textBuffer.trim() && !hasFileParts) {
                         textBuffer = '';
                         textStartIndex = -1;
                         return;
@@ -368,6 +339,15 @@ export function useChatTimeline(
 
                     const logicalIndex = textStartIndex >= 0 ? textStartIndex : indexFallback
                     const timestamp = baseTimestamp + logicalIndex;
+                    const parts: any[] = [];
+                    if (textBuffer) {
+                        parts.push({ type: 'text', text: textBuffer });
+                    }
+                    if (hasFileParts) {
+                        parts.push(...userFileParts);
+                        userFileParts.length = 0;
+                    }
+
                     items.push({
                         id: `${messageId}-text-${logicalIndex}`,
                         type: 'message',
@@ -376,7 +356,7 @@ export function useChatTimeline(
                             id: msg.id,
                             role: msg.role,
                             content: textBuffer,
-                            parts: [{ type: 'text', text: textBuffer }],
+                            parts,
                             toolInvocations: (msg as any).toolInvocations,
                         } as any
                     });
@@ -449,6 +429,21 @@ export function useChatTimeline(
                         return;
                     }
 
+                    if (
+                        p.type === 'file' &&
+                        msg.role === 'user' &&
+                        typeof p.url === 'string' &&
+                        p.url.length > 0
+                    ) {
+                        userFileParts.push({
+                            type: 'file',
+                            url: p.url,
+                            mediaType: typeof p.mediaType === 'string' ? p.mediaType : undefined,
+                            filename: typeof p.filename === 'string' ? p.filename : undefined,
+                        });
+                        return;
+                    }
+
                     flushText(partIndex);
                     flushReasoning(partIndex);
 
@@ -470,8 +465,11 @@ export function useChatTimeline(
             const itemsAddedForMessage = items.length - beforeLength;
             if (itemsAddedForMessage === 0) {
                 const content = (msg as any).content || '';
+                const fileParts = Array.isArray(msg.parts)
+                    ? msg.parts.filter((part: any) => part?.type === 'file')
+                    : [];
                 // Add message if there's content or if it's a user message (user messages should always be visible)
-                if (content || msg.role === 'user') {
+                if (content || msg.role === 'user' || fileParts.length > 0) {
                     items.push({
                         id: messageId,
                         type: 'message',
@@ -480,6 +478,7 @@ export function useChatTimeline(
                             id: msg.id,
                             role: msg.role,
                             content: content,
+                            parts: fileParts.length > 0 ? fileParts : undefined,
                             toolInvocations: (msg as any).toolInvocations,
                         } as any
                     });
@@ -507,10 +506,6 @@ export function useChatTimeline(
             items.push(item);
         });
         outlineMap.forEach(({ item, lastTimestamp }) => {
-            item.timestamp = lastTimestamp;
-            items.push(item);
-        });
-        imageSearchMap.forEach(({ item, lastTimestamp }) => {
             item.timestamp = lastTimestamp;
             items.push(item);
         });
@@ -546,6 +541,21 @@ export function useChatTimeline(
 
         let deck: any = null;
         const slidesMap = new Map<number, any>();
+        const readAspectRatio = (payload: any): string | null => {
+            if (!payload || typeof payload !== 'object') return null;
+            if (typeof payload.aspect_ratio === 'string' && payload.aspect_ratio.trim().length > 0) {
+                return payload.aspect_ratio.trim();
+            }
+            if (
+                payload.metadata &&
+                typeof payload.metadata === 'object' &&
+                typeof payload.metadata.aspect_ratio === 'string' &&
+                payload.metadata.aspect_ratio.trim().length > 0
+            ) {
+                return payload.metadata.aspect_ratio.trim();
+            }
+            return null;
+        };
 
         for (const event of data) {
             if (!event || typeof event !== 'object') continue;
@@ -553,7 +563,9 @@ export function useChatTimeline(
             if (!type || !type.startsWith('data-visual-')) continue;
 
             const payload = event.data || {};
+            const inferredMode = inferVisualizerModeFromPayload(payload, deck?.mode || null);
             const artifactId = payload.artifact_id || deck?.artifactId || 'visual_deck';
+            const payloadAspectRatio = readAspectRatio(payload);
 
             if (!deck || deck.artifactId !== artifactId) {
                 deck = {
@@ -562,7 +574,15 @@ export function useChatTimeline(
                     slides: [],
                     status: 'streaming',
                     pdf_url: payload.pdf_url,
+                    mode: inferredMode,
+                    aspectRatio: payloadAspectRatio || undefined,
                 };
+            } else if (inferredMode) {
+                deck.mode = inferredMode;
+            }
+
+            if (payloadAspectRatio) {
+                deck.aspectRatio = payloadAspectRatio;
             }
 
             if (payload.slide_number) {

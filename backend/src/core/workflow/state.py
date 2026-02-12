@@ -145,6 +145,8 @@ class State(MessagesState):
     artifact_graph: NotRequired[list[ArtifactDependencyEdge]]
     quality_reports: NotRequired[dict[int, QualityReport]]
     asset_unit_ledger: NotRequired[dict[str, AssetUnitLedgerEntry]]
+    asset_pool: NotRequired[dict[str, dict[str, Any]]]
+    selected_assets_by_step: NotRequired[dict[str, list[str]]]
 
 
 class ResearchSubgraphState(State):

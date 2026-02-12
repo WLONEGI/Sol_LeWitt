@@ -2,34 +2,24 @@ import json
 
 from src.core.workflow.nodes.common import resolve_step_dependency_context
 from src.core.workflow.nodes.researcher import (
-    _build_image_candidates,
-    _contains_explicit_image_request,
     _extract_urls,
     _normalize_task_modes_by_instruction,
 )
-from src.shared.schemas.outputs import ResearchTask
-from src.core.workflow.nodes.visualizer import _resolve_asset_unit_meta, _writer_output_to_slides
+from src.shared.schemas.outputs import ResearchTask, StructuredImagePrompt
+from src.core.workflow.nodes.visualizer import (
+    _resolve_asset_unit_meta,
+    _writer_output_to_slides,
+    compile_structured_prompt,
+)
 from src.core.workflow.nodes.writer import _resolve_writer_mode
 
 
-def test_extract_urls_and_image_candidates() -> None:
+def test_extract_urls_deduplicates_and_trims_tail_punctuation() -> None:
     text = "ref https://example.com/a.png and https://example.com/page"
     urls = _extract_urls(text)
     assert "https://example.com/a.png" in urls
-    candidates = _build_image_candidates(urls, "image_search")
-    assert len(candidates) == 1
-    assert candidates[0]["source_url"] == "https://example.com/a.png"
-    assert candidates[0]["license_note"]
-    assert "manual verification" in candidates[0]["license_note"].lower()
-    assert isinstance(candidates[0]["caption"], str) and candidates[0]["caption"]
-
-
-def test_image_candidate_license_note_is_domain_aware() -> None:
-    urls = ["https://images.unsplash.com/photo-12345?auto=format"]
-    candidates = _build_image_candidates(urls, "image_search")
-    assert len(candidates) == 1
-    assert candidates[0]["source_url"] == "https://images.unsplash.com/photo-12345"
-    assert "unsplash license" in candidates[0]["license_note"].lower()
+    assert "https://example.com/page" in urls
+    assert len(urls) == 2
 
 
 def test_writer_output_to_slides_for_comic_script() -> None:
@@ -62,37 +52,53 @@ def test_resolve_asset_unit_meta_by_mode() -> None:
     assert unit_index == 3
 
 
+def test_compile_structured_prompt_omits_type_line() -> None:
+    structured = StructuredImagePrompt(
+        slide_type="Title Slide",
+        main_title="SaaS主要KPIの定義と計算式",
+        sub_title="経営判断に必要な共通指標",
+        contents="- ARR\n- Churn",
+        visual_style="clean business infographic, blue and gray palette, high contrast typography",
+        text_policy="render_all_text",
+        negative_constraints=["blurry text", "warped chart axis"],
+    )
+    prompt = compile_structured_prompt(structured, slide_number=1, mode="slide_render")
+    assert "Type:" not in prompt
+    assert "#Slide1" in prompt
+    assert "## SaaS主要KPIの定義と計算式" in prompt
+
+
 def test_research_mode_default_is_text_without_explicit_image_instruction() -> None:
     tasks = [
         ResearchTask(
             id=1,
             perspective="資料調査",
-            search_mode="image_search",
+            search_mode="text_search",
             query_hints=["medieval armor reference"],
             priority="high",
-            expected_output="画像候補を列挙",
+            expected_output="要点を整理",
         )
     ]
     normalized = _normalize_task_modes_by_instruction(tasks, "中世の史実を調査して")
     assert normalized[0].search_mode == "text_search"
 
 
-def test_research_mode_keeps_image_when_explicitly_requested() -> None:
+def test_research_mode_remains_text_even_when_explicitly_requested() -> None:
     tasks = [
         ResearchTask(
             id=1,
-            perspective="参照画像収集",
-            search_mode="image_search",
+            perspective="視覚方針調査",
+            search_mode="text_search",
             query_hints=["sleep relaxation illustration"],
             priority="high",
-            expected_output="画像候補を列挙",
+            expected_output="要点を整理",
         )
     ]
     normalized = _normalize_task_modes_by_instruction(tasks, "睡眠リラックスの参照画像を集めて")
-    assert normalized[0].search_mode == "image_search"
+    assert normalized[0].search_mode == "text_search"
 
 
-def test_research_mode_promotes_first_task_to_image_when_explicit_request_exists() -> None:
+def test_research_mode_does_not_promote_to_image_when_explicit_request_exists() -> None:
     tasks = [
         ResearchTask(
             id=1,
@@ -104,10 +110,10 @@ def test_research_mode_promotes_first_task_to_image_when_explicit_request_exists
         )
     ]
     normalized = _normalize_task_modes_by_instruction(tasks, "中世の参照画像も収集して")
-    assert normalized[0].search_mode == "image_search"
+    assert normalized[0].search_mode == "text_search"
 
 
-def test_research_mode_prefers_step_image_mode_without_explicit_keyword() -> None:
+def test_research_mode_ignores_non_text_preference() -> None:
     tasks = [
         ResearchTask(
             id=1,
@@ -121,9 +127,9 @@ def test_research_mode_prefers_step_image_mode_without_explicit_keyword() -> Non
     normalized = _normalize_task_modes_by_instruction(
         tasks,
         "ウェルネスデザインの方向性を調査",
-        preferred_mode="image_search",
+        preferred_mode="unknown_mode",
     )
-    assert normalized[0].search_mode == "image_search"
+    assert normalized[0].search_mode == "text_search"
 
 
 def test_research_mode_prefers_step_text_mode_even_if_task_requests_image() -> None:
@@ -131,7 +137,7 @@ def test_research_mode_prefers_step_text_mode_even_if_task_requests_image() -> N
         ResearchTask(
             id=1,
             perspective="市場調査",
-            search_mode="image_search",
+            search_mode="text_search",
             query_hints=["fitness market size"],
             priority="high",
             expected_output="市場規模の根拠",
@@ -143,12 +149,6 @@ def test_research_mode_prefers_step_text_mode_even_if_task_requests_image() -> N
         preferred_mode="text_search",
     )
     assert normalized[0].search_mode == "text_search"
-
-
-def test_contains_explicit_image_request_detects_japanese_and_english() -> None:
-    assert _contains_explicit_image_request("参照画像を探して") is True
-    assert _contains_explicit_image_request("Collect reference images for style") is True
-    assert _contains_explicit_image_request("市場規模を調査して") is False
 
 
 def test_writer_mode_is_constrained_by_product_type() -> None:
@@ -195,15 +195,15 @@ def test_resolve_step_dependency_context_reads_research_artifacts_by_depends_on(
 def test_resolve_step_dependency_context_falls_back_to_research_labels_without_depends_on() -> None:
     state = {
         "plan": [
-            {"id": 1, "capability": "researcher", "mode": "image_search", "status": "completed"},
+            {"id": 1, "capability": "researcher", "mode": "text_search", "status": "completed"},
             {"id": 2, "capability": "visualizer", "mode": "slide_render", "status": "in_progress"},
         ],
         "artifacts": {
             "step_1_research_1": json.dumps(
                 {
                     "task_id": 1,
-                    "perspective": "参照画像",
-                    "search_mode": "image_search",
+                    "perspective": "参考情報",
+                    "search_mode": "text_search",
                     "sources": ["https://example.com/image.png"],
                 },
                 ensure_ascii=False,
@@ -214,7 +214,7 @@ def test_resolve_step_dependency_context_falls_back_to_research_labels_without_d
         "id": 2,
         "capability": "visualizer",
         "mode": "slide_render",
-        "inputs": ["research:reference_images"],
+        "inputs": ["research:reference_facts"],
         "depends_on": [],
     }
 

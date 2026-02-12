@@ -50,8 +50,8 @@ test('renders execution plan from data stream', async ({ page }) => {
     await input.press('Enter');
 
     // Verify the plan overlay appears (current step summary)
-    await expect(page.getByRole('button', { name: 'Draft Story' })).toBeVisible();
-    await expect(page.getByText('2/2')).toBeVisible();
+    await expect(page.getByText('Draft Story').first()).toBeVisible();
+    await expect(page.getByText(/2\s*\/\s*2/)).toBeVisible();
 
     // Expand to see full plan details
     await page.getByRole('button', { name: 'Expand plan' }).click();

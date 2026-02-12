@@ -53,11 +53,11 @@ function ReportViewer({ content, citations = [] }: { content: string, citations?
     )
 }
 
-function DefaultJsonViewer({ data }: { data: any }) {
+function DefaultJsonViewer({ data: _data }: { data: any }) {
     return (
-        <ScrollArea className="flex-1 min-h-0 p-4 bg-muted/20">
-            <pre className="text-xs font-mono">{JSON.stringify(data, null, 2)}</pre>
-        </ScrollArea>
+        <div className="flex-1 min-h-0 p-6 bg-muted/20 flex items-center justify-center">
+            <div className="text-sm text-muted-foreground">このデータのプレビュー表示は準備中です。</div>
+        </div>
     )
 }
 
@@ -83,7 +83,7 @@ export function ArtifactView() {
     }
 
     const title = activeResearchTask ? "Research Report" : (displayArtifact?.title || "Artifact")
-    const subtitle = activeResearchTask ? activeResearchTask.perspective : displayArtifact?.type
+    const subtitle = activeResearchTask ? activeResearchTask.perspective : undefined
     const renderContent = () => {
         if (activeResearchTask) {
             return <ReportViewer content={activeResearchTask.content} citations={activeResearchTask.citations} />

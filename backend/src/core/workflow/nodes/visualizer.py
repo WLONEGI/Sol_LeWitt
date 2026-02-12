@@ -5,8 +5,9 @@ import asyncio
 import re
 from pathlib import Path
 from typing import Literal, Any
+from pydantic import BaseModel, Field
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.callbacks.manager import adispatch_custom_event
 from langgraph.types import Command
@@ -33,6 +34,7 @@ from .common import (
     build_worker_error_payload,
     create_worker_response,
     resolve_step_dependency_context,
+    resolve_selected_assets_for_step,
     run_structured_output,
 )
 
@@ -62,6 +64,16 @@ ASPECT_RATIO_HINTS = {
     "3:4": ("3:4",),
     "9:16": ("9:16", "縦長", "vertical"),
 }
+MAX_VISUAL_REFERENCES_PER_UNIT = 3
+
+
+class VisualAssetUnitSelection(BaseModel):
+    slide_number: int = Field(description="対象スライドまたはページ番号")
+    asset_ids: list[str] = Field(default_factory=list, description="参照に使うasset_id一覧")
+
+
+class VisualAssetUsagePlan(BaseModel):
+    assignments: list[VisualAssetUnitSelection] = Field(default_factory=list, description="単位ごとの参照割当")
 
 def _safe_json_loads(value: Any) -> Any | None:
     if isinstance(value, str):
@@ -72,6 +84,139 @@ def _safe_json_loads(value: Any) -> Any | None:
     if isinstance(value, dict):
         return value
     return None
+
+
+def _is_image_asset(asset: dict[str, Any]) -> bool:
+    if bool(asset.get("is_image")):
+        return True
+    uri = str(asset.get("uri") or "").lower()
+    mime_type = str(asset.get("mime_type") or "").lower()
+    return mime_type.startswith("image/") or uri.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"))
+
+
+def _asset_summary(asset: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "asset_id": asset.get("asset_id"),
+        "source_type": asset.get("source_type"),
+        "mime_type": asset.get("mime_type"),
+        "uri": asset.get("uri"),
+        "label": asset.get("label"),
+        "title": asset.get("title"),
+        "producer_step_id": asset.get("producer_step_id"),
+        "producer_capability": asset.get("producer_capability"),
+        "producer_mode": asset.get("producer_mode"),
+    }
+
+
+async def _plan_visual_asset_usage(
+    *,
+    llm: Any,
+    mode: str,
+    writer_slides: list[dict[str, Any]],
+    selected_assets: list[dict[str, Any]],
+    instruction: str | None,
+    config: RunnableConfig,
+) -> dict[int, list[str]]:
+    image_assets = [asset for asset in selected_assets if _is_image_asset(asset)]
+    if not writer_slides or not image_assets:
+        return {}
+
+    unit_briefs = []
+    for slide in writer_slides:
+        if not isinstance(slide, dict):
+            continue
+        slide_number = slide.get("slide_number")
+        if not isinstance(slide_number, int):
+            continue
+        unit_briefs.append(
+            {
+                "slide_number": slide_number,
+                "title": slide.get("title"),
+                "description": slide.get("description"),
+                "bullet_points": slide.get("bullet_points") if isinstance(slide.get("bullet_points"), list) else [],
+            }
+        )
+
+    selector_input = {
+        "mode": mode,
+        "instruction": instruction or "",
+        "units": unit_briefs,
+        "candidate_assets": [_asset_summary(asset) for asset in image_assets],
+        "max_assets_per_unit": MAX_VISUAL_REFERENCES_PER_UNIT,
+    }
+
+    selector_messages = [
+        SystemMessage(
+            content=(
+                "あなたはVisualizerの参照画像ルータです。"
+                "各unit(slide/page)に対して、候補asset_idから必要な画像のみを選択してください。"
+                "出力はVisualAssetUsagePlanスキーマのJSONのみ。"
+                "選択は最大3件/unit。不要なら空配列。"
+            ),
+        ),
+        HumanMessage(content=json.dumps(selector_input, ensure_ascii=False), name="supervisor"),
+    ]
+
+    try:
+        stream_config = config.copy()
+        stream_config["run_name"] = "visualizer_asset_router"
+        usage_plan = await run_structured_output(
+            llm=llm,
+            schema=VisualAssetUsagePlan,
+            messages=selector_messages,
+            config=stream_config,
+            repair_hint="Schema: VisualAssetUsagePlan. No extra text.",
+        )
+    except Exception as e:
+        logger.warning("Visualizer asset usage planning failed. Fallback to no assignment: %s", e)
+        return {}
+
+    valid_ids = {str(asset.get("asset_id")) for asset in image_assets if isinstance(asset.get("asset_id"), str)}
+    assignments: dict[int, list[str]] = {}
+    for row in usage_plan.assignments:
+        slide_number = row.slide_number
+        if slide_number <= 0:
+            continue
+        deduped_ids: list[str] = []
+        for asset_id in row.asset_ids:
+            if not isinstance(asset_id, str):
+                continue
+            if asset_id not in valid_ids or asset_id in deduped_ids:
+                continue
+            deduped_ids.append(asset_id)
+            if len(deduped_ids) >= MAX_VISUAL_REFERENCES_PER_UNIT:
+                break
+        assignments[slide_number] = deduped_ids
+
+    return assignments
+
+
+async def _resolve_asset_reference_inputs(
+    assigned_assets: list[dict[str, Any]],
+    cache: dict[str, bytes],
+) -> tuple[list[str | bytes], list[str]]:
+    reference_inputs: list[str | bytes] = []
+    reference_uris: list[str] = []
+    for asset in assigned_assets[:MAX_VISUAL_REFERENCES_PER_UNIT]:
+        uri = str(asset.get("uri") or "").strip()
+        if not uri:
+            continue
+        if uri in reference_uris:
+            continue
+        if uri.startswith("gs://"):
+            reference_inputs.append(uri)
+            reference_uris.append(uri)
+            continue
+        payload = cache.get(uri)
+        if payload is None:
+            payload = await asyncio.to_thread(download_blob_as_bytes, uri)
+            if payload is None:
+                logger.warning("Failed to fetch reference asset: %s", uri)
+                continue
+            cache[uri] = payload
+        reference_inputs.append(payload)
+        reference_uris.append(uri)
+    return reference_inputs, reference_uris
 
 
 def _load_character_sheet_template_bytes() -> bytes | None:
@@ -421,6 +566,7 @@ def _build_comic_page_prompt_text(
     slide_content: dict[str, Any],
     writer_data: dict[str, Any],
     aspect_ratio: str,
+    assigned_assets: list[dict[str, Any]] | None = None,
 ) -> str:
     page = _find_comic_page_payload(writer_data, slide_number)
     lines: list[str] = [
@@ -447,6 +593,14 @@ def _build_comic_page_prompt_text(
             lines.append(f"- {bullet}")
         if len(lines) == 7:
             lines.append("- 未指定")
+        if assigned_assets:
+            lines.extend(["", "[Reference Assets]"])
+            for asset in assigned_assets:
+                uri = str(asset.get("uri") or "").strip()
+                if not uri:
+                    continue
+                label = str(asset.get("title") or asset.get("label") or "").strip()
+                lines.append(f"- {uri}" + (f" ({label})" if label else ""))
         return "\n".join(lines)
 
     for idx, panel in enumerate(panels, start=1):
@@ -470,6 +624,15 @@ def _build_comic_page_prompt_text(
                 lines.append(f"  - {item}")
         lines.append("")
 
+    if assigned_assets:
+        lines.extend(["[Reference Assets]"])
+        for asset in assigned_assets:
+            uri = str(asset.get("uri") or "").strip()
+            if not uri:
+                continue
+            label = str(asset.get("title") or asset.get("label") or "").strip()
+            lines.append(f"- {uri}" + (f" ({label})" if label else ""))
+
     return "\n".join(lines).rstrip()
 
 
@@ -481,6 +644,7 @@ def _build_character_sheet_prompt_text(
     story_framework_data: dict[str, Any],
     aspect_ratio: str,
     layout_template_enabled: bool,
+    assigned_assets: list[dict[str, Any]] | None = None,
 ) -> str:
     character_profile = _find_character_payload(
         writer_data,
@@ -556,6 +720,15 @@ def _build_character_sheet_prompt_text(
     if layout_template_enabled:
         lines.extend(["", "[Layout Template]", "- Provided reference template must be followed as-is."])
 
+    if assigned_assets:
+        lines.extend(["", "[Reference Assets]"])
+        for asset in assigned_assets:
+            uri = str(asset.get("uri") or "").strip()
+            if not uri:
+                continue
+            label = str(asset.get("title") or asset.get("label") or "").strip()
+            lines.append(f"- {uri}" + (f" ({label})" if label else ""))
+
     return "\n".join(lines).rstrip()
 
 
@@ -568,6 +741,7 @@ def _build_mechanical_comic_prompt_item(
     story_framework_data: dict[str, Any],
     aspect_ratio: str,
     layout_template_enabled: bool,
+    assigned_assets: list[dict[str, Any]] | None = None,
 ) -> ImagePrompt:
     if mode == "character_sheet_render":
         prompt_text = _build_character_sheet_prompt_text(
@@ -577,6 +751,7 @@ def _build_mechanical_comic_prompt_item(
             story_framework_data=story_framework_data,
             aspect_ratio=aspect_ratio,
             layout_template_enabled=layout_template_enabled,
+            assigned_assets=assigned_assets,
         )
     else:
         prompt_text = _build_comic_page_prompt_text(
@@ -584,6 +759,7 @@ def _build_mechanical_comic_prompt_item(
             slide_content=slide_content,
             writer_data=writer_data,
             aspect_ratio=aspect_ratio,
+            assigned_assets=assigned_assets,
         )
 
     return ImagePrompt(
@@ -639,8 +815,6 @@ def compile_structured_prompt(
     else:
         header = f"#Slide{slide_number}"
     prompt_lines.append(header)
-    prompt_lines.append(f"Type: {structured.slide_type}")
-    
     # Main Title: ## The Evolution of Japan's Economy
     prompt_lines.append(f"## {structured.main_title}")
     
@@ -691,11 +865,12 @@ async def process_single_slide(
     previous_generations: list[dict] | None = None, 
     override_reference_bytes: bytes | None = None,
     override_reference_url: str | None = None,
+    additional_references: list[str | bytes] | None = None,
     seed_override: int | None = None,
     session_id: str | None = None,
     aspect_ratio: str | None = None,
     mode: str = "slide_render",
-) -> tuple[ImagePrompt, bytes | None]:
+) -> tuple[ImagePrompt, bytes | None, str | None]:
     """
     Helper function to process a single slide: generation or edit.
     """
@@ -725,6 +900,7 @@ async def process_single_slide(
         reference_image_bytes = None
         reference_url = None
         previous_thought_signature_token = None
+        reference_inputs: list[str | bytes] = []
         
         # 1. Use Override (Anchor Image) if provided - highest priority
         if override_reference_bytes:
@@ -762,20 +938,37 @@ async def process_single_slide(
                             logger.warning(f"Failed to download previous reference image: {e}")
                 
                 break
+
+        if reference_url and isinstance(reference_url, str) and reference_url.startswith("gs://"):
+            reference_inputs.append(reference_url)
+        elif reference_image_bytes:
+            reference_inputs.append(reference_image_bytes)
+
+        for ref in additional_references or []:
+            if isinstance(ref, str):
+                if ref and ref not in reference_inputs:
+                    reference_inputs.append(ref)
+            elif isinstance(ref, (bytes, bytearray)):
+                reference_inputs.append(bytes(ref))
         
         if seed_override is not None:
             seed = seed_override
         if seed is None:
             seed = random.randint(0, 2**31 - 1)
 
-        logger.info(f"Generating image {prompt_item.slide_number} with Seed: {seed}, Ref: {bool(reference_image_bytes)}...")
+        logger.info(
+            "Generating image %s with Seed: %s, RefCount: %s...",
+            prompt_item.slide_number,
+            seed,
+            len(reference_inputs),
+        )
         
         # 1. Generate Image (Blocking -> Thread)
         generation_result = await asyncio.to_thread(
             generate_image,
             final_prompt,
             seed=seed,
-            reference_image=reference_url if reference_url and reference_url.startswith("gs://") else reference_image_bytes,
+            reference_image=reference_inputs if reference_inputs else None,
             thought_signature=previous_thought_signature_token,
             aspect_ratio=aspect_ratio
         )
@@ -807,17 +1000,18 @@ async def process_single_slide(
         
         logger.info(f"Image generated and stored at: {public_url}")
 
-        return prompt_item, image_bytes
+        return prompt_item, image_bytes, None
 
     except Exception as image_error:
         logger.error(f"Failed to generate/upload image for prompt {prompt_item.slide_number}: {image_error}")
-        return prompt_item, None
+        return prompt_item, None, str(image_error)
 
 
 async def process_slide_with_chat(
     prompt_item: ImagePrompt,
     chat_session,
     session_id: str | None = None,
+    mode: str = "slide_render",
 ) -> ImagePrompt:
     """
     Helper function to process a single slide using a chat session for context carryover.
@@ -830,7 +1024,8 @@ async def process_slide_with_chat(
         if prompt_item.structured_prompt is not None:
             final_prompt = compile_structured_prompt(
                 prompt_item.structured_prompt,
-                slide_number=prompt_item.slide_number
+                slide_number=prompt_item.slide_number,
+                mode=mode,
             )
             logger.info(f"[Chat] Using structured prompt for slide {prompt_item.slide_number}")
         elif prompt_item.image_generation_prompt:
@@ -899,6 +1094,7 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
     )
     aspect_ratio = _resolve_aspect_ratio(mode, current_step, state.get("aspect_ratio"))
     artifacts = state.get("artifacts", {}) or {}
+    selected_step_assets = resolve_selected_assets_for_step(state, current_step.get("id"))
     selected_image_inputs = state.get("selected_image_inputs") or []
     attachments = [
         item
@@ -967,6 +1163,7 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         "resolved_dependency_artifacts": dependency_context["resolved_dependency_artifacts"],
         "resolved_research_inputs": dependency_context["resolved_research_inputs"],
         "design_direction": design_dir,
+        "selected_step_assets": [_asset_summary(asset) for asset in selected_step_assets[:20]],
         "selected_image_inputs": selected_image_inputs,
         "attachments": attachments,
         "writer_output": writer_data,
@@ -1033,12 +1230,27 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                 generation_order.append(n)
 
         plan_map = {s.slide_number: s for s in visualizer_plan.slides}
+        selected_assets_by_id = {
+            str(asset.get("asset_id")): asset
+            for asset in selected_step_assets
+            if isinstance(asset, dict) and isinstance(asset.get("asset_id"), str)
+        }
+        asset_usage_map = await _plan_visual_asset_usage(
+            llm=llm,
+            mode=mode,
+            writer_slides=writer_slides,
+            selected_assets=selected_step_assets,
+            instruction=str(current_step.get("instruction") or ""),
+            config=config,
+        )
 
         updated_prompts: list[ImagePrompt] = []
+        failed_image_errors: list[str] = []
         asset_unit_ledger = dict(state.get("asset_unit_ledger") or {})
         master_style: str | None = None
         last_generated_image_bytes: bytes | None = None
         last_generated_image_url: str | None = None
+        reference_asset_cache: dict[str, bytes] = {}
 
         import uuid
         session_id = config.get("configurable", {}).get("thread_id") or str(uuid.uuid4())
@@ -1064,6 +1276,13 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                 if use_local_character_sheet_template
                 else (plan_slide.reference_url if plan_slide else None)
             )
+            assigned_asset_ids = asset_usage_map.get(slide_number, [])
+            assigned_assets = [
+                selected_assets_by_id[asset_id]
+                for asset_id in assigned_asset_ids
+                if isinstance(asset_id, str) and asset_id in selected_assets_by_id
+            ]
+            assigned_asset_summaries = [_asset_summary(asset) for asset in assigned_assets]
             if mode in {"comic_page_render", "character_sheet_render"}:
                 prompt_item = _build_mechanical_comic_prompt_item(
                     mode=mode,
@@ -1073,6 +1292,7 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                     story_framework_data=story_framework_data,
                     aspect_ratio=aspect_ratio,
                     layout_template_enabled=use_local_character_sheet_template,
+                    assigned_assets=assigned_assets,
                 )
             else:
                 prompt_context = {
@@ -1090,6 +1310,9 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                     "character_sheet": character_sheet_data if mode == "character_sheet_render" else None,
                     "data_analyst": data_analyst_data,
                     "attachments": attachments,
+                    "selected_step_assets": [_asset_summary(asset) for asset in selected_step_assets[:20]],
+                    "assigned_asset_ids": assigned_asset_ids,
+                    "assigned_assets": assigned_asset_summaries,
                     "selected_inputs": [
                         *(plan_slide.selected_inputs if plan_slide else []),
                         *(
@@ -1097,6 +1320,11 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                             if use_local_character_sheet_template
                             else []
                         ),
+                        *[
+                            str(asset.get("uri"))
+                            for asset in assigned_assets
+                            if isinstance(asset, dict) and asset.get("uri")
+                        ],
                         *[
                             str(item.get("image_url"))
                             for item in selected_image_inputs
@@ -1180,6 +1408,11 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                             else []
                         ),
                         *[
+                            str(asset.get("uri"))
+                            for asset in assigned_assets
+                            if isinstance(asset, dict) and asset.get("uri")
+                        ],
+                        *[
                             str(item.get("image_url"))
                             for item in selected_image_inputs
                             if isinstance(item, dict) and item.get("image_url")
@@ -1212,12 +1445,24 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                                 reference_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
                             break
 
+            additional_references, assigned_reference_uris = await _resolve_asset_reference_inputs(
+                assigned_assets,
+                reference_asset_cache,
+            )
+            if assigned_reference_uris:
+                logger.info(
+                    "Slide %s uses %s selected reference assets.",
+                    slide_number,
+                    len(assigned_reference_uris),
+                )
+
             # Generate image
-            processed, image_bytes = await process_single_slide(
+            processed, image_bytes, image_error = await process_single_slide(
                 prompt_item,
                 previous_generations=previous_generations,
                 override_reference_bytes=reference_bytes,
                 override_reference_url=reference_url,
+                additional_references=additional_references,
                 session_id=session_id,
                 aspect_ratio=aspect_ratio,
                 mode=mode,
@@ -1227,6 +1472,8 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
             if image_bytes and processed.generated_image_url:
                 last_generated_image_bytes = image_bytes
                 last_generated_image_url = processed.generated_image_url
+            elif image_error:
+                failed_image_errors.append(f"slide={slide_number}: {image_error}")
             await adispatch_custom_event(
                 "data-visual-image",
                 {
@@ -1252,10 +1499,41 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
             }
 
         updated_prompts.sort(key=lambda x: x.slide_number)
+        total_count = len(updated_prompts)
+        success_count = sum(1 for item in updated_prompts if isinstance(item.generated_image_url, str) and item.generated_image_url.strip())
+
+        if total_count == 0 or success_count == 0:
+            error_text = "All visual image generations failed."
+            notes = "; ".join(failed_image_errors[:3]) if failed_image_errors else "no successful image URL returned"
+            content_json = build_worker_error_payload(
+                error_text=error_text,
+                failed_checks=["worker_execution", "all_images_failed"],
+                notes=notes,
+            )
+            result_summary = f"Error: {error_text}"
+            state["plan"][step_index]["result_summary"] = result_summary
+
+            return create_worker_response(
+                role="visualizer",
+                content_json=content_json,
+                result_summary=result_summary,
+                current_step_id=current_step["id"],
+                state=state,
+                artifact_key_suffix="visual",
+                artifact_title="Visual Assets",
+                artifact_icon="AlertTriangle",
+                artifact_preview_urls=[],
+                is_error=True,
+                extra_update={"asset_unit_ledger": asset_unit_ledger},
+            )
+
+        execution_summary = visualizer_plan.execution_summary
+        if success_count < total_count:
+            execution_summary = f"{visualizer_plan.execution_summary}（生成 {success_count}/{total_count}）"
 
         # Build final Visualizer output
         visualizer_output = VisualizerOutput(
-            execution_summary=visualizer_plan.execution_summary,
+            execution_summary=execution_summary,
             prompts=updated_prompts,
             generation_config=GenerationConfig(
                 thinking_level="high",

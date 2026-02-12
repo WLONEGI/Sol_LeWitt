@@ -20,6 +20,7 @@ export function HomeClient() {
   const router = useRouter()
   const { user, token, loading: authLoading, error: authError, signInWithGoogle } = useAuth()
   const [input, setInput] = useState("")
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([])
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>(undefined)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [showAuthDialog, setShowAuthDialog] = useState(false)
@@ -28,6 +29,7 @@ export function HomeClient() {
     createSession,
     setCurrentThreadId,
     setPendingMessage,
+    setPendingThreadFiles,
     consumePendingHomeInput,
     setPendingAspectRatio,
     setPendingProductType,
@@ -38,6 +40,7 @@ export function HomeClient() {
       createSession: state.createSession,
       setCurrentThreadId: state.setCurrentThreadId,
       setPendingMessage: state.setPendingMessage,
+      setPendingThreadFiles: state.setPendingThreadFiles,
       consumePendingHomeInput: state.consumePendingHomeInput,
       setPendingAspectRatio: state.setPendingAspectRatio,
       setPendingProductType: state.setPendingProductType,
@@ -72,6 +75,7 @@ export function HomeClient() {
       const threadId = uuidv4()
       setCurrentThreadId(threadId)
       setPendingMessage(threadId, value)
+      setPendingThreadFiles(threadId, selectedFiles)
       setPendingAspectRatio(aspectRatio)
 
       const selectedAction = QUICK_ACTIONS.find((action) => action.id === selectedActionId) ?? null
@@ -79,9 +83,20 @@ export function HomeClient() {
 
       setIsSubmitting(true)
       setInput("")
+      setSelectedFiles([])
       router.push(`/chat/${threadId}`)
     },
-    [router, setCurrentThreadId, setPendingMessage, setPendingAspectRatio, setPendingProductType, aspectRatio, selectedActionId]
+    [
+      router,
+      setCurrentThreadId,
+      setPendingMessage,
+      setPendingThreadFiles,
+      selectedFiles,
+      setPendingAspectRatio,
+      setPendingProductType,
+      aspectRatio,
+      selectedActionId,
+    ]
   )
 
   const handleSend = useCallback(
@@ -111,6 +126,25 @@ export function HomeClient() {
 
   const handlePromptClick = useCallback((prompt: string) => {
     setInput(prompt)
+  }, [])
+
+  const handleFilesSelect = useCallback((files: File[]) => {
+    setSelectedFiles((prev) => {
+      const merged = [...prev]
+      for (const file of files) {
+        const exists = merged.some((item) =>
+          item.name === file.name &&
+          item.size === file.size &&
+          item.lastModified === file.lastModified
+        )
+        if (!exists) merged.push(file)
+      }
+      return merged
+    })
+  }, [])
+
+  const handleRemoveFile = useCallback((index: number) => {
+    setSelectedFiles((prev) => prev.filter((_, i) => i !== index))
   }, [])
 
   return (
@@ -153,6 +187,9 @@ export function HomeClient() {
                     onClearAction={() => setSelectedActionId(null)}
                     aspectRatio={aspectRatio}
                     onAspectRatioChange={setAspectRatio}
+                    onFilesSelect={handleFilesSelect}
+                    selectedFiles={selectedFiles}
+                    onRemoveFile={handleRemoveFile}
                   />
                 </div>
 

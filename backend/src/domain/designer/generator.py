@@ -1,6 +1,9 @@
 import logging
 import base64
+import random
+import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from google import genai
 from google.genai import types
@@ -8,6 +11,41 @@ from google.genai import types
 from src.shared.config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+MAX_IMAGE_GEN_ATTEMPTS = 3
+RETRY_BASE_DELAY_SECONDS = 1.0
+RETRY_MAX_DELAY_SECONDS = 8.0
+RETRY_JITTER_SECONDS = 0.6
+
+
+def _infer_image_mime_from_uri(uri: str) -> str:
+    lowered = (urlparse(uri).path or uri).lower()
+    if lowered.endswith(".jpg") or lowered.endswith(".jpeg"):
+        return "image/jpeg"
+    if lowered.endswith(".webp"):
+        return "image/webp"
+    if lowered.endswith(".gif"):
+        return "image/gif"
+    if lowered.endswith(".svg"):
+        return "image/svg+xml"
+    return "image/png"
+
+
+def _is_rate_limited_error(error: Exception) -> bool:
+    status_code = getattr(error, "status_code", None)
+    if status_code == 429:
+        return True
+    text = str(error).lower()
+    return (
+        "429" in text
+        or "resource_exhausted" in text
+        or "too many requests" in text
+    )
+
+
+def _retry_delay_seconds(attempt: int) -> float:
+    backoff = min(RETRY_MAX_DELAY_SECONDS, RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)))
+    return backoff + random.uniform(0.0, RETRY_JITTER_SECONDS)
 
 def _get_client() -> genai.Client:
     """Initialize and return the GenAI client."""
@@ -25,7 +63,7 @@ def _get_client() -> genai.Client:
 def generate_image(
     prompt: str, 
     seed: int | None = None, 
-    reference_image: str | bytes | None = None, 
+    reference_image: str | bytes | list[str | bytes] | None = None, 
     thought_signature: str | None = None, 
     aspect_ratio: str | None = None
 ) -> tuple[bytes, str | None]:
@@ -53,17 +91,21 @@ def generate_image(
         client = _get_client()
 
         contents = [prompt]
-        if reference_image:
-            if isinstance(reference_image, str) and reference_image.startswith("gs://"):
-                contents.append(types.Part.from_uri(uri=reference_image, mime_type="image/png"))
-            elif isinstance(reference_image, bytes):
-                contents.append(types.Part.from_bytes(data=reference_image, mime_type="image/png"))
-            else:
-                # Handle public HTTPS URLs by adding them as text parts or raise warning
-                # Gemini Pro Vision/Flash can handle public URLs if passed correctly, 
-                # but for generate_content image generation, GCS URI is preferred.
-                logger.warning(f"Reference image provided is neither GCS URI nor bytes: {type(reference_image)}")
-                contents.append(reference_image) if isinstance(reference_image, str) else None
+        reference_items: list[str | bytes] = []
+        if isinstance(reference_image, list):
+            reference_items = [item for item in reference_image if isinstance(item, (str, bytes))]
+        elif isinstance(reference_image, (str, bytes)):
+            reference_items = [reference_image]
+
+        for ref in reference_items:
+            if isinstance(ref, str) and ref.startswith("gs://"):
+                contents.append(types.Part.from_uri(uri=ref, mime_type=_infer_image_mime_from_uri(ref)))
+            elif isinstance(ref, bytes):
+                contents.append(types.Part.from_bytes(data=ref, mime_type="image/png"))
+            elif isinstance(ref, str):
+                # Public HTTP URLs are passed as text fallback.
+                logger.warning(f"Reference image provided is not GCS URI. Fallback to text URL: {ref}")
+                contents.append(ref)
 
         # Configure generation capabilities
         image_config = None
@@ -78,11 +120,29 @@ def generate_image(
             image_config=image_config if image_config else None
         )
 
-        response = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=config,
-        )
+        response = None
+        for attempt in range(1, MAX_IMAGE_GEN_ATTEMPTS + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config,
+                )
+                break
+            except Exception as e:
+                if not _is_rate_limited_error(e) or attempt >= MAX_IMAGE_GEN_ATTEMPTS:
+                    raise
+                delay = _retry_delay_seconds(attempt)
+                logger.warning(
+                    "Image generation rate-limited (attempt %s/%s). Retrying in %.2fs.",
+                    attempt,
+                    MAX_IMAGE_GEN_ATTEMPTS,
+                    delay,
+                )
+                time.sleep(delay)
+
+        if response is None:
+            raise ValueError("No response returned from image generation.")
 
         # Check for errors
         if not response.candidates:
@@ -173,7 +233,5 @@ async def send_message_for_image_async(chat, prompt: str, reference_image: str |
         reference_image=reference_image
     )
     return result[0]
-
-
 
 

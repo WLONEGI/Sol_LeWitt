@@ -19,9 +19,17 @@ interface SlideDeckPreviewProps {
     title?: string;
     isStreaming?: boolean;
     aspectRatio?: string;
+    compact?: boolean;
 }
 
-export function SlideDeckPreview({ artifactId, slides, title = "Slides", isStreaming, aspectRatio }: SlideDeckPreviewProps) {
+export function SlideDeckPreview({
+    artifactId,
+    slides,
+    title = "Slides",
+    isStreaming,
+    aspectRatio,
+    compact = false,
+}: SlideDeckPreviewProps) {
     const { setActiveContextId, setPreviewOpen } = useArtifactStore();
 
     if (!slides || slides.length === 0) return null;
@@ -32,41 +40,51 @@ export function SlideDeckPreview({ artifactId, slides, title = "Slides", isStrea
     };
 
     return (
-        <div className="flex flex-col gap-6 my-4 w-full max-w-2xl">
+        <div
+            className={cn(
+                "my-4 w-full",
+                compact
+                    ? "flex flex-wrap items-start gap-3 max-w-[560px]"
+                    : "flex flex-col gap-6 max-w-2xl"
+            )}
+        >
             {slides.map((slide, idx) => (
                 <motion.div
                     key={`${slide.slide_number}-${idx}`}
                     initial={{ opacity: 0, scale: 0.95 }}
                     animate={{ opacity: 1, scale: 1 }}
                     transition={{ duration: 0.4, delay: idx * 0.1 }}
-                    className="group relative flex flex-col bg-white/5 border border-white/10 rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-shadow active:scale-[0.99]"
+                    className={cn(
+                        "group relative flex flex-col bg-white/5 border border-white/10 overflow-hidden shadow-sm hover:shadow-md transition-shadow active:scale-[0.99]",
+                        compact ? "w-[170px] rounded-xl" : "rounded-2xl"
+                    )}
                     onClick={() => handleSlideClick(idx)}
                 >
                     {/* Header: Title + Page Number */}
-                    <div className="flex items-center justify-between px-5 py-3 bg-white/5 border-b border-white/10">
-                        <div className="flex items-center gap-3 min-w-0">
-                            <div className="p-1.5 rounded-lg bg-primary/10 border border-primary/20">
-                                <Layout className="w-4 h-4 text-primary" />
+                    <div className={cn("flex items-center justify-between bg-white/5 border-b border-white/10", compact ? "px-2.5 py-2" : "px-5 py-3")}>
+                        <div className={cn("flex items-center min-w-0", compact ? "gap-1.5" : "gap-3")}>
+                            <div className={cn("rounded-lg bg-primary/10 border border-primary/20", compact ? "p-1" : "p-1.5")}>
+                                <Layout className={cn("text-primary", compact ? "w-3 h-3" : "w-4 h-4")} />
                             </div>
-                            <span className="text-sm font-semibold text-foreground/90 truncate">
+                            <span className={cn("font-semibold text-foreground/90 truncate", compact ? "text-[11px]" : "text-sm")}>
                                 {slide.title || title}
                             </span>
                         </div>
-                        <div className="flex items-center gap-3 shrink-0">
+                        <div className={cn("flex items-center shrink-0", compact ? "gap-1" : "gap-3")}>
                             {slide.status === "generating" && (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin text-primary/60" />
+                                <Loader2 className={cn("animate-spin text-primary/60", compact ? "w-3 h-3" : "w-3.5 h-3.5")} />
                             )}
-                            <span className="text-xs font-mono font-bold tracking-tighter text-muted-foreground bg-black/20 px-2 py-1 rounded-md border border-white/5">
+                            <span className={cn(
+                                "font-mono font-bold tracking-tighter text-muted-foreground bg-black/20 rounded-md border border-white/5",
+                                compact ? "text-[10px] px-1.5 py-0.5" : "text-xs px-2 py-1"
+                            )}>
                                 {slide.slide_number} / {slides.length}
                             </span>
                         </div>
                     </div>
 
                     {/* Content: Main Image */}
-                    <div className={cn(
-                        "relative w-full bg-muted/20 cursor-pointer overflow-hidden group",
-                        getAspectRatioClass(aspectRatio)
-                    )}>
+                    <div className={cn("relative w-full bg-muted/20 cursor-pointer overflow-hidden group", getAspectRatioClass(aspectRatio))}>
                         {slide.image_url ? (
                             <img
                                 src={slide.image_url}

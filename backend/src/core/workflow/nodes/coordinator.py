@@ -48,7 +48,7 @@ class CoordinatorOutput(BaseModel):
     )
     response: str = Field(
         ...,
-        description="User-facing response in Japanese. Use concise plain style (常体), actionable."
+        description="User-facing response in Japanese. Use concise polite style (です・ます調), actionable."
     )
     goto: Literal["planner", "__end__"] = Field(
         ...,

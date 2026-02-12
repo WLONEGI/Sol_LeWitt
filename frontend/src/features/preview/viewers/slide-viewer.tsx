@@ -5,7 +5,8 @@ import { Button } from "@/components/ui/button"
 import { ChevronLeft, ChevronRight, Pencil } from "lucide-react"
 import { useArtifactStore } from "@/features/preview/stores/artifact"
 import { cn } from "@/lib/utils"
-import { InpaintCanvas } from "@/features/preview/components/inpaint-canvas"
+import { InpaintCanvas, type InpaintSubmitPayload } from "@/features/preview/components/inpaint-canvas"
+import { useAuth } from "@/providers/auth-provider"
 
 import { getAspectRatioClass } from "../utils/aspect-ratio"
 
@@ -53,6 +54,7 @@ function buildVersionedContent(content: any, url: string, versions: string[], cu
 
 export function SlideViewer({ content, imageId, aspectRatio }: SlideViewerProps) {
     const { updateArtifactContent } = useArtifactStore()
+    const { token } = useAuth()
 
     const versionState = useMemo(() => getVersionState(content), [content])
     const imageUrl = versionState.url
@@ -63,7 +65,6 @@ export function SlideViewer({ content, imageId, aspectRatio }: SlideViewerProps)
         return (
             <div className="h-full w-full flex items-center justify-center text-muted-foreground bg-muted/10">
                 <p>No slide image available</p>
-                <div className="text-xs mt-2 opacity-50">Content: {JSON.stringify(content)}</div>
             </div>
         )
     }
@@ -76,12 +77,20 @@ export function SlideViewer({ content, imageId, aspectRatio }: SlideViewerProps)
         updateArtifactContent(imageId, buildVersionedContent(content, nextUrl, versions, nextIndex))
     }
 
-    const handleInpaintSubmit = async (prompt: string) => {
+    const handleInpaintSubmit = async ({ prompt, maskImageUrl }: InpaintSubmitPayload) => {
         if (!imageId) return
+        if (!token) throw new Error("認証情報がありません。再ログインしてください。")
         const response = await fetch(`/api/image/${imageId}/inpaint`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt, image_url: imageUrl })
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+                prompt,
+                image_url: imageUrl,
+                mask_image_url: maskImageUrl,
+            }),
         })
         const data = await response.json()
         if (!data?.new_image_url) {
@@ -102,7 +111,7 @@ export function SlideViewer({ content, imageId, aspectRatio }: SlideViewerProps)
                 {/* Image Container with Cinematic Glow */}
                 <div
                     className={cn(
-                        "relative max-h-full max-w-full shadow-2xl rounded-sm transition-transform duration-500 ease-out group-hover:scale-[1.01]",
+                        "relative max-h-full max-w-full shadow-2xl rounded-md transition-transform duration-500 ease-out group-hover:scale-[1.01]",
                         getAspectRatioClass(aspectRatio)
                     )}
                     style={{
@@ -119,15 +128,15 @@ export function SlideViewer({ content, imageId, aspectRatio }: SlideViewerProps)
                         <img
                             src={imageUrl}
                             alt="Slide Preview"
-                            className={cn("h-full w-full object-contain pointer-events-none transition-opacity bg-black rounded-sm")}
+                            className={cn("h-full w-full object-contain pointer-events-none transition-opacity bg-muted/20 rounded-md")}
                         />
                     )}
 
-                    <div className="absolute top-2 right-2 z-10 flex items-center gap-2 bg-black/50 border border-white/10 rounded-full px-2 py-1">
+                    <div className="absolute top-2 right-2 z-10 flex items-center gap-2 bg-background/90 border border-border rounded-full px-2 py-1">
                         <Button
                             variant="ghost"
                             size="icon"
-                            className="h-6 w-6 text-white/80 hover:text-white hover:bg-white/10"
+                            className="h-6 w-6"
                             onClick={() => handleVersionChange(versionState.currentIndex - 1)}
                             disabled={isEditing || versionState.currentIndex <= 0}
                         >
@@ -136,16 +145,16 @@ export function SlideViewer({ content, imageId, aspectRatio }: SlideViewerProps)
                         <Button
                             variant="ghost"
                             size="icon"
-                            className="h-6 w-6 text-white/80 hover:text-white hover:bg-white/10"
+                            className="h-6 w-6"
                             onClick={() => handleVersionChange(versionState.currentIndex + 1)}
                             disabled={isEditing || versionState.currentIndex >= versionState.versions.length - 1}
                         >
                             <ChevronRight className="h-4 w-4" />
                         </Button>
-                        <div className="w-px h-4 bg-white/10 mx-1" />
+                        <div className="w-px h-4 bg-border mx-1" />
                         <Button
                             size="sm"
-                            className="h-6 px-2 text-xs bg-primary/90 hover:bg-primary text-white"
+                            className="h-6 px-2 text-xs"
                             onClick={() => setIsEditing(true)}
                             disabled={isEditing || !imageId}
                         >
@@ -156,13 +165,6 @@ export function SlideViewer({ content, imageId, aspectRatio }: SlideViewerProps)
                 </div>
             </div>
 
-            {!isEditing && (
-                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 min-w-[300px] h-12 border border-white/10 rounded-full glass-panel flex items-center px-6 justify-between shrink-0 shadow-lg text-white/80 transition-all duration-300 hover:bg-black/40">
-                    <span className="text-xs font-medium tracking-wide">
-                        部分修正で指示入力
-                    </span>
-                </div>
-            )}
         </div>
     )
 }

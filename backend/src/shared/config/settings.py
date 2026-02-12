@@ -4,7 +4,7 @@
 環境変数から設定値を読み込み、一元管理するためのPydantic Settingsモジュール。
 すべての設定はこのファイルで定義し、他のモジュールからは `settings` インスタンス経由で参照する。
 """
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,7 +46,10 @@ class Settings(BaseSettings):
     # ===========================
     # AI Studio Configuration
     # ===========================
-    AI_STUDIO_API_KEY: str | None = Field(default=None, alias="AI_STUDIO")
+    AI_STUDIO_API_KEY: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AI_STUDIO_API_KEY", "AI_STUDIO"),
+    )
 
     # ===========================
     # External Services

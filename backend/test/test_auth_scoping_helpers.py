@@ -29,4 +29,6 @@ def test_is_protected_path_matches_history_threads_chat() -> None:
     assert _is_protected_path("/api/threads/abc/snapshot")
     assert _is_protected_path("/api/chat/stream_events")
     assert _is_protected_path("/api/files/upload")
+    assert _is_protected_path("/api/image/demo/inpaint")
+    assert _is_protected_path("/api/slide-deck/deck-1/slides/2/inpaint")
     assert not _is_protected_path("/health")

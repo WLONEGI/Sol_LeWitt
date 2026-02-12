@@ -25,6 +25,7 @@ from .common import (
     create_worker_response,
     extract_first_json,
     resolve_step_dependency_context,
+    resolve_selected_assets_for_step,
     run_structured_output,
     split_content_parts,
 )
@@ -125,6 +126,7 @@ async def writer_node(state: State, config: RunnableConfig) -> Command[Literal["
         if isinstance(item, dict) and str(item.get("kind") or "").lower() != "pptx"
     ]
     dependency_context = resolve_step_dependency_context(state, current_step)
+    selected_step_assets = resolve_selected_assets_for_step(state, current_step.get("id"))
 
     context_payload = {
         "product_type": state.get("product_type"),
@@ -136,6 +138,7 @@ async def writer_node(state: State, config: RunnableConfig) -> Command[Literal["
         "depends_on_step_ids": dependency_context["depends_on_step_ids"],
         "resolved_dependency_artifacts": dependency_context["resolved_dependency_artifacts"],
         "resolved_research_inputs": dependency_context["resolved_research_inputs"],
+        "selected_step_assets": selected_step_assets,
         "selected_image_inputs": state.get("selected_image_inputs") or [],
         "attachments": non_pptx_attachments,
         "available_artifacts": state.get("artifacts", {}),

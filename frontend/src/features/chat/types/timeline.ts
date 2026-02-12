@@ -18,7 +18,7 @@ export interface ExtendedMessage extends UIMessage {
     toolInvocations?: any[]; // AI SDK toolInvocations
 }
 
-export type TimelineItemType = 'message' | 'process_step' | 'worker_result' | 'artifact' | 'plan_update' | 'code_execution' | 'slide_outline' | 'research_report' | 'image_search_results' | 'coordinator_followups' | 'plan_step_marker' | 'plan_step_end_marker';
+export type TimelineItemType = 'message' | 'process_step' | 'worker_result' | 'artifact' | 'plan_update' | 'code_execution' | 'slide_outline' | 'research_report' | 'coordinator_followups' | 'plan_step_marker' | 'plan_step_end_marker';
 
 export interface TimelineItem {
     id: string;
@@ -93,24 +93,6 @@ export interface ResearchReportTimelineItem extends TimelineItem {
     sources?: string[];
 }
 
-export interface ImageSearchCandidate {
-    image_url: string;
-    source_url: string;
-    license_note: string;
-    provider?: string;
-    caption?: string | null;
-    relevance_score?: number | null;
-}
-
-export interface ImageSearchResultsTimelineItem extends TimelineItem {
-    type: 'image_search_results';
-    taskId: string;
-    artifactId?: string;
-    query: string;
-    perspective?: string;
-    candidates: ImageSearchCandidate[];
-}
-
 export interface CoordinatorFollowupOption {
     id: string;
     prompt: string;
@@ -142,7 +124,6 @@ export type TimelineEvent =
     | CodeExecutionTimelineItem
     | SlideOutlineTimelineItem
     | ResearchReportTimelineItem
-    | ImageSearchResultsTimelineItem
     | CoordinatorFollowupsTimelineItem
     | PlanStepMarkerTimelineItem
     | PlanStepEndMarkerTimelineItem;

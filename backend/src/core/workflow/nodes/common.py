@@ -1,6 +1,9 @@
 import json
 import re
+import hashlib
+import mimetypes
 from typing import Any, TypeVar
+from urllib.parse import urlparse
 from pydantic import BaseModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
@@ -19,6 +22,10 @@ RESEARCH_INPUT_KEYWORDS = (
     "source",
     "画像検索",
     "image search",
+)
+REMOTE_FILE_EXTS = (
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg",
+    ".pdf", ".pptx", ".zip", ".csv", ".json", ".txt", ".md",
 )
 
 
@@ -169,6 +176,312 @@ def _collect_artifacts_by_step(artifacts: dict[str, Any]) -> dict[int, list[tupl
             continue
         by_step.setdefault(step_id, []).append((artifact_id, payload))
     return by_step
+
+
+def _looks_like_remote_url(value: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value.strip())
+    if parsed.scheme == "gs":
+        return bool(parsed.netloc and parsed.path)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _looks_like_remote_file_url(value: str) -> bool:
+    if not _looks_like_remote_url(value):
+        return False
+    lowered = value.lower()
+    if lowered.endswith(REMOTE_FILE_EXTS):
+        return True
+    parsed = urlparse(value)
+    host = (parsed.netloc or "").lower()
+    return (
+        parsed.scheme == "gs"
+        or "storage.googleapis.com" in host
+        or "googleusercontent.com" in host
+    )
+
+
+def _extract_urls_from_text(value: str) -> list[str]:
+    if not isinstance(value, str) or not value:
+        return []
+    urls = re.findall(r"https?://[^\s\]\)<>\"']+", value)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in urls:
+        url = raw.rstrip(".,);")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        cleaned.append(url)
+    return cleaned
+
+
+def _infer_mime_type_from_url(uri: str, fallback: str | None = None) -> str | None:
+    if isinstance(fallback, str) and "/" in fallback:
+        return fallback
+    guessed, _ = mimetypes.guess_type(uri)
+    if isinstance(guessed, str):
+        return guessed
+    lowered = uri.lower()
+    if lowered.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if lowered.endswith(".png"):
+        return "image/png"
+    if lowered.endswith(".webp"):
+        return "image/webp"
+    if lowered.endswith(".gif"):
+        return "image/gif"
+    if lowered.endswith(".pdf"):
+        return "application/pdf"
+    return None
+
+
+def _is_image_mime(mime_type: str | None, uri: str | None = None) -> bool:
+    if isinstance(mime_type, str) and mime_type.lower().startswith("image/"):
+        return True
+    if isinstance(uri, str):
+        lowered = uri.lower()
+        return lowered.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"))
+    return False
+
+
+def _asset_id_for(source_type: str, uri: str, artifact_id: str | None = None, producer_step_id: int | None = None) -> str:
+    raw = f"{source_type}|{producer_step_id or 0}|{artifact_id or ''}|{uri}"
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    return f"asset:{digest}"
+
+
+def _append_asset(
+    pool: dict[str, dict[str, Any]],
+    *,
+    source_type: str,
+    uri: str,
+    mime_type: str | None = None,
+    artifact_id: str | None = None,
+    producer_step_id: int | None = None,
+    producer_capability: str | None = None,
+    producer_mode: str | None = None,
+    label: str | None = None,
+    title: str | None = None,
+) -> None:
+    normalized_uri = str(uri or "").strip()
+    if not normalized_uri:
+        return
+    if not _looks_like_remote_url(normalized_uri):
+        return
+    inferred_mime = _infer_mime_type_from_url(normalized_uri, fallback=mime_type)
+    asset_id = _asset_id_for(
+        source_type=source_type,
+        uri=normalized_uri,
+        artifact_id=artifact_id,
+        producer_step_id=producer_step_id,
+    )
+    pool[asset_id] = {
+        "asset_id": asset_id,
+        "uri": normalized_uri,
+        "mime_type": inferred_mime,
+        "is_image": _is_image_mime(inferred_mime, normalized_uri),
+        "source_type": source_type,
+        "artifact_id": artifact_id,
+        "producer_step_id": producer_step_id,
+        "producer_capability": producer_capability,
+        "producer_mode": producer_mode,
+        "label": label or "",
+        "title": title or "",
+    }
+
+
+def _collect_assets_from_payload(
+    payload: Any,
+    pool: dict[str, dict[str, Any]],
+    *,
+    source_type: str,
+    artifact_id: str | None = None,
+    producer_step_id: int | None = None,
+    producer_capability: str | None = None,
+    producer_mode: str | None = None,
+    parent_key: str | None = None,
+) -> None:
+    if isinstance(payload, str):
+        if _looks_like_remote_file_url(payload):
+            _append_asset(
+                pool,
+                source_type=source_type,
+                uri=payload,
+                artifact_id=artifact_id,
+                producer_step_id=producer_step_id,
+                producer_capability=producer_capability,
+                producer_mode=producer_mode,
+                label=parent_key,
+            )
+            return
+        for url in _extract_urls_from_text(payload):
+            if _looks_like_remote_file_url(url):
+                _append_asset(
+                    pool,
+                    source_type=source_type,
+                    uri=url,
+                    artifact_id=artifact_id,
+                    producer_step_id=producer_step_id,
+                    producer_capability=producer_capability,
+                    producer_mode=producer_mode,
+                    label=parent_key or "text_url",
+                )
+        return
+
+    if isinstance(payload, list):
+        for item in payload:
+            _collect_assets_from_payload(
+                item,
+                pool,
+                source_type=source_type,
+                artifact_id=artifact_id,
+                producer_step_id=producer_step_id,
+                producer_capability=producer_capability,
+                producer_mode=producer_mode,
+                parent_key=parent_key,
+            )
+        return
+
+    if isinstance(payload, dict):
+        key_to_uri_candidates = (
+            "url",
+            "uri",
+            "image_url",
+            "gcs_url",
+            "source_url",
+            "pdf_url",
+            "file_url",
+        )
+        mime_hint = payload.get("mime_type") or payload.get("content_type")
+        label = (
+            payload.get("title")
+            or payload.get("filename")
+            or payload.get("caption")
+            or payload.get("name")
+        )
+        for key in key_to_uri_candidates:
+            maybe_uri = payload.get(key)
+            if isinstance(maybe_uri, str) and _looks_like_remote_file_url(maybe_uri):
+                _append_asset(
+                    pool,
+                    source_type=source_type,
+                    uri=maybe_uri,
+                    mime_type=mime_hint if isinstance(mime_hint, str) else None,
+                    artifact_id=artifact_id,
+                    producer_step_id=producer_step_id,
+                    producer_capability=producer_capability,
+                    producer_mode=producer_mode,
+                    label=parent_key or key,
+                    title=str(label) if isinstance(label, str) else None,
+                )
+        for key, value in payload.items():
+            _collect_assets_from_payload(
+                value,
+                pool,
+                source_type=source_type,
+                artifact_id=artifact_id,
+                producer_step_id=producer_step_id,
+                producer_capability=producer_capability,
+                producer_mode=producer_mode,
+                parent_key=str(key),
+            )
+
+
+def build_step_asset_pool(
+    state: State,
+    current_step: dict[str, Any] | None = None,
+    dependency_context: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    pool: dict[str, dict[str, Any]] = dict(state.get("asset_pool") or {})
+
+    attachments = state.get("attachments") or []
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        uri = item.get("url")
+        if not isinstance(uri, str):
+            continue
+        _append_asset(
+            pool,
+            source_type="user_upload",
+            uri=uri,
+            mime_type=item.get("mime_type") if isinstance(item.get("mime_type"), str) else None,
+            label=item.get("kind") if isinstance(item.get("kind"), str) else "attachment",
+            title=item.get("filename") if isinstance(item.get("filename"), str) else None,
+        )
+
+    selected_image_inputs = state.get("selected_image_inputs") or []
+    for item in selected_image_inputs:
+        if not isinstance(item, dict):
+            continue
+        uri = None
+        for key in ("gcs_url", "image_url", "url", "source_url"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                uri = value.strip()
+                break
+        if not uri:
+            continue
+        _append_asset(
+            pool,
+            source_type="selected_image_input",
+            uri=uri,
+            mime_type=item.get("mime_type") if isinstance(item.get("mime_type"), str) else None,
+            label=item.get("provider") if isinstance(item.get("provider"), str) else "selected_image",
+            title=item.get("caption") if isinstance(item.get("caption"), str) else None,
+        )
+
+    if current_step is not None and dependency_context is None:
+        dependency_context = resolve_step_dependency_context(state, current_step)
+
+    for item in (dependency_context or {}).get("resolved_dependency_artifacts", []):
+        if not isinstance(item, dict):
+            continue
+        _collect_assets_from_payload(
+            item.get("content"),
+            pool,
+            source_type="dependency_artifact",
+            artifact_id=item.get("artifact_id") if isinstance(item.get("artifact_id"), str) else None,
+            producer_step_id=item.get("producer_step_id") if isinstance(item.get("producer_step_id"), int) else None,
+            producer_capability=item.get("producer_capability") if isinstance(item.get("producer_capability"), str) else None,
+            producer_mode=item.get("producer_mode") if isinstance(item.get("producer_mode"), str) else None,
+            parent_key="content",
+        )
+
+    return pool
+
+
+def resolve_selected_assets_for_step(
+    state: State,
+    step_id: int | str | None,
+    *,
+    image_only: bool = False,
+) -> list[dict[str, Any]]:
+    if step_id is None:
+        return []
+    key = str(step_id)
+    selected_map = state.get("selected_assets_by_step") or {}
+    selected_ids = selected_map.get(key) if isinstance(selected_map, dict) else None
+    if not isinstance(selected_ids, list):
+        return []
+
+    pool = state.get("asset_pool") or {}
+    if not isinstance(pool, dict):
+        return []
+
+    resolved: list[dict[str, Any]] = []
+    for asset_id in selected_ids:
+        if not isinstance(asset_id, str):
+            continue
+        item = pool.get(asset_id)
+        if not isinstance(item, dict):
+            continue
+        if image_only and not bool(item.get("is_image")):
+            continue
+        resolved.append(item)
+    return resolved
 
 
 def resolve_step_dependency_context(state: State, current_step: dict[str, Any]) -> dict[str, Any]:

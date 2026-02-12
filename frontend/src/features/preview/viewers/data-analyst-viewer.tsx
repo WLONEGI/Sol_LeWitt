@@ -24,9 +24,19 @@ export function DataAnalystViewer({ content }: DataAnalystViewerProps) {
     const log = typeof content?.log === "string" ? content.log : ""
     const output = content?.output ?? null
 
-    const artifactKeys: string[] = Array.isArray(input?.artifact_keys) ? input.artifact_keys : []
     const imageUrls: string[] = Array.isArray(input?.auto_task?.image_urls) ? input.auto_task.image_urls : []
     const outputFiles: any[] = Array.isArray(output?.output_files) ? output.output_files : []
+    const failedChecks: string[] = Array.isArray(output?.failed_checks) ? output.failed_checks : []
+    const outputValueText = useMemo(() => {
+        const value = output?.output_value
+        if (value === undefined || value === null) return ""
+        if (typeof value === "string") return value
+        try {
+            return JSON.stringify(value, null, 2)
+        } catch {
+            return String(value)
+        }
+    }, [output?.output_value])
 
     const codeLines = useMemo(() => code.split("\n"), [code])
     const logLines = useMemo(() => log.split("\n"), [log])
@@ -52,7 +62,7 @@ export function DataAnalystViewer({ content }: DataAnalystViewerProps) {
                             <CardTitle className="text-sm">インプット</CardTitle>
                         </CardHeader>
                         <CardContent className="space-y-4">
-                            {!input?.instruction && imageUrls.length === 0 && artifactKeys.length === 0 ? (
+                            {!input?.instruction && imageUrls.length === 0 ? (
                                 <div className="text-muted-foreground text-xs italic">インプットデータがありません。</div>
                             ) : (
                                 <>
@@ -84,22 +94,6 @@ export function DataAnalystViewer({ content }: DataAnalystViewerProps) {
                                                             <span className="text-white text-xs">クリックで拡大</span>
                                                         </div>
                                                     </a>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {artifactKeys.length > 0 && (
-                                        <div>
-                                            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2">使用アーティファクト</div>
-                                            <div className="flex flex-wrap gap-1.5">
-                                                {artifactKeys.map((key) => (
-                                                    <span
-                                                        key={key}
-                                                        className="inline-flex items-center px-2 py-1 rounded-md bg-primary/10 text-primary border border-primary/20 text-xs font-mono"
-                                                    >
-                                                        {key}
-                                                    </span>
                                                 ))}
                                             </div>
                                         </div>
@@ -187,14 +181,30 @@ export function DataAnalystViewer({ content }: DataAnalystViewerProps) {
                             <CardTitle className="text-sm">アウトプット</CardTitle>
                         </CardHeader>
                         <CardContent className="space-y-4">
-                            {!output?.execution_summary && outputFiles.length === 0 ? (
+                            {!outputValueText && outputFiles.length === 0 && failedChecks.length === 0 ? (
                                 <div className="text-muted-foreground text-xs italic">アウトプットはまだ生成されていません。</div>
                             ) : (
                                 <>
-                                    {output?.execution_summary && (
+                                    {outputValueText && (
                                         <div>
-                                            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2">実行結果</div>
-                                            <div className="text-sm bg-muted/30 rounded-md p-3 border border-border">{output.execution_summary}</div>
+                                            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2">非ファイル出力</div>
+                                            <pre className="text-xs bg-muted/30 rounded-md p-3 border border-border whitespace-pre-wrap break-words font-mono">{outputValueText}</pre>
+                                        </div>
+                                    )}
+
+                                    {failedChecks.length > 0 && (
+                                        <div>
+                                            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2">Failed Checks</div>
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {failedChecks.map((check) => (
+                                                    <span
+                                                        key={check}
+                                                        className="inline-flex items-center px-2 py-1 rounded-md bg-destructive/10 text-destructive border border-destructive/20 text-xs font-mono"
+                                                    >
+                                                        {check}
+                                                    </span>
+                                                ))}
+                                            </div>
                                         </div>
                                     )}
 

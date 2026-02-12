@@ -18,6 +18,7 @@ const getIconForProduct = (productType?: string) => {
     }
 }
 import Link from "next/link"
+import Image from "next/image"
 import { useRouter } from "next/navigation"
 import { UserAccountMenu } from "@/features/chat/components/user-account-menu"
 import { useAuth } from "@/providers/auth-provider"
@@ -106,8 +107,18 @@ export function ChatSidebar() {
                 <div className="flex flex-col gap-1">
                     <div className={cn("flex items-center h-10 w-full", isCollapsed ? "justify-center" : "justify-between pl-3 pr-2")}>
                         {!isCollapsed ? (
-                            <Link href="/" className="text-base font-semibold tracking-[0.2em] text-foreground hover:opacity-80 transition-opacity">
-                                Sol LeWitt
+                            <Link
+                                href="/"
+                                className="inline-flex items-center gap-2 text-base font-semibold tracking-[0.2em] text-foreground transition-opacity hover:opacity-80"
+                            >
+                                <Image
+                                    src="/logo.svg"
+                                    alt="Sol LeWitt logo"
+                                    width={20}
+                                    height={20}
+                                    className="h-5 w-5 shrink-0"
+                                />
+                                <span>Sol LeWitt</span>
                             </Link>
                         ) : null}
                         <SidebarTrigger className={cn("h-10 w-10 text-muted-foreground hover:text-foreground hover:bg-black/5 rounded-lg transition-colors flex items-center justify-center", isCollapsed && "mx-auto")}>

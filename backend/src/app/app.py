@@ -99,7 +99,7 @@ class ChatInput(BaseModel):
     messages: list[Any] = Field(..., description="List of input messages")
     selected_image_inputs: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="ユーザーが選択した画像検索結果（次Worker入力用）"
+        description="ユーザーが明示的に指定した参照画像入力（次Worker入力用）"
     )
     interrupt_intent: bool = Field(
         default=False,
@@ -389,6 +389,10 @@ def _is_protected_path(path: str) -> bool:
     if path.startswith("/api/threads/"):
         return True
     if path.startswith("/api/files/"):
+        return True
+    if path.startswith("/api/image/"):
+        return True
+    if path.startswith("/api/slide-deck/"):
         return True
     return False
 
@@ -1202,12 +1206,19 @@ def _build_data_analyst_artifact(artifact_id: str, value: Any) -> tuple[dict[str
     if not isinstance(data, dict):
         return None, []
 
-    if "analysis_report" not in data and "execution_summary" not in data:
+    if not any(key in data for key in ("implementation_code", "execution_log", "output_value")):
         return None, []
 
-    summary = str(data.get("execution_summary") or "")
-    lowered_summary = summary.lower()
-    is_failed = "error" in lowered_summary or "失敗" in summary or "エラー" in summary
+    failed_checks = data.get("failed_checks")
+    has_failed_checks = isinstance(failed_checks, list) and len(failed_checks) > 0
+    execution_log = str(data.get("execution_log") or "")
+    lowered_log = execution_log.lower()
+    is_failed = (
+        has_failed_checks
+        or "error" in lowered_log
+        or "失敗" in execution_log
+        or "エラー" in execution_log
+    )
     status = "failed" if is_failed else "completed"
 
     artifact = {
@@ -1259,9 +1270,6 @@ def _build_research_artifact(artifact_id: str, value: Any) -> tuple[dict[str, An
 
     perspective = str(data.get("perspective") or "Research")
     report = str(data.get("report") or "")
-    image_candidates = data.get("image_candidates")
-    candidates = image_candidates if isinstance(image_candidates, list) else []
-
     artifact = {
         "id": artifact_id,
         "type": "report",
@@ -1286,19 +1294,6 @@ def _build_research_artifact(artifact_id: str, value: Any) -> tuple[dict[str, An
             },
         }
     )
-    if candidates:
-        events.append(
-            {
-                "type": "data-image-search-results",
-                "data": {
-                    "artifact_id": artifact_id,
-                    "task_id": data.get("task_id"),
-                    "query": perspective,
-                    "perspective": perspective,
-                    "candidates": jsonable_encoder(candidates[:10]),
-                },
-            }
-        )
 
     return artifact, events
 
@@ -1367,7 +1362,9 @@ def _build_snapshot_payload(thread_id: str, state_values: dict[str, Any]) -> dic
                 ):
                     artifact, events = _build_research_artifact(artifact_id, parsed)
                 elif isinstance(parsed, dict) and (
-                    "analysis_report" in parsed or "execution_summary" in parsed
+                    "implementation_code" in parsed
+                    or "execution_log" in parsed
+                    or "output_value" in parsed
                 ):
                     artifact, events = _build_data_analyst_artifact(artifact_id, parsed)
 
@@ -1497,33 +1494,72 @@ async def get_thread_snapshot(thread_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# === In-painting Stub ===
+# === In-painting API ===
 
 class InpaintRequest(BaseModel):
     image_url: str = Field(..., description="Source image URL to edit")
+    mask_image_url: str = Field(
+        ...,
+        description="Mask image URL or data URL (white=editable, black=preserve)",
+    )
     prompt: str = Field(..., min_length=1, description="Modification instruction")
+
+
+def _build_inpaint_instruction(user_prompt: str) -> str:
+    cleaned = user_prompt.strip()
+    return (
+        "You are an image inpainting model.\n"
+        "Reference mapping (strict order):\n"
+        "- Image[1] = ORIGINAL (source image)\n"
+        "- Image[2] = MASK (white = editable, black = preserve)\n"
+        "Never swap these roles.\n"
+        "Apply edits only inside white masked regions.\n"
+        "Outside the white mask, preserve composition, style, lighting, and all text exactly.\n\n"
+        f"Edit instruction:\n{cleaned}"
+    )
+
+
+async def _resolve_inpaint_reference(image_ref: str, *, field_name: str) -> str | bytes:
+    source = (image_ref or "").strip()
+    if not source:
+        raise ValueError(f"{field_name} is required")
+
+    if source.startswith("data:"):
+        decoded = _decode_base64_payload(source)
+        if not decoded:
+            raise ValueError(f"Invalid {field_name} data URL")
+        return decoded
+
+    if source.startswith("gs://"):
+        return source
+
+    payload = await asyncio.to_thread(download_blob_as_bytes, source)
+    if not payload:
+        raise ValueError(f"Failed to download {field_name}")
+    return payload
+
 
 async def _run_inpaint(
     image_url: str,
+    mask_image_url: str,
     prompt: str,
     session_id: str | None = None,
     slide_number: int | None = None,
 ) -> str:
     if not image_url:
         raise ValueError("image_url is required")
+    if not mask_image_url:
+        raise ValueError("mask_image_url is required")
 
-    reference_input = image_url
-    if not image_url.startswith("gs://"):
-        reference_bytes = await asyncio.to_thread(download_blob_as_bytes, image_url)
-        if not reference_bytes:
-            raise ValueError("Failed to download source image")
-        reference_input = reference_bytes
+    source_input = await _resolve_inpaint_reference(image_url, field_name="image_url")
+    mask_input = await _resolve_inpaint_reference(mask_image_url, field_name="mask_image_url")
+    inpaint_prompt = _build_inpaint_instruction(prompt)
 
     image_bytes, _ = await asyncio.to_thread(
         generate_image,
-        prompt,
+        inpaint_prompt,
         seed=None,
-        reference_image=reference_input,
+        reference_image=[source_input, mask_input],
         thought_signature=None,
     )
 
@@ -1546,6 +1582,7 @@ async def inpaint_image(image_id: str, request: InpaintRequest):
     try:
         new_url = await _run_inpaint(
             image_url=request.image_url,
+            mask_image_url=request.mask_image_url,
             prompt=request.prompt,
             session_id=image_id,
             slide_number=None,
@@ -1576,6 +1613,7 @@ async def inpaint_slide_deck(deck_id: str, slide_number: int, request: InpaintRe
     try:
         new_url = await _run_inpaint(
             image_url=request.image_url,
+            mask_image_url=request.mask_image_url,
             prompt=request.prompt,
             session_id=deck_id,
             slide_number=slide_number,
