@@ -13,6 +13,7 @@ IntentType = Literal["new", "refine", "regenerate"]
 TaskCapability = Literal["writer", "visualizer", "researcher", "data_analyst"]
 TaskStatus = Literal["pending", "in_progress", "completed", "blocked"]
 ArtifactStatus = Literal["streaming", "completed", "failed"]
+AssetRequirementScope = Literal["global", "per_unit"]
 
 
 class TargetScope(BaseModel):
@@ -29,6 +30,23 @@ class TargetScope(BaseModel):
     artifact_ids: List[str] = Field(default_factory=list)
 
 
+class AssetRequirement(BaseModel):
+    """Plannerが宣言するアセット要求（抽象条件）."""
+    role: str = Field(description="用途ロール（例: style_reference, layout_reference, template_source）")
+    required: bool = Field(default=False, description="満たせない場合に失敗扱いにするか")
+    scope: AssetRequirementScope = Field(default="global", description="適用範囲")
+    mime_allow: List[str] = Field(
+        default_factory=list,
+        description="許可MIME（例: image/*, application/pdf）",
+    )
+    source_preference: List[str] = Field(
+        default_factory=list,
+        description="優先ソースヒント（例: user_upload, pptx_derived）",
+    )
+    max_items: int = Field(default=3, ge=1, le=8, description="最大選択数")
+    instruction: Optional[str] = Field(default=None, description="補足条件")
+
+
 class OrchestrationTaskStep(BaseModel):
     """実行時のTask Card."""
     id: int = Field(description="ステップ番号（1から始まる）")
@@ -39,6 +57,10 @@ class OrchestrationTaskStep(BaseModel):
     description: str = Field(default="タスク", description="ステップ説明")
     inputs: List[str] = Field(default_factory=list, description="入力成果物・前提条件")
     success_criteria: List[str] = Field(default_factory=list, description="受け入れ条件")
+    asset_requirements: List[AssetRequirement] = Field(
+        default_factory=list,
+        description="このステップで必要なアセット要求",
+    )
     target_scope: Optional[TargetScope] = Field(default=None, description="部分修正の対象範囲")
     status: TaskStatus = Field(default="pending", description="実行ステータス")
     result_summary: Optional[str] = Field(default=None, description="実行結果の要約")
@@ -134,6 +156,10 @@ class TaskStep(BaseModel):
     depends_on: List[int] = Field(
         default_factory=list,
         description="依存するステップID（順序・参照関係）"
+    )
+    asset_requirements: List[AssetRequirement] = Field(
+        default_factory=list,
+        description="このステップで必要なアセット要求（抽象条件）",
     )
     design_direction: Optional[str] = Field(
         default=None,
@@ -683,8 +709,8 @@ class GenerationConfig(BaseModel):
         description="推論レベル (High: 複雑な図解, Low: 単純なアイコン)"
     )
     media_resolution: Literal["medium", "high"] = Field(
-        default="high",
-        description="解像度設定 (High: スライド用, Medium: プレビュー用)"
+        default="medium",
+        description="解像度設定 (Medium=1K, High=2K)"
     )
     aspect_ratio: Literal["16:9", "4:3", "1:1", "4:5", "3:4", "9:16", "2:3", "21:9"] = Field(
         default="16:9",
@@ -705,7 +731,7 @@ class VisualizerOutput(BaseModel):
     generation_config: GenerationConfig = Field(
         default_factory=lambda: GenerationConfig(
             thinking_level="high", 
-            media_resolution="high", 
+            media_resolution="medium", 
             aspect_ratio="16:9"
         ),
         description="画像生成エンジンの設定パラメータ"

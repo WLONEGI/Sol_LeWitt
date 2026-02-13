@@ -12,6 +12,7 @@ import mimetypes
 import re
 import uuid
 from typing import Any, Optional, Literal
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.encoders import jsonable_encoder
@@ -31,6 +32,7 @@ from src.infrastructure.auth.firebase import verify_firebase_token
 from src.infrastructure.auth.user_store import upsert_user
 from src.domain.designer.generator import generate_image
 from src.domain.designer.pptx_parser import extract_pptx_context
+from src.infrastructure.llm.llm import is_rate_limited_error
 from src.infrastructure.storage.gcs import upload_to_gcs, download_blob_as_bytes
 
 # Configure logging
@@ -64,6 +66,7 @@ MAX_UPLOAD_FILES = 5
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_PPTX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_DOCUMENT_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_INPAINT_REFERENCE_IMAGES = 3
 _ALLOWED_IMAGE_CONTENT_TYPES = {
     "image/jpeg",
     "image/png",
@@ -342,7 +345,7 @@ async def lifespan(app: FastAPI):
             app,
             graph_with_types,
             path="/api/chat",
-            enabled_endpoints=["invoke", "batch", "stream", "stream_log"], # Explicitly exclude stream_events to use custom handler
+            enabled_endpoints=["invoke", "batch", "stream_log"], # Explicitly exclude stream and stream_events to use custom handlers
             per_req_config_modifier=per_req_config_modifier,
             # serializer argument removed; using patched WellKnownLCSerializer default
         )
@@ -599,6 +602,12 @@ async def auth_middleware(request: Request, call_next):
     if request.method == "OPTIONS":
         return await call_next(request)
 
+    if request.url.path == "/api/chat/stream":
+        return JSONResponse(
+            status_code=410,
+            content={"detail": "Deprecated endpoint. Use /api/chat/stream_events."},
+        )
+
     if not _is_protected_path(request.url.path):
         return await call_next(request)
 
@@ -640,6 +649,14 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 # === Custom Stream Events Endpoint ===
+
+@app.post("/api/chat/stream")
+async def deprecated_chat_stream_endpoint():
+    raise HTTPException(
+        status_code=410,
+        detail="Deprecated endpoint. Use /api/chat/stream_events.",
+    )
+
 
 @app.post("/api/chat/stream_events")
 async def custom_stream_events(request: Request, input_data: ChatRequest):
@@ -688,6 +705,8 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
                 )
                 if pptx_context is not None:
                     graph_input["pptx_context"] = pptx_context
+                # Legacy compatibility input only; do not persist huge base64 payload in graph state.
+                graph_input.pop("pptx_template_base64", None)
                 
                 # Merge request-level config (Thread ID) with payload config
                 merged_config = input_data.config or {}
@@ -724,7 +743,26 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
                     # All other events (on_chain_start, on_tool_start, etc.) are IGNORED
             except Exception as stream_err:
                 logger.error(f"Error inside stream generator: {stream_err}")
-                yield f"data: {json.dumps({'event': 'error', 'data': str(stream_err)})}\n\n"
+                if is_rate_limited_error(stream_err):
+                    payload = {
+                        "event": "error",
+                        "data": {
+                            "kind": "rate_limit",
+                            "message": "現在アクセスが集中しています。数秒後に再送してください。",
+                            "retryable": True,
+                            "retry_after_seconds": 8,
+                        },
+                    }
+                else:
+                    payload = {
+                        "event": "error",
+                        "data": {
+                            "kind": "internal",
+                            "message": str(stream_err),
+                            "retryable": False,
+                        },
+                    }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(
             event_generator(),
@@ -1220,12 +1258,19 @@ def _build_data_analyst_artifact(artifact_id: str, value: Any) -> tuple[dict[str
         or "エラー" in execution_log
     )
     status = "failed" if is_failed else "completed"
+    implementation_code = str(data.get("implementation_code") or "")
+    execution_log = str(data.get("execution_log") or "")
+    raw_input = data.get("input")
+    normalized_input = jsonable_encoder(raw_input) if isinstance(raw_input, dict) else None
 
     artifact = {
         "id": artifact_id,
         "type": "data_analyst",
         "title": "Data Analyst",
         "content": {
+            "input": normalized_input,
+            "code": implementation_code,
+            "log": execution_log,
             "output": jsonable_encoder(data),
         },
         "version": 1,
@@ -1238,6 +1283,7 @@ def _build_data_analyst_artifact(artifact_id: str, value: Any) -> tuple[dict[str
             "data": {
                 "artifact_id": artifact_id,
                 "title": "Data Analyst",
+                "input": normalized_input,
             }
         },
         {
@@ -1331,6 +1377,29 @@ def _build_snapshot_payload(thread_id: str, state_values: dict[str, Any]) -> dic
                 "description": "The updated execution plan.",
             }
         })
+    raw_followups = state_values.get("coordinator_followup_options")
+    if isinstance(raw_followups, list):
+        options: list[dict[str, str]] = []
+        for index, option in enumerate(raw_followups, start=1):
+            if not isinstance(option, dict):
+                continue
+            prompt = option.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                continue
+            option_id = option.get("id")
+            normalized_id = option_id if isinstance(option_id, str) and option_id.strip() else f"followup_{index}"
+            options.append({"id": normalized_id, "prompt": prompt.strip()})
+            if len(options) >= 3:
+                break
+        if options:
+            ui_events.append(
+                {
+                    "type": "data-coordinator-followups",
+                    "data": {
+                        "options": options,
+                    },
+                }
+            )
 
     if isinstance(raw_artifacts, dict):
         ordered_artifact_ids = sorted(raw_artifacts.keys(), key=_extract_step_artifact_meta)
@@ -1496,6 +1565,12 @@ async def get_thread_snapshot(thread_id: str, request: Request):
 
 # === In-painting API ===
 
+class InpaintReferenceImage(BaseModel):
+    image_url: str = Field(..., min_length=1, description="Reference image URL for style/content guidance")
+    caption: Optional[str] = Field(default=None, description="Optional note describing this reference")
+    mime_type: Optional[str] = Field(default=None, description="Optional MIME type (e.g., image/png)")
+
+
 class InpaintRequest(BaseModel):
     image_url: str = Field(..., description="Source image URL to edit")
     mask_image_url: str = Field(
@@ -1503,20 +1578,94 @@ class InpaintRequest(BaseModel):
         description="Mask image URL or data URL (white=editable, black=preserve)",
     )
     prompt: str = Field(..., min_length=1, description="Modification instruction")
+    reference_images: list[InpaintReferenceImage] = Field(
+        default_factory=list,
+        description="Optional reference images to guide style/content during in-painting",
+    )
 
 
-def _build_inpaint_instruction(user_prompt: str) -> str:
+def _build_inpaint_instruction(
+    user_prompt: str,
+    reference_images: list[InpaintReferenceImage] | None = None,
+) -> str:
     cleaned = user_prompt.strip()
+    references = reference_images or []
+    reference_mapping_lines = [
+        "- Image[1] = ORIGINAL (source image)",
+        "- Image[2] = MASK (white = editable, black = preserve)",
+    ]
+    if references:
+        reference_mapping_lines.append(
+            "- Image[3..N] = OPTIONAL REFERENCE IMAGES (style/content guidance only)"
+        )
+        for index, reference in enumerate(references, start=3):
+            caption = (reference.caption or "").strip()
+            suffix = f" ({caption})" if caption else ""
+            reference_mapping_lines.append(f"- Image[{index}] = REFERENCE{suffix}")
+    reference_mapping_text = "\n".join(reference_mapping_lines)
     return (
         "You are an image inpainting model.\n"
         "Reference mapping (strict order):\n"
-        "- Image[1] = ORIGINAL (source image)\n"
-        "- Image[2] = MASK (white = editable, black = preserve)\n"
+        f"{reference_mapping_text}\n"
         "Never swap these roles.\n"
         "Apply edits only inside white masked regions.\n"
         "Outside the white mask, preserve composition, style, lighting, and all text exactly.\n\n"
+        "Optional references are guidance only. Do not copy unrelated layout/content outside the mask.\n\n"
         f"Edit instruction:\n{cleaned}"
     )
+
+
+def _storage_url_to_gs_uri(source: str) -> str | None:
+    parsed = urlparse(source)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+
+    if parsed.netloc == "storage.googleapis.com":
+        path = parsed.path.lstrip("/")
+        if "/" not in path:
+            return None
+        bucket, blob = path.split("/", 1)
+        if bucket and blob:
+            return f"gs://{bucket}/{blob}"
+        return None
+
+    if parsed.netloc.endswith(".storage.googleapis.com"):
+        bucket = parsed.netloc.replace(".storage.googleapis.com", "")
+        blob = parsed.path.lstrip("/")
+        if bucket and blob:
+            return f"gs://{bucket}/{blob}"
+        return None
+
+    return None
+
+
+def _normalize_inpaint_mime_type(mime_type: str | None) -> str | None:
+    if not isinstance(mime_type, str):
+        return None
+    normalized = mime_type.strip().lower()
+    if not normalized.startswith("image/"):
+        return None
+    return normalized
+
+
+def _infer_inpaint_mime_type(image_ref: str, default: str = "image/png") -> str:
+    source = (image_ref or "").strip()
+    if not source:
+        return default
+
+    if source.lower().startswith("data:"):
+        header = source.split(",", 1)[0]
+        if ";" in header:
+            media = header.split(":", 1)[1].split(";", 1)[0].strip().lower()
+            if media.startswith("image/"):
+                return media
+        return default
+
+    parsed = urlparse(source)
+    path = parsed.path if parsed.scheme in {"http", "https", "gs"} else source
+    guessed, _ = mimetypes.guess_type(path)
+    normalized = _normalize_inpaint_mime_type(guessed)
+    return normalized or default
 
 
 async def _resolve_inpaint_reference(image_ref: str, *, field_name: str) -> str | bytes:
@@ -1533,6 +1682,10 @@ async def _resolve_inpaint_reference(image_ref: str, *, field_name: str) -> str 
     if source.startswith("gs://"):
         return source
 
+    gcs_uri = _storage_url_to_gs_uri(source)
+    if gcs_uri:
+        return gcs_uri
+
     payload = await asyncio.to_thread(download_blob_as_bytes, source)
     if not payload:
         raise ValueError(f"Failed to download {field_name}")
@@ -1543,6 +1696,7 @@ async def _run_inpaint(
     image_url: str,
     mask_image_url: str,
     prompt: str,
+    reference_images: list[InpaintReferenceImage] | None = None,
     session_id: str | None = None,
     slide_number: int | None = None,
 ) -> str:
@@ -1551,15 +1705,56 @@ async def _run_inpaint(
     if not mask_image_url:
         raise ValueError("mask_image_url is required")
 
+    references = reference_images or []
+    if len(references) > MAX_INPAINT_REFERENCE_IMAGES:
+        raise ValueError(
+            f"reference_images supports up to {MAX_INPAINT_REFERENCE_IMAGES} items"
+        )
+
     source_input = await _resolve_inpaint_reference(image_url, field_name="image_url")
     mask_input = await _resolve_inpaint_reference(mask_image_url, field_name="mask_image_url")
-    inpaint_prompt = _build_inpaint_instruction(prompt)
+    source_mime_type = _infer_inpaint_mime_type(source_input) if isinstance(source_input, str) else _infer_inpaint_mime_type(image_url)
+    mask_mime_type = _infer_inpaint_mime_type(mask_input) if isinstance(mask_input, str) else _infer_inpaint_mime_type(mask_image_url)
+    inpaint_reference_inputs: list[dict[str, Any]] = [
+        (
+            {"uri": source_input, "mime_type": source_mime_type}
+            if isinstance(source_input, str)
+            else {"data": source_input, "mime_type": source_mime_type}
+        ),
+        (
+            {"uri": mask_input, "mime_type": mask_mime_type}
+            if isinstance(mask_input, str)
+            else {"data": mask_input, "mime_type": mask_mime_type}
+        ),
+    ]
+    for index, reference in enumerate(references):
+        resolved_reference = await _resolve_inpaint_reference(
+            reference.image_url,
+            field_name=f"reference_images[{index}].image_url",
+        )
+        reference_mime_type = (
+            _normalize_inpaint_mime_type(reference.mime_type)
+            or (
+                _infer_inpaint_mime_type(resolved_reference)
+                if isinstance(resolved_reference, str)
+                else _infer_inpaint_mime_type(reference.image_url)
+            )
+        )
+        inpaint_reference_inputs.append(
+            (
+                {"uri": resolved_reference, "mime_type": reference_mime_type}
+                if isinstance(resolved_reference, str)
+                else {"data": resolved_reference, "mime_type": reference_mime_type}
+            )
+        )
+
+    inpaint_prompt = _build_inpaint_instruction(prompt, reference_images=references)
 
     image_bytes, _ = await asyncio.to_thread(
         generate_image,
         inpaint_prompt,
         seed=None,
-        reference_image=[source_input, mask_input],
+        reference_image=inpaint_reference_inputs,
         thought_signature=None,
     )
 
@@ -1584,6 +1779,7 @@ async def inpaint_image(image_id: str, request: InpaintRequest):
             image_url=request.image_url,
             mask_image_url=request.mask_image_url,
             prompt=request.prompt,
+            reference_images=request.reference_images,
             session_id=image_id,
             slide_number=None,
         )
@@ -1615,6 +1811,7 @@ async def inpaint_slide_deck(deck_id: str, slide_number: int, request: InpaintRe
             image_url=request.image_url,
             mask_image_url=request.mask_image_url,
             prompt=request.prompt,
+            reference_images=request.reference_images,
             session_id=deck_id,
             slide_number=slide_number,
         )

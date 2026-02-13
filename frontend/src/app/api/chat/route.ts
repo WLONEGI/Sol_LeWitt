@@ -94,7 +94,6 @@ export async function POST(req: NextRequest) {
                     let plannerTextBuffer = '';
                     let writerTextBuffer = '';
                     let coordinatorTextBuffer = '';
-                    let supervisorTextBuffer = '';
                     let coordinatorRenderedResponse = '';
                     let coordinatorResponseCompleted = false;
 
@@ -303,6 +302,64 @@ export async function POST(req: NextRequest) {
                                     switch (event) {
                                         // Debug UI (on_chain_start/end) removed as per request
 
+                                        case 'error': {
+                                            const payload = eventData?.data;
+                                            const kind = typeof payload?.kind === 'string' ? payload.kind : '';
+                                            const message =
+                                                typeof payload?.message === 'string' && payload.message.trim().length > 0
+                                                    ? payload.message
+                                                    : (typeof payload === 'string' ? payload : '処理中にエラーが発生しました。');
+
+                                            if (currentReasoningId) {
+                                                controller.enqueue({ type: 'reasoning-end', id: currentReasoningId } as any);
+                                                currentReasoningId = null;
+                                            }
+
+                                            if (!currentTextId) {
+                                                currentTextId = uuidv4();
+                                                controller.enqueue({
+                                                    type: 'text-start',
+                                                    id: currentTextId
+                                                } as any);
+                                            }
+
+                                            controller.enqueue({
+                                                type: 'text-delta',
+                                                id: currentTextId,
+                                                delta: message
+                                            } as any);
+
+                                            controller.enqueue({
+                                                type: 'text-end',
+                                                id: currentTextId
+                                            } as any);
+                                            currentTextId = null;
+
+                                            if (kind === 'rate_limit') {
+                                                controller.enqueue({
+                                                    type: 'data-coordinator-followups',
+                                                    data: {
+                                                        question: message,
+                                                        options: [
+                                                            {
+                                                                id: 'retry_same_request',
+                                                                prompt: '同じ内容で再送する'
+                                                            },
+                                                            {
+                                                                id: 'retry_with_shorter_scope',
+                                                                prompt: '依頼範囲を短くして再送する'
+                                                            },
+                                                            {
+                                                                id: 'retry_after_wait',
+                                                                prompt: '30秒ほど待ってから再送する'
+                                                            }
+                                                        ]
+                                                    }
+                                                } as any);
+                                            }
+                                            break;
+                                        }
+
                                         case 'on_custom_event': {
                                             const eventName = eventData.name;
                                             if (eventName?.startsWith('data-')) {
@@ -379,7 +436,8 @@ export async function POST(req: NextRequest) {
                                             const isWriterRun = runName === 'writer';
                                             const isPlannerOrWriter = runName === 'planner' || isWriterRun || isPlannerNode || isWriterNode;
                                             const isCoordinator = runName === 'coordinator' || isCoordinatorNode;
-                                            const isSupervisor = runName === 'supervisor' || isSupervisorNode;
+                                            const isSupervisorUserFacing = runName === 'supervisor';
+                                            const isSupervisorInternal = (isSupervisorNode || runName.startsWith('supervisor_')) && !isSupervisorUserFacing;
 
                                             if (isResearcherSubgraph && (node === 'manager' || node === 'research_worker')) {
                                                 break;
@@ -447,8 +505,8 @@ export async function POST(req: NextRequest) {
                                                             emitCoordinatorResponseDeltaFromBuffer();
                                                             continue;
                                                         }
-                                                        if (isSupervisor) {
-                                                            supervisorTextBuffer += part.text;
+                                                        if (isSupervisorInternal) {
+                                                            // Supervisor internal structured JSON must not appear in chat.
                                                             continue;
                                                         }
 
@@ -490,8 +548,8 @@ export async function POST(req: NextRequest) {
                                                     emitCoordinatorResponseDeltaFromBuffer();
                                                     break;
                                                 }
-                                                if (isSupervisor) {
-                                                    supervisorTextBuffer += content;
+                                                if (isSupervisorInternal) {
+                                                    // Supervisor internal structured JSON must not appear in chat.
                                                     break;
                                                 }
 
@@ -615,29 +673,6 @@ export async function POST(req: NextRequest) {
                                                     coordinatorTextBuffer = '';
                                                     coordinatorRenderedResponse = '';
                                                     coordinatorResponseCompleted = false;
-                                                }
-
-                                                if (isSupervisor) {
-                                                    if (currentReasoningId) {
-                                                        controller.enqueue({ type: 'reasoning-end', id: currentReasoningId } as any);
-                                                        currentReasoningId = null;
-                                                    }
-
-                                                    if (supervisorTextBuffer) {
-                                                        if (!currentTextId) {
-                                                            currentTextId = uuidv4();
-                                                            controller.enqueue({
-                                                                type: 'text-start',
-                                                                id: currentTextId
-                                                            } as any);
-                                                        }
-                                                        controller.enqueue({
-                                                            type: 'text-delta',
-                                                            id: currentTextId,
-                                                            delta: supervisorTextBuffer
-                                                        } as any);
-                                                        supervisorTextBuffer = '';
-                                                    }
                                                 }
 
                                                 if (currentTextId) {

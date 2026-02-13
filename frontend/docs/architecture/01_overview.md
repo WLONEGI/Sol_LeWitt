@@ -6,10 +6,10 @@
 ## 2. コア・テクノロジースタック
 - **Framework**: Next.js 15+ (App Router)
 - **Language**: TypeScript
-- **Styling**: Tailwind CSS
+- **Styling**: Tailwind CSS v4 (Sass or CSS-in-JS like features natively supported)
 - **UI Components**: shadcn/ui (Radix UI)
 - **Icons**: Lucide React
-- **AI Integration**: Vercel AI SDK (v6)
+- **AI Integration**: Vercel AI SDK (Unified AI Data Stream Protocol)
 - **State Management**: Zustand
 - **Animations**: Framer Motion / CSS Transitions
 

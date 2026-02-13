@@ -25,7 +25,6 @@ When `mode=character_sheet_render`, prioritize these sources:
   - `forbidden_drift`
 
 ## B. Rendering Contract
-- Aspect ratio: respect input `aspect_ratio` (default 2:3 if ambiguous).
 - Background: clean white background.
 - Color: full color.
 - Typography/labels: avoid decorative text and random symbols.

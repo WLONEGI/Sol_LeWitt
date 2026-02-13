@@ -1,5 +1,7 @@
 import json
 import logging
+import re
+from typing import Any
 from typing import Literal
 
 from langchain_core.callbacks.manager import adispatch_custom_event
@@ -8,7 +10,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from src.core.workflow.state import State
-from src.infrastructure.llm.llm import get_llm_by_type
+from src.infrastructure.llm.llm import astream_with_retry, get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
 from src.shared.config import AGENT_LLM_MAP
 from src.shared.schemas import (
@@ -24,6 +26,7 @@ from .common import (
     build_worker_error_payload,
     create_worker_response,
     extract_first_json,
+    resolve_asset_bindings_for_step,
     resolve_step_dependency_context,
     resolve_selected_assets_for_step,
     run_structured_output,
@@ -60,15 +63,28 @@ WRITER_MODE_TO_ARTIFACT_TYPE = {
 
 WRITER_ALLOWED_MODES_BY_PRODUCT: dict[str, set[str]] = {
     "slide": {"slide_outline", "infographic_spec"},
-    "design": {"document_blueprint"},
+    "design": {"slide_outline"},
     "comic": {"story_framework", "character_sheet", "comic_script"},
 }
 
 WRITER_DEFAULT_MODE_BY_PRODUCT: dict[str, str] = {
     "slide": "slide_outline",
-    "design": "document_blueprint",
+    "design": "slide_outline",
     "comic": "story_framework",
 }
+
+_CONCRETE_DATA_PATTERN = re.compile(
+    r"(?:\d|%|％|円|ドル|件|社|人|年|月|日|週|四半期|Q[1-4]|前年比|YoY|CAGR|シェア|順位|TOP)",
+    re.IGNORECASE,
+)
+_TITLE_LIKE_KEYWORDS: tuple[str, ...] = (
+    "表紙",
+    "タイトル",
+    "アジェンダ",
+    "目次",
+    "agenda",
+    "title",
+)
 
 
 def _default_writer_mode(product_type: str | None) -> str:
@@ -81,6 +97,11 @@ def _resolve_writer_mode(raw_mode: str | None, product_type: str | None) -> str:
 
     if not normalized_mode:
         return default_mode
+
+    # Backward compatibility:
+    # design plans may still request document_blueprint; normalize to slide_outline.
+    if str(product_type) == "design" and normalized_mode == "document_blueprint":
+        return "slide_outline"
 
     if normalized_mode not in WRITER_MODE_TO_SCHEMA:
         logger.warning("Writer received unknown mode '%s'. Falling back to %s.", normalized_mode, default_mode)
@@ -97,6 +118,49 @@ def _resolve_writer_mode(raw_mode: str | None, product_type: str | None) -> str:
         return default_mode
 
     return normalized_mode
+
+
+def _slide_is_title_like(slide: Any) -> bool:
+    slide_number = getattr(slide, "slide_number", None)
+    if isinstance(slide_number, int) and slide_number <= 1:
+        return True
+
+    title = str(getattr(slide, "title", "") or "").strip().lower()
+    if not title:
+        return False
+    return any(keyword in title for keyword in _TITLE_LIKE_KEYWORDS)
+
+
+def _contains_concrete_data(text: str) -> bool:
+    return bool(_CONCRETE_DATA_PATTERN.search(text))
+
+
+def _slide_outline_density_issues(writer_output: WriterSlideOutlineOutput) -> list[str]:
+    issues: list[str] = []
+    slides = getattr(writer_output, "slides", None)
+    if not isinstance(slides, list) or not slides:
+        return ["slides が空のため、情報密度を評価できません。"]
+
+    for slide in slides:
+        if _slide_is_title_like(slide):
+            continue
+
+        slide_number = getattr(slide, "slide_number", None)
+        bullets = getattr(slide, "bullet_points", None)
+        bullet_items = bullets if isinstance(bullets, list) else []
+        if len(bullet_items) < 3:
+            issues.append(f"slide {slide_number}: bullet_points が3項目未満です。")
+
+        parts: list[str] = [
+            str(getattr(slide, "title", "") or ""),
+            str(getattr(slide, "description", "") or ""),
+            str(getattr(slide, "key_message", "") or ""),
+            *[str(item) for item in bullet_items if isinstance(item, str)],
+        ]
+        if not _contains_concrete_data(" ".join(parts)):
+            issues.append(f"slide {slide_number}: 具体データ（数値/比較軸/単位）が不足しています。")
+
+    return issues
 
 
 async def writer_node(state: State, config: RunnableConfig) -> Command[Literal["supervisor"]]:
@@ -127,6 +191,7 @@ async def writer_node(state: State, config: RunnableConfig) -> Command[Literal["
     ]
     dependency_context = resolve_step_dependency_context(state, current_step)
     selected_step_assets = resolve_selected_assets_for_step(state, current_step.get("id"))
+    selected_asset_bindings = resolve_asset_bindings_for_step(state, current_step.get("id"))
 
     context_payload = {
         "product_type": state.get("product_type"),
@@ -139,6 +204,7 @@ async def writer_node(state: State, config: RunnableConfig) -> Command[Literal["
         "resolved_dependency_artifacts": dependency_context["resolved_dependency_artifacts"],
         "resolved_research_inputs": dependency_context["resolved_research_inputs"],
         "selected_step_assets": selected_step_assets,
+        "selected_asset_bindings": selected_asset_bindings,
         "selected_image_inputs": state.get("selected_image_inputs") or [],
         "attachments": non_pptx_attachments,
         "available_artifacts": state.get("artifacts", {}),
@@ -159,7 +225,10 @@ async def writer_node(state: State, config: RunnableConfig) -> Command[Literal["
         stream_config["run_name"] = "writer"
 
         full_text = ""
-        async for chunk in llm.astream(messages, config=stream_config):
+        async for chunk in astream_with_retry(
+            lambda: llm.astream(messages, config=stream_config),
+            operation_name="writer.astream",
+        ):
             if not getattr(chunk, "content", None):
                 continue
             _, text = split_content_parts(chunk.content)
@@ -178,6 +247,50 @@ async def writer_node(state: State, config: RunnableConfig) -> Command[Literal["
                 config=stream_config,
                 repair_hint=f"Schema: {schema.__name__}. No extra text.",
             )
+
+        if (
+            state.get("product_type") == "slide"
+            and mode == "slide_outline"
+            and isinstance(writer_output, WriterSlideOutlineOutput)
+        ):
+            density_issues = _slide_outline_density_issues(writer_output)
+            if density_issues:
+                logger.warning(
+                    "Writer slide_outline density gate triggered. Retrying once. issues=%s",
+                    density_issues,
+                )
+                quality_gate_payload = {
+                    "quality_gate": "slide_information_density",
+                    "issues": density_issues,
+                    "required_actions": [
+                        "非タイトルスライドの bullet_points を3〜6項目にする",
+                        "各非タイトルスライドに具体データ（数値・比較軸・単位）を最低1つ含める",
+                        "主張と根拠の対応が分かる description / key_message にする",
+                    ],
+                }
+                try:
+                    repaired_output = await run_structured_output(
+                        llm=llm,
+                        schema=WriterSlideOutlineOutput,
+                        messages=[
+                            *messages,
+                            HumanMessage(
+                                content=json.dumps(quality_gate_payload, ensure_ascii=False, indent=2),
+                                name="quality_gate",
+                            ),
+                        ],
+                        config=stream_config,
+                        repair_hint="Improve information density for slide_outline while keeping strict JSON schema.",
+                    )
+                    repaired_issues = _slide_outline_density_issues(repaired_output)
+                    if repaired_issues:
+                        logger.warning(
+                            "Writer slide_outline density gate still reports issues after retry: %s",
+                            repaired_issues,
+                        )
+                    writer_output = repaired_output
+                except Exception as quality_error:
+                    logger.warning("Writer density retry failed. Continue with original output: %s", quality_error)
 
         execution_summary = getattr(writer_output, "execution_summary", f"{mode} を生成しました。")
         if mode == "slide_outline" and hasattr(writer_output, "slides"):

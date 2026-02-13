@@ -33,6 +33,7 @@ from src.infrastructure.storage.gcs import upload_to_gcs, download_blob_as_bytes
 from .common import (
     build_worker_error_payload,
     create_worker_response,
+    resolve_asset_bindings_for_step,
     resolve_step_dependency_context,
     resolve_selected_assets_for_step,
     run_structured_output,
@@ -65,6 +66,8 @@ ASPECT_RATIO_HINTS = {
     "9:16": ("9:16", "縦長", "vertical"),
 }
 MAX_VISUAL_REFERENCES_PER_UNIT = 3
+MAX_MANDATORY_CHARACTER_SHEET_REFERENCES = 4
+CHARACTER_PROMPT_HEADER_PATTERN = re.compile(r"^\s*#Character\d+\b", re.IGNORECASE)
 
 
 class VisualAssetUnitSelection(BaseModel):
@@ -106,6 +109,52 @@ def _asset_summary(asset: dict[str, Any]) -> dict[str, Any]:
         "producer_capability": asset.get("producer_capability"),
         "producer_mode": asset.get("producer_mode"),
     }
+
+
+def _order_assets_with_bindings(
+    assets: list[dict[str, Any]],
+    bindings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not assets or not bindings:
+        return assets
+
+    role_priority = [
+        "layout_reference",
+        "style_reference",
+        "character_reference",
+        "reference_image",
+        "base_image",
+        "mask_image",
+    ]
+    priority_index = {role: idx for idx, role in enumerate(role_priority)}
+    by_id = {
+        str(asset.get("asset_id")): asset
+        for asset in assets
+        if isinstance(asset, dict) and isinstance(asset.get("asset_id"), str)
+    }
+    ordered_ids: list[str] = []
+    rows = sorted(
+        [row for row in bindings if isinstance(row, dict) and isinstance(row.get("role"), str)],
+        key=lambda row: priority_index.get(str(row.get("role")), 999),
+    )
+    for row in rows:
+        asset_ids = row.get("asset_ids")
+        if not isinstance(asset_ids, list):
+            continue
+        for asset_id in asset_ids:
+            if not isinstance(asset_id, str):
+                continue
+            if asset_id in by_id and asset_id not in ordered_ids:
+                ordered_ids.append(asset_id)
+
+    ordered_assets = [by_id[asset_id] for asset_id in ordered_ids if asset_id in by_id]
+    seen_ids = set(ordered_ids)
+    for asset in assets:
+        asset_id = asset.get("asset_id")
+        if isinstance(asset_id, str) and asset_id in seen_ids:
+            continue
+        ordered_assets.append(asset)
+    return ordered_assets
 
 
 async def _plan_visual_asset_usage(
@@ -279,6 +328,44 @@ def _find_latest_character_sheet(artifacts: dict[str, Any]) -> dict[str, Any] | 
     return None
 
 
+def _is_character_sheet_prompt_payload(prompt_payload: dict[str, Any]) -> bool:
+    for key in ("compiled_prompt", "image_generation_prompt", "prompt_text"):
+        value = prompt_payload.get(key)
+        if isinstance(value, str) and CHARACTER_PROMPT_HEADER_PATTERN.search(value):
+            return True
+    return False
+
+
+def _extract_generated_image_urls(prompts: Any) -> list[str]:
+    if not isinstance(prompts, list):
+        return []
+    urls: list[str] = []
+    for row in prompts:
+        if not isinstance(row, dict):
+            continue
+        url = row.get("generated_image_url")
+        if not isinstance(url, str):
+            continue
+        normalized = url.strip()
+        if normalized and normalized not in urls:
+            urls.append(normalized)
+    return urls
+
+
+def _find_latest_character_sheet_render_urls(artifacts: dict[str, Any]) -> list[str]:
+    candidates = _collect_artifacts_by_suffix(artifacts, "_visual")
+    for _, _, data in reversed(candidates):
+        prompts = data.get("prompts")
+        if not isinstance(prompts, list):
+            continue
+        if not any(isinstance(row, dict) and _is_character_sheet_prompt_payload(row) for row in prompts):
+            continue
+        urls = _extract_generated_image_urls(prompts)
+        if urls:
+            return urls
+    return []
+
+
 def _default_visualizer_mode(product_type: str | None) -> str:
     if product_type == "comic":
         return "comic_page_render"
@@ -331,6 +418,9 @@ def _writer_output_to_slides(writer_data: dict, mode: str) -> list[dict]:
         return []
 
     if mode == "slide_render" and isinstance(writer_data.get("slides"), list):
+        return writer_data.get("slides", [])
+
+    if mode == "document_layout_render" and isinstance(writer_data.get("slides"), list):
         return writer_data.get("slides", [])
 
     if mode == "slide_render" and isinstance(writer_data.get("blocks"), list):
@@ -565,14 +655,13 @@ def _build_comic_page_prompt_text(
     slide_number: int,
     slide_content: dict[str, Any],
     writer_data: dict[str, Any],
-    aspect_ratio: str,
+    character_sheet_data: dict[str, Any] | None = None,
     assigned_assets: list[dict[str, Any]] | None = None,
 ) -> str:
     page = _find_comic_page_payload(writer_data, slide_number)
     lines: list[str] = [
         f"#Page{slide_number}",
         "Mode: comic_page_render",
-        f"Aspect ratio: {aspect_ratio}",
         "",
     ]
 
@@ -586,7 +675,44 @@ def _build_comic_page_prompt_text(
 
     if not page_goal:
         page_goal = _text_or_default(slide_content.get("description"), "未指定")
-    lines.extend(["[Page Goal]", page_goal, "", "[Panels]"])
+    lines.extend(["[Page Goal]", page_goal])
+
+    character_rows = (
+        character_sheet_data.get("characters")
+        if isinstance(character_sheet_data, dict)
+        else None
+    )
+    if isinstance(character_rows, list) and character_rows:
+        lines.extend(["", "[Character Sheet Anchors]"])
+        for idx, item in enumerate(character_rows[:8], start=1):
+            if not isinstance(item, dict):
+                continue
+            name = _text_or_default(item.get("name"), f"Character {idx}")
+            role = _text_or_default(item.get("story_role") or item.get("role"), "未指定")
+            lines.append(f"- {name} ({role})")
+            lines.append(f"  - Face/Hair anchors: {_text_or_default(item.get('face_hair_anchors'))}")
+            lines.append(f"  - Costume anchors: {_text_or_default(item.get('costume_anchors'))}")
+            lines.append(f"  - Silhouette signature: {_text_or_default(item.get('silhouette_signature'))}")
+
+            palette = item.get("color_palette")
+            if isinstance(palette, dict):
+                palette_items = [
+                    f"{key}={value.strip()}"
+                    for key in ("main", "sub", "accent")
+                    if isinstance((value := palette.get(key)), str) and value.strip()
+                ]
+                if palette_items:
+                    lines.append("  - Color palette: " + ", ".join(palette_items))
+
+            signature_items = _string_list(item.get("signature_items"))
+            if signature_items:
+                lines.append("  - Signature items: " + ", ".join(signature_items[:6]))
+
+            forbidden_drift = _string_list(item.get("forbidden_drift"))
+            if forbidden_drift:
+                lines.append("  - Forbidden drift: " + ", ".join(forbidden_drift[:6]))
+
+    lines.extend(["", "[Panels]"])
 
     if not panels:
         for bullet in _string_list(slide_content.get("bullet_points"))[:5]:
@@ -642,7 +768,6 @@ def _build_character_sheet_prompt_text(
     slide_content: dict[str, Any],
     writer_data: dict[str, Any],
     story_framework_data: dict[str, Any],
-    aspect_ratio: str,
     layout_template_enabled: bool,
     assigned_assets: list[dict[str, Any]] | None = None,
 ) -> str:
@@ -662,7 +787,6 @@ def _build_character_sheet_prompt_text(
     lines: list[str] = [
         f"#Character{slide_number}",
         "Mode: character_sheet_render",
-        f"Aspect ratio: {aspect_ratio}",
         "",
         "[Character]",
         f"- Name: {_text_or_default(character_profile.get('name'))}",
@@ -739,7 +863,7 @@ def _build_mechanical_comic_prompt_item(
     slide_content: dict[str, Any],
     writer_data: dict[str, Any],
     story_framework_data: dict[str, Any],
-    aspect_ratio: str,
+    character_sheet_data: dict[str, Any] | None = None,
     layout_template_enabled: bool,
     assigned_assets: list[dict[str, Any]] | None = None,
 ) -> ImagePrompt:
@@ -749,7 +873,6 @@ def _build_mechanical_comic_prompt_item(
             slide_content=slide_content,
             writer_data=writer_data,
             story_framework_data=story_framework_data,
-            aspect_ratio=aspect_ratio,
             layout_template_enabled=layout_template_enabled,
             assigned_assets=assigned_assets,
         )
@@ -758,7 +881,7 @@ def _build_mechanical_comic_prompt_item(
             slide_number=slide_number,
             slide_content=slide_content,
             writer_data=writer_data,
-            aspect_ratio=aspect_ratio,
+            character_sheet_data=character_sheet_data,
             assigned_assets=assigned_assets,
         )
 
@@ -834,15 +957,22 @@ def compile_structured_prompt(
     prompt_lines.append(f"Visual style: {structured.visual_style}")
 
     # Text rendering policy
-    prompt_lines.append(f"Text policy: {structured.text_policy}")
-    if structured.text_policy == "render_all_text":
+    is_slide_or_design_mode = normalized_mode in {"slide_render", "document_layout_render"}
+    if is_slide_or_design_mode and structured.text_policy == "render_all_text":
+        # Keep default behavior without exposing the explicit policy label in slide/design prompts.
         prompt_lines.append(
             "Render all provided text (title, subtitle, and contents) in-image without omission."
         )
-    elif structured.text_policy == "render_title_only":
-        prompt_lines.append("Render title/subtitle only. Keep body text out of image.")
     else:
-        prompt_lines.append("Do not render text in the image.")
+        prompt_lines.append(f"Text policy: {structured.text_policy}")
+        if structured.text_policy == "render_all_text":
+            prompt_lines.append(
+                "Render all provided text (title, subtitle, and contents) in-image without omission."
+            )
+        elif structured.text_policy == "render_title_only":
+            prompt_lines.append("Render title/subtitle only. Keep body text out of image.")
+        else:
+            prompt_lines.append("Do not render text in the image.")
 
     # Negative constraints
     if structured.negative_constraints:
@@ -1094,7 +1224,11 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
     )
     aspect_ratio = _resolve_aspect_ratio(mode, current_step, state.get("aspect_ratio"))
     artifacts = state.get("artifacts", {}) or {}
-    selected_step_assets = resolve_selected_assets_for_step(state, current_step.get("id"))
+    selected_asset_bindings = resolve_asset_bindings_for_step(state, current_step.get("id"))
+    selected_step_assets = _order_assets_with_bindings(
+        resolve_selected_assets_for_step(state, current_step.get("id")),
+        selected_asset_bindings,
+    )
     selected_image_inputs = state.get("selected_image_inputs") or []
     attachments = [
         item
@@ -1118,9 +1252,37 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
 
     story_framework_data = _find_latest_story_framework(artifacts) or {}
     character_sheet_data = _find_latest_character_sheet(artifacts) or {}
+    character_sheet_reference_urls = _find_latest_character_sheet_render_urls(artifacts)
     writer_data = _get_latest_artifact_by_suffix("_story") or {}
     if mode == "character_sheet_render" and character_sheet_data:
         writer_data = character_sheet_data
+
+    if mode == "comic_page_render":
+        characters = character_sheet_data.get("characters") if isinstance(character_sheet_data, dict) else None
+        if not isinstance(characters, list) or len(characters) == 0:
+            logger.error("comic_page_render requires writer character_sheet output but none was found.")
+            result_summary = "Error: Character sheet is required for comic page rendering."
+            state["plan"][step_index]["result_summary"] = result_summary
+            content_json = build_worker_error_payload(
+                error_text="Character sheet is required for comic page rendering.",
+                failed_checks=["worker_execution", "missing_dependency"],
+                notes="writer character_sheet artifact missing",
+            )
+            return create_worker_response(
+                role="visualizer",
+                content_json=content_json,
+                result_summary=result_summary,
+                current_step_id=current_step["id"],
+                state=state,
+                artifact_key_suffix="visual",
+                artifact_title="Visual Assets",
+                artifact_icon="AlertTriangle",
+                artifact_preview_urls=[],
+                is_error=True,
+            )
+        if not character_sheet_reference_urls:
+            logger.warning("comic_page_render is running without character sheet rendered images. Text anchors only.")
+
     writer_slides = _writer_output_to_slides(writer_data, mode)
     data_analyst_data = _get_latest_artifact_by_suffix("_data")
 
@@ -1147,11 +1309,18 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         )
 
     previous_generations: list[dict] = []
-    for key, json_str in artifacts.items():
-        if key.endswith("_visual"):
-            data = _safe_json_loads(json_str)
-            if isinstance(data, dict) and "prompts" in data:
-                previous_generations.extend(data["prompts"])
+    for dependency in dependency_context.get("resolved_dependency_artifacts", []):
+        if not isinstance(dependency, dict):
+            continue
+        if str(dependency.get("producer_capability") or "") != "visualizer":
+            continue
+        dependency_content = _safe_json_loads(dependency.get("content"))
+        prompts = dependency_content.get("prompts") if isinstance(dependency_content, dict) else None
+        if not isinstance(prompts, list):
+            continue
+        for item in prompts:
+            if isinstance(item, dict):
+                previous_generations.append(item)
 
     # Plan context (LLM decides order/inputs)
     plan_context = {
@@ -1164,12 +1333,13 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         "resolved_research_inputs": dependency_context["resolved_research_inputs"],
         "design_direction": design_dir,
         "selected_step_assets": [_asset_summary(asset) for asset in selected_step_assets[:20]],
+        "selected_asset_bindings": selected_asset_bindings,
         "selected_image_inputs": selected_image_inputs,
         "attachments": attachments,
         "writer_output": writer_data,
         "writer_slides": writer_slides,
-        "story_framework": story_framework_data if mode == "character_sheet_render" else None,
-        "character_sheet": character_sheet_data if mode == "character_sheet_render" else None,
+        "story_framework": story_framework_data if mode in {"character_sheet_render", "comic_page_render"} else None,
+        "character_sheet": character_sheet_data if mode in {"character_sheet_render", "comic_page_render"} else None,
         "data_analyst": data_analyst_data,
         "previous_generations": previous_generations or None,
         "layout_template_id": CHARACTER_SHEET_TEMPLATE_ID if mode == "character_sheet_render" else None,
@@ -1282,6 +1452,37 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                 for asset_id in assigned_asset_ids
                 if isinstance(asset_id, str) and asset_id in selected_assets_by_id
             ]
+            if mode == "comic_page_render" and character_sheet_reference_urls:
+                mandatory_assets = [
+                    {
+                        "asset_id": f"character_sheet_ref:{idx}",
+                        "uri": uri,
+                        "title": f"character_sheet_{idx}",
+                        "label": "character_sheet_reference",
+                        "source_type": "dependency_artifact",
+                        "producer_mode": "character_sheet_render",
+                        "is_image": True,
+                    }
+                    for idx, uri in enumerate(
+                        character_sheet_reference_urls[:MAX_MANDATORY_CHARACTER_SHEET_REFERENCES],
+                        start=1,
+                    )
+                    if isinstance(uri, str) and uri.strip()
+                ]
+            else:
+                mandatory_assets = []
+
+            assigned_by_uri = {
+                str(asset.get("uri")): asset
+                for asset in assigned_assets
+                if isinstance(asset, dict) and isinstance(asset.get("uri"), str) and str(asset.get("uri")).strip()
+            }
+            for mandatory_asset in mandatory_assets:
+                uri = str(mandatory_asset.get("uri") or "").strip()
+                if uri and uri not in assigned_by_uri:
+                    assigned_assets.append(mandatory_asset)
+                    assigned_by_uri[uri] = mandatory_asset
+
             assigned_asset_summaries = [_asset_summary(asset) for asset in assigned_assets]
             if mode in {"comic_page_render", "character_sheet_render"}:
                 prompt_item = _build_mechanical_comic_prompt_item(
@@ -1290,7 +1491,7 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                     slide_content=slide_content,
                     writer_data=writer_data,
                     story_framework_data=story_framework_data,
-                    aspect_ratio=aspect_ratio,
+                    character_sheet_data=character_sheet_data if mode == "comic_page_render" else None,
                     layout_template_enabled=use_local_character_sheet_template,
                     assigned_assets=assigned_assets,
                 )
@@ -1305,12 +1506,12 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                     "writer_slide": slide_content,
                     "character_profile": slide_content.get("character_profile") if isinstance(slide_content, dict) else None,
                     "design_direction": design_dir,
-                    "aspect_ratio": aspect_ratio,
-                    "story_framework": story_framework_data if mode == "character_sheet_render" else None,
-                    "character_sheet": character_sheet_data if mode == "character_sheet_render" else None,
+                    "story_framework": story_framework_data if mode in {"character_sheet_render", "comic_page_render"} else None,
+                    "character_sheet": character_sheet_data if mode in {"character_sheet_render", "comic_page_render"} else None,
                     "data_analyst": data_analyst_data,
                     "attachments": attachments,
                     "selected_step_assets": [_asset_summary(asset) for asset in selected_step_assets[:20]],
+                    "selected_asset_bindings": selected_asset_bindings,
                     "assigned_asset_ids": assigned_asset_ids,
                     "assigned_assets": assigned_asset_summaries,
                     "selected_inputs": [
@@ -1339,7 +1540,10 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                     "previous_generations": previous_generations or None
                 }
 
-                prompt_state = {"messages": []}
+                prompt_state = {
+                    "messages": [],
+                    "product_type": state.get("product_type"),
+                }
                 prompt_messages = apply_prompt_template("visualizer_prompt", prompt_state)
                 prompt_messages.append(
                     HumanMessage(
@@ -1537,7 +1741,7 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
             prompts=updated_prompts,
             generation_config=GenerationConfig(
                 thinking_level="high",
-                media_resolution="high",
+                media_resolution="medium",
                 aspect_ratio=aspect_ratio,
             )
         )

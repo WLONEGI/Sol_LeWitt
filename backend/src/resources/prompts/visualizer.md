@@ -154,7 +154,7 @@ Return a valid JSON object matching `VisualizerOutput` schema:
   ],
   "generation_config": {
     "thinking_level": "high",
-    "media_resolution": "high",
+    "media_resolution": "medium",
     "aspect_ratio": "16:9"
   }
 }

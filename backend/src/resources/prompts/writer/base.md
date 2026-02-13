@@ -30,12 +30,12 @@ You receive a JSON context from supervisor:
 
 # Product-type JSON switch (must follow)
 - `product_type=slide`: only `slide_outline` or `infographic_spec` schema.
-- `product_type=design`: only `document_blueprint` schema.
+- `product_type=design`: only `slide_outline` schema (design専用プロンプトに従う自由構成).
 - `product_type=comic`: only `story_framework`, `character_sheet`, `comic_script` schema.
 - If mode and product_type conflict, prioritize product_type-compatible schema.
 
 # Unknown mode
 If mode is unknown, follow product default:
 - `slide` -> `slide_outline`
-- `design` -> `document_blueprint`
+- `design` -> `slide_outline`
 - `comic` -> `story_framework`

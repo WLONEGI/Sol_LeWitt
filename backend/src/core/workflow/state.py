@@ -20,6 +20,7 @@ class TaskStep(TypedDict, total=False):
     success_criteria: list[str]
     fallback: list[str]
     depends_on: list[int]
+    asset_requirements: list["AssetRequirement"]
     target_scope: "TargetScope"
     status: "TaskStatus"
     result_summary: str | None
@@ -28,6 +29,7 @@ class TaskStep(TypedDict, total=False):
 
 ProductType = Literal["slide", "design", "comic"]
 IntentType = Literal["new", "refine", "regenerate"]
+PlanningMode = Literal["create", "update"]
 TaskCapability = Literal["writer", "visualizer", "researcher", "data_analyst"]
 TaskStatus = Literal["pending", "in_progress", "completed", "blocked"]
 
@@ -53,6 +55,7 @@ class OrchestrationTaskStep(TypedDict, total=False):
     description: str
     inputs: list[str]
     success_criteria: list[str]
+    asset_requirements: list["AssetRequirement"]
     target_scope: TargetScope
     status: TaskStatus
     result_summary: str | None
@@ -80,6 +83,24 @@ class QualityReport(TypedDict, total=False):
     score: float | None
     failed_checks: list[str]
     notes: str | None
+
+
+class AssetRequirement(TypedDict, total=False):
+    """Planner-declared abstract asset requirement."""
+    role: str
+    required: bool
+    scope: Literal["global", "per_unit"]
+    mime_allow: list[str]
+    source_preference: list[str]
+    max_items: int
+    instruction: str | None
+
+
+class AssetBinding(TypedDict, total=False):
+    """Resolved binding from requirement role to concrete asset IDs."""
+    role: str
+    asset_ids: list[str]
+    reason: str | None
 
 
 class AssetUnitLedgerEntry(TypedDict, total=False):
@@ -127,26 +148,24 @@ class State(MessagesState):
     # Runtime Variables
     plan: list[TaskStep]
     artifacts: Annotated[dict[str, Any], merge_artifacts]  # Store outputs from workers (text, charts, etc.)
-    summary: str | None  # Compact summary of older conversation
     # Orchestration fields
     product_type: NotRequired[ProductType]
     request_intent: NotRequired[IntentType]
+    planning_mode: NotRequired[PlanningMode]
     interrupt_intent: NotRequired[bool]
     target_scope: NotRequired[TargetScope]
     selected_image_inputs: NotRequired[list[dict[str, Any]]]
     attachments: NotRequired[list[dict[str, Any]]]
     pptx_context: NotRequired[dict[str, Any]]
-    pptx_template_base64: NotRequired[str]
     aspect_ratio: NotRequired[str]
     coordinator_followup_options: NotRequired[list[dict[str, str]]]
-    rethink_used_turn: NotRequired[int]
-    rethink_used_by_step: NotRequired[dict[int, int]]
-    task_board: NotRequired[TaskBoard]
-    artifact_graph: NotRequired[list[ArtifactDependencyEdge]]
     quality_reports: NotRequired[dict[int, QualityReport]]
     asset_unit_ledger: NotRequired[dict[str, AssetUnitLedgerEntry]]
-    asset_pool: NotRequired[dict[str, dict[str, Any]]]
+    # Asset state (single-turn scope)
+    asset_catalog: NotRequired[dict[str, dict[str, Any]]]  # all known assets keyed by asset_id
+    candidate_assets_by_step: NotRequired[dict[str, list[str]]]  # per-step candidate asset ids
     selected_assets_by_step: NotRequired[dict[str, list[str]]]
+    asset_bindings_by_step: NotRequired[dict[str, list[AssetBinding]]]
 
 
 class ResearchSubgraphState(State):

@@ -16,6 +16,7 @@ MAX_IMAGE_GEN_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 1.0
 RETRY_MAX_DELAY_SECONDS = 8.0
 RETRY_JITTER_SECONDS = 0.6
+DEFAULT_IMAGE_SIZE = "1K"
 
 
 def _infer_image_mime_from_uri(uri: str) -> str:
@@ -63,7 +64,7 @@ def _get_client() -> genai.Client:
 def generate_image(
     prompt: str, 
     seed: int | None = None, 
-    reference_image: str | bytes | list[str | bytes] | None = None, 
+    reference_image: str | bytes | dict[str, Any] | list[str | bytes | dict[str, Any]] | None = None, 
     thought_signature: str | None = None, 
     aspect_ratio: str | None = None
 ) -> tuple[bytes, str | None]:
@@ -91,13 +92,30 @@ def generate_image(
         client = _get_client()
 
         contents = [prompt]
-        reference_items: list[str | bytes] = []
+        reference_items: list[str | bytes | dict[str, Any]] = []
         if isinstance(reference_image, list):
-            reference_items = [item for item in reference_image if isinstance(item, (str, bytes))]
-        elif isinstance(reference_image, (str, bytes)):
+            reference_items = [item for item in reference_image if isinstance(item, (str, bytes, dict))]
+        elif isinstance(reference_image, (str, bytes, dict)):
             reference_items = [reference_image]
 
         for ref in reference_items:
+            if isinstance(ref, dict):
+                ref_uri = ref.get("uri")
+                ref_data = ref.get("data")
+                ref_mime = ref.get("mime_type") if isinstance(ref.get("mime_type"), str) else None
+                if isinstance(ref_uri, str) and ref_uri.startswith("gs://"):
+                    contents.append(types.Part.from_uri(uri=ref_uri, mime_type=ref_mime or _infer_image_mime_from_uri(ref_uri)))
+                    continue
+                if isinstance(ref_data, (bytes, bytearray)):
+                    contents.append(types.Part.from_bytes(data=bytes(ref_data), mime_type=ref_mime or "image/png"))
+                    continue
+                if isinstance(ref_uri, str):
+                    logger.warning(f"Reference image dict uri is not GCS URI. Fallback to text URL: {ref_uri}")
+                    contents.append(ref_uri)
+                    continue
+                logger.warning("Reference image dict is invalid and will be ignored.")
+                continue
+
             if isinstance(ref, str) and ref.startswith("gs://"):
                 contents.append(types.Part.from_uri(uri=ref, mime_type=_infer_image_mime_from_uri(ref)))
             elif isinstance(ref, bytes):
@@ -107,17 +125,15 @@ def generate_image(
                 logger.warning(f"Reference image provided is not GCS URI. Fallback to text URL: {ref}")
                 contents.append(ref)
 
-        # Configure generation capabilities
-        image_config = None
-        if aspect_ratio:
-            image_config = types.ImageConfig(
-                aspect_ratio=aspect_ratio,
-                image_size="2K" # Defaulting to 2K as per user snippet
-            )
+        # Configure generation capabilities (always generate in 1K).
+        image_config = types.ImageConfig(
+            image_size=DEFAULT_IMAGE_SIZE,
+            aspect_ratio=aspect_ratio if aspect_ratio else None,
+        )
             
         config = types.GenerateContentConfig(
             response_modalities=['IMAGE'],
-            image_config=image_config if image_config else None
+            image_config=image_config
         )
 
         response = None
@@ -233,5 +249,3 @@ async def send_message_for_image_async(chat, prompt: str, reference_image: str |
         reference_image=reference_image
     )
     return result[0]
-
-

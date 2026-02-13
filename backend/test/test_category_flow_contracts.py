@@ -130,7 +130,7 @@ def test_category_fixed_flow_snapshot_contracts(
                     ],
                     "generation_config": {
                         "thinking_level": "high",
-                        "media_resolution": "high",
+                        "media_resolution": "medium",
                         "aspect_ratio": "16:9",
                     },
                 },

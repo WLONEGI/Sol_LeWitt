@@ -11,6 +11,7 @@ from .outputs import (
     TaskCapability,
     TaskStatus,
     TargetScope,
+    AssetRequirement,
     TaskStep,
     PlannerOutput,
     SlideContent,
@@ -47,6 +48,7 @@ __all__ = [
     "TaskCapability",
     "TaskStatus",
     "TargetScope",
+    "AssetRequirement",
     # Outputs
     "TaskStep",
 

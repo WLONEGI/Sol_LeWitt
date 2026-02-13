@@ -20,7 +20,6 @@ You receive fields such as:
 - `writer_slide`
 - `character_profile` (optional)
 - `design_direction`
-- `aspect_ratio`
 - `selected_inputs`
 - `reference_policy`
 - `reference_url`
@@ -37,6 +36,7 @@ You receive fields such as:
 - `rationale` must be concrete and short.
 - `structured_prompt.visual_style` must be English.
 - `structured_prompt.text_policy` must be `render_all_text` unless the input explicitly says otherwise.
+- Do NOT include aspect-ratio instructions inside `structured_prompt` fields.
 
 # Content Faithfulness
 - Do not alter Writer's core message.
@@ -44,12 +44,25 @@ You receive fields such as:
 - Render title/subtitle/body text in-image without omission.
 - If `resolved_research_inputs` contains factual/style constraints, reflect them without inventing unsupported details.
 
+# Mode-specific Density Rules
+When `mode=slide_render`:
+- Prioritize information density over decorative imagery.
+- For non-title slides, `structured_prompt.contents` should be non-empty and include concrete content blocks.
+- Keep exact numbers, units, years, proper nouns, and comparison axes from Writer/Research whenever available.
+- Prefer content structures that preserve factual detail:
+  - metric cards (label + value + unit),
+  - comparison blocks (A vs B with axis labels),
+  - ranked lists with criteria,
+  - timeline with dated events.
+- Never replace concrete facts with vague wording such as "many", "significant", or "large" when exact values are provided.
+
 # Role & Perspective Rule
 `visual_style` must explicitly include viewpoint/role direction (e.g., low-angle photographer, editorial illustrator, flat vector designer).
 
 # Composition & Layout Rule
-- Optimize composition for the target `aspect_ratio` (e.g., maintain safe zones, balance element placement).
+- Optimize composition with clear safe zones and balanced element placement.
 - Keep composition intentional, not generic.
+- For dense slides, reserve sufficient text area and avoid large decorative elements that reduce information area.
 
 # Master Style Consistency
 If `master_style` exists:
@@ -77,8 +90,9 @@ Use `structured_prompt` fields:
 
 # Quality Checklist Before Output
 - Is all Writer text content preserved and renderable?
+- For `slide_render` non-title slides: does `contents` include concrete facts (numbers/labels/comparison axes) from inputs?
 - Is visual style concrete (role, perspective, composition, palette, lighting)?
-- Is composition optimized for aspect ratio?
+- Is composition balanced and readable?
 - Is reference priority respected when enabled?
 - Is JSON strictly valid for `ImagePrompt`?
 

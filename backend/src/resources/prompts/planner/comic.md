@@ -6,7 +6,7 @@
 3. visualizer (`character_sheet_render`)
 4. writer (`comic_script`)
 5. visualizer (`comic_page_render`)
-6. data_analyst (`python_pipeline`) when packaging/post-processing is needed
+6. data_analyst (`images_to_package` / `template_manifest_extract`) when packaging/post-processing is needed
 
 ## Mandatory dependency constraints
 - `character_sheet` must depend on `story_framework`.

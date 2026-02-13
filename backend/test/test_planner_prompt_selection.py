@@ -8,9 +8,13 @@ def _render_planner_prompt(product_type: str) -> str:
         "messages": [HumanMessage(content="テスト")],
         "product_type": product_type,
         "request_intent": "new",
-        "planning_mode": "initial",
+        "planning_mode": "create",
         "latest_user_text": "テスト",
         "plan": "[]",
+        "plan_execution_snapshot": "{\"total\":0,\"pending\":0,\"in_progress\":0,\"completed\":0,\"blocked\":0}",
+        "unfinished_steps": "[]",
+        "target_scope": "{}",
+        "interrupt_intent": "false",
     }
     messages = apply_prompt_template("planner", state)
     assert isinstance(messages[0], SystemMessage)
@@ -33,3 +37,9 @@ def test_planner_prompt_loads_comic_specific_rules() -> None:
     prompt = _render_planner_prompt("comic")
     assert "Product Guidance: comic" in prompt
     assert "`character_sheet_render` must depend on `character_sheet`." in prompt
+
+
+def test_planner_prompt_contains_single_turn_create_policy() -> None:
+    prompt = _render_planner_prompt("slide")
+    assert "Planning Policy (Important)" in prompt
+    assert "`planning_mode` is always `create`." in prompt

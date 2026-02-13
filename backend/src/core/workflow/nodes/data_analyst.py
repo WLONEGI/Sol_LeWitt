@@ -6,37 +6,36 @@ import uuid
 import asyncio
 import mimetypes
 import tempfile
+import inspect
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.callbacks.manager import adispatch_custom_event
 from langgraph.types import Command
 
-from src.shared.config import AGENT_LLM_MAP
-from src.infrastructure.llm.llm import get_llm_by_type
-from src.resources.prompts.template import apply_prompt_template
 from src.shared.schemas import DataAnalystOutput
 from src.core.workflow.state import State
 from src.infrastructure.storage.gcs import download_blob_as_bytes, upload_to_gcs
 from .common import (
     create_worker_response,
-    extract_first_json,
+    resolve_asset_bindings_for_step,
+    resolve_step_dependency_context,
     resolve_selected_assets_for_step,
-    split_content_parts,
 )
 from langchain_core.runnables import RunnableConfig
 from src.core.tools import (
-    bash_tool,
     package_visual_assets_tool,
-    python_repl_tool,
     render_pptx_master_images_tool,
 )
 
 logger = logging.getLogger(__name__)
-MAX_DATA_ANALYST_ROUNDS = 3
-VALID_DATA_ANALYST_MODES = {"python_pipeline"}
+VALID_DATA_ANALYST_MODES = {
+    "pptx_master_to_images",
+    "pptx_slides_to_images",
+    "images_to_package",
+    "template_manifest_extract",
+}
 STANDARD_FAILED_CHECKS = {
     "worker_execution",
     "tool_execution",
@@ -48,10 +47,46 @@ STANDARD_FAILED_CHECKS = {
 
 
 def _resolve_data_analyst_mode(step: dict) -> str:
-    mode = str(step.get("mode") or "").strip()
+    mode = str(step.get("mode") or "").strip().lower()
     if mode in VALID_DATA_ANALYST_MODES:
         return mode
-    return "python_pipeline"
+
+    # Legacy compatibility: infer deterministic mode from instruction text.
+    instruction = str(step.get("instruction") or "").lower()
+    if any(token in instruction for token in ("zip", "pdf", "pptx化", "パッケージ", "書き出し")):
+        return "images_to_package"
+    if "マスター" in instruction or "master" in instruction:
+        return "pptx_master_to_images"
+    if "スライド" in instruction or "content" in instruction:
+        return "pptx_slides_to_images"
+    return "template_manifest_extract"
+
+
+def _collect_assets_from_bindings_by_roles(
+    bindings: list[dict[str, Any]],
+    roles: set[str],
+) -> list[dict[str, Any]]:
+    collected: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            continue
+        role = binding.get("role")
+        if not isinstance(role, str) or role not in roles:
+            continue
+        assets = binding.get("assets")
+        if not isinstance(assets, list):
+            continue
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            asset_id = asset.get("asset_id")
+            if isinstance(asset_id, str) and asset_id in seen_ids:
+                continue
+            if isinstance(asset_id, str):
+                seen_ids.add(asset_id)
+            collected.append(asset)
+    return collected
 
 
 def _data_analyst_failed_checks(
@@ -273,6 +308,28 @@ def _sanitize_filename(title: str) -> str:
     safe = re.sub(r"\s+", " ", safe)
     return safe or "Untitled"
 
+
+def _extract_tool_source_code(tool_obj: Any) -> str:
+    tool_func = getattr(tool_obj, "func", None)
+    if not callable(tool_func):
+        return ""
+    try:
+        return inspect.getsource(tool_func).strip()
+    except Exception:
+        return ""
+
+
+def _build_tool_implementation_code(tool_obj: Any, call_expression: str) -> str:
+    source = _extract_tool_source_code(tool_obj)
+    if not source:
+        return call_expression
+    return (
+        "# Tool Invocation\n"
+        f"{call_expression}\n\n"
+        "# Tool Source\n"
+        f"{source}"
+    )
+
 async def _get_thread_title(thread_id: str | None, owner_uid: str | None) -> str | None:
     if not thread_id or not owner_uid:
         return None
@@ -304,41 +361,16 @@ def _extract_preview_urls(result: DataAnalystOutput | None) -> list[str]:
         return []
     urls: list[str] = []
     for item in result.output_files:
-        if _is_image_output(item.url, item.mime_type):
-            urls.append(item.url)
+        if isinstance(item, dict):
+            url = str(item.get("url") or "")
+            mime_type = item.get("mime_type") if isinstance(item.get("mime_type"), str) else None
+        else:
+            url = str(getattr(item, "url", "") or "")
+            raw_mime = getattr(item, "mime_type", None)
+            mime_type = raw_mime if isinstance(raw_mime, str) else None
+        if _is_image_output(url, mime_type):
+            urls.append(url)
     return urls
-
-def _extract_python_code(tool_args: object) -> str:
-    if isinstance(tool_args, dict):
-        for key in ("query", "code", "input"):
-            value = tool_args.get(key)
-            if isinstance(value, str):
-                return value
-        try:
-            return json.dumps(tool_args, ensure_ascii=False)
-        except Exception:
-            return str(tool_args)
-    if isinstance(tool_args, str):
-        return tool_args
-    return str(tool_args)
-
-async def _dispatch_text_delta(
-    event_name: str,
-    artifact_id: str,
-    text: str,
-    config: RunnableConfig,
-    chunk_size: int = 200
-) -> None:
-    if not text:
-        return
-    for idx in range(0, len(text), chunk_size):
-        chunk = text[idx:idx + chunk_size]
-        await adispatch_custom_event(
-            event_name,
-            {"artifact_id": artifact_id, "delta": chunk},
-            config=config
-        )
-
 
 def _is_remote_url(value: str) -> bool:
     if not isinstance(value, str):
@@ -380,6 +412,69 @@ def _collect_file_urls(value: object, output: set[str]) -> None:
     if isinstance(value, dict):
         for nested in value.values():
             _collect_file_urls(nested, output)
+
+
+def _extract_visualizer_generated_image_urls(dependency_context: dict[str, Any]) -> list[str]:
+    raw_dependencies = (dependency_context or {}).get("resolved_dependency_artifacts")
+    if not isinstance(raw_dependencies, list):
+        return []
+
+    ranked_urls: list[tuple[int, str]] = []
+    seen: set[str] = set()
+
+    for item in raw_dependencies:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("producer_capability") or "") != "visualizer":
+            continue
+
+        content = item.get("content")
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except Exception:
+                continue
+        if not isinstance(content, dict):
+            continue
+
+        prompts = content.get("prompts")
+        if isinstance(prompts, list):
+            for prompt in prompts:
+                if not isinstance(prompt, dict):
+                    continue
+                url = prompt.get("generated_image_url")
+                slide_number = prompt.get("slide_number")
+                if not isinstance(url, str) or not url.strip():
+                    continue
+                if not _looks_like_file_url(url):
+                    continue
+                normalized = url.strip()
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                rank = slide_number if isinstance(slide_number, int) and slide_number > 0 else 10**9
+                ranked_urls.append((rank, normalized))
+
+        slides = content.get("slides")
+        if isinstance(slides, list):
+            for slide in slides:
+                if not isinstance(slide, dict):
+                    continue
+                url = slide.get("image_url")
+                slide_number = slide.get("slide_number")
+                if not isinstance(url, str) or not url.strip():
+                    continue
+                if not _looks_like_file_url(url):
+                    continue
+                normalized = url.strip()
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                rank = slide_number if isinstance(slide_number, int) and slide_number > 0 else 10**9
+                ranked_urls.append((rank, normalized))
+
+    ranked_urls.sort(key=lambda row: (row[0], row[1]))
+    return [url for _, url in ranked_urls]
 
 
 def _safe_filename_from_url(url: str, index: int) -> str:
@@ -426,17 +521,6 @@ async def _download_input_files(
     return url_to_local, manifest
 
 
-def _replace_urls_with_local_paths(value: object, url_to_local: dict[str, str]) -> object:
-    if isinstance(value, str):
-        stripped = value.strip()
-        return url_to_local.get(stripped, value)
-    if isinstance(value, list):
-        return [_replace_urls_with_local_paths(item, url_to_local) for item in value]
-    if isinstance(value, dict):
-        return {k: _replace_urls_with_local_paths(v, url_to_local) for k, v in value.items()}
-    return value
-
-
 def _resolve_local_file_path(value: str, workspace_dir: str) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -466,14 +550,23 @@ async def _upload_result_files_to_gcs(
 ) -> list[str]:
     upload_trace: list[str] = []
     for item in result.output_files:
-        original_url = item.url
+        original_url = ""
+        mime_type: str | None = None
+        if isinstance(item, dict):
+            original_url = str(item.get("url") or "")
+            mime_type = item.get("mime_type") if isinstance(item.get("mime_type"), str) else None
+        else:
+            original_url = str(getattr(item, "url", "") or "")
+            raw_mime = getattr(item, "mime_type", None)
+            mime_type = raw_mime if isinstance(raw_mime, str) else None
+
         local_path = _resolve_local_file_path(original_url, workspace_dir)
         if not local_path:
             continue
 
         file_name = os.path.basename(local_path)
         object_name = f"{output_prefix}/data_analyst/{file_name}"
-        guessed_type = item.mime_type or mimetypes.guess_type(local_path)[0] or "application/octet-stream"
+        guessed_type = mime_type or mimetypes.guess_type(local_path)[0] or "application/octet-stream"
 
         with open(local_path, "rb") as fp:
             payload = fp.read()
@@ -486,22 +579,246 @@ async def _upload_result_files_to_gcs(
             None,
             object_name,
         )
-        item.url = uploaded_url
-        if not item.mime_type:
-            item.mime_type = guessed_type
+        if isinstance(item, dict):
+            item["url"] = uploaded_url
+            if not isinstance(item.get("mime_type"), str) or not item.get("mime_type"):
+                item["mime_type"] = guessed_type
+        else:
+            setattr(item, "url", uploaded_url)
+            if not isinstance(getattr(item, "mime_type", None), str) or not getattr(item, "mime_type", None):
+                setattr(item, "mime_type", guessed_type)
         upload_trace.append(f"uploaded {original_url} -> {uploaded_url}")
 
     return upload_trace
 
+def _pick_first_local_pptx(local_file_manifest: list[dict[str, str]]) -> str | None:
+    for item in local_file_manifest:
+        local_path = item.get("local_path")
+        if not isinstance(local_path, str):
+            continue
+        if local_path.lower().endswith(".pptx") and os.path.isfile(local_path):
+            return local_path
+    return None
+
+
+def _pick_local_images(
+    local_file_manifest: list[dict[str, str]],
+    preferred_source_urls: list[str] | None = None,
+) -> list[str]:
+    image_exts = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+    by_source_url: dict[str, str] = {}
+    images: list[str] = []
+
+    for item in local_file_manifest:
+        source_url = item.get("source_url")
+        local_path = item.get("local_path")
+        if isinstance(source_url, str) and isinstance(local_path, str):
+            by_source_url[source_url] = local_path
+
+    if isinstance(preferred_source_urls, list) and preferred_source_urls:
+        preferred_images: list[str] = []
+        seen_local_paths: set[str] = set()
+        for source_url in preferred_source_urls:
+            local_path = by_source_url.get(source_url)
+            if not isinstance(local_path, str):
+                continue
+            if local_path in seen_local_paths:
+                continue
+            if not os.path.isfile(local_path):
+                continue
+            if not local_path.lower().endswith(image_exts):
+                continue
+            seen_local_paths.add(local_path)
+            preferred_images.append(local_path)
+        if preferred_images:
+            return preferred_images
+
+    for item in local_file_manifest:
+        local_path = item.get("local_path")
+        if not isinstance(local_path, str):
+            continue
+        if not os.path.isfile(local_path):
+            continue
+        if local_path.lower().endswith(image_exts):
+            images.append(local_path)
+    return images
+
+
+def _build_template_manifest_output(
+    *,
+    pptx_context: Any,
+    local_file_manifest: list[dict[str, str]],
+) -> dict[str, Any]:
+    if isinstance(pptx_context, dict):
+        templates = pptx_context.get("templates")
+        if isinstance(templates, list):
+            return {
+                "template_count": len(templates),
+                "templates": templates,
+            }
+        primary = pptx_context.get("primary")
+        if isinstance(primary, dict):
+            return {
+                "template_count": int(pptx_context.get("template_count") or 1),
+                "templates": [primary],
+            }
+
+    pptx_paths = [item.get("source_url") for item in local_file_manifest if str(item.get("local_path") or "").lower().endswith(".pptx")]
+    return {
+        "template_count": len(pptx_paths),
+        "templates": [{"source_url": url} for url in pptx_paths if isinstance(url, str)],
+    }
+
+
+async def _run_deterministic_data_analyst_mode(
+    *,
+    mode: str,
+    instruction: str,
+    deck_title: str,
+    workspace_dir: str,
+    local_file_manifest: list[dict[str, str]],
+    preferred_image_source_urls: list[str],
+    pptx_context: Any,
+    config: RunnableConfig,
+) -> tuple[DataAnalystOutput, set[str]]:
+    detected_output_paths: set[str] = set()
+
+    if mode in {"pptx_master_to_images", "pptx_slides_to_images"}:
+        pptx_path = _pick_first_local_pptx(local_file_manifest)
+        if not pptx_path:
+            return (
+                DataAnalystOutput(
+                    implementation_code=f"mode={mode}",
+                    execution_log="Error: PPTX input not found.",
+                    output_value=None,
+                    failed_checks=_data_analyst_failed_checks(kind="missing_dependency"),
+                    output_files=[],
+                ),
+                detected_output_paths,
+            )
+
+        output_dir = "outputs/master_images" if mode == "pptx_master_to_images" else "outputs/slide_images"
+        tool_output = await render_pptx_master_images_tool.ainvoke(
+            {
+                "pptx_path": pptx_path,
+                "output_dir": output_dir,
+                "work_dir": workspace_dir,
+            },
+            config=config,
+        )
+        tool_output_text = str(tool_output)
+        detected_output_paths.update(_extract_output_paths_from_tool_output(tool_output_text, workspace_dir))
+        failed_checks = _data_analyst_failed_checks(kind="tool_execution") if tool_output_text.strip().startswith("Error:") else []
+        call_expression = (
+            f"render_pptx_master_images_tool("
+            f"pptx_path={pptx_path!r}, output_dir={output_dir!r})"
+        )
+        return (
+            DataAnalystOutput(
+                implementation_code=_build_tool_implementation_code(
+                    render_pptx_master_images_tool,
+                    call_expression,
+                ),
+                execution_log=tool_output_text,
+                output_value={
+                    "mode": mode,
+                    "instruction": instruction,
+                    "source_pptx": pptx_path,
+                },
+                failed_checks=failed_checks,
+                output_files=[],
+            ),
+            detected_output_paths,
+        )
+
+    if mode == "images_to_package":
+        image_paths = _pick_local_images(
+            local_file_manifest,
+            preferred_source_urls=preferred_image_source_urls,
+        )
+        if not image_paths:
+            return (
+                DataAnalystOutput(
+                    implementation_code="mode=images_to_package",
+                    execution_log="Error: image inputs not found.",
+                    output_value=None,
+                    failed_checks=_data_analyst_failed_checks(kind="missing_dependency"),
+                    output_files=[],
+                ),
+                detected_output_paths,
+            )
+
+        tool_output = await package_visual_assets_tool.ainvoke(
+            {
+                "image_paths": image_paths,
+                "output_basename": _sanitize_filename(deck_title).replace(" ", "_"),
+                "output_dir": "outputs/packaged_assets",
+                "deck_title": deck_title,
+                "work_dir": workspace_dir,
+            },
+            config=config,
+        )
+        tool_output_text = str(tool_output)
+        detected_output_paths.update(_extract_output_paths_from_tool_output(tool_output_text, workspace_dir))
+        failed_checks = _data_analyst_failed_checks(kind="tool_execution") if tool_output_text.strip().startswith("Error:") else []
+        call_expression = (
+            "package_visual_assets_tool("
+            f"image_paths=image_paths,  # {len(image_paths)} files\n"
+            f"    output_basename={_sanitize_filename(deck_title).replace(' ', '_')!r},\n"
+            "    output_dir='outputs/packaged_assets',\n"
+            f"    deck_title={deck_title!r}\n"
+            ")"
+        )
+        return (
+            DataAnalystOutput(
+                implementation_code=_build_tool_implementation_code(
+                    package_visual_assets_tool,
+                    call_expression,
+                ),
+                execution_log=tool_output_text,
+                output_value={
+                    "mode": mode,
+                    "instruction": instruction,
+                    "input_images": len(image_paths),
+                },
+                failed_checks=failed_checks,
+                output_files=[],
+            ),
+            detected_output_paths,
+        )
+
+    if mode == "template_manifest_extract":
+        output_value = _build_template_manifest_output(
+            pptx_context=pptx_context,
+            local_file_manifest=local_file_manifest,
+        )
+        return (
+            DataAnalystOutput(
+                implementation_code="template_manifest_extract",
+                execution_log="Template manifest extracted.",
+                output_value=output_value,
+                failed_checks=[],
+                output_files=[],
+            ),
+            detected_output_paths,
+        )
+
+    return (
+        DataAnalystOutput(
+            implementation_code=f"mode={mode}",
+            execution_log=f"Error: Unsupported data_analyst mode '{mode}'.",
+            output_value=None,
+            failed_checks=_data_analyst_failed_checks(kind="mode_violation"),
+            output_files=[],
+        ),
+        detected_output_paths,
+    )
+
+
 async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Literal["supervisor"]]:
-    """
-    Node for the Data Analyst agent.
-    
-    Uses Code Execution for calculations and proceeds to Supervisor.
-    """
+    """Data Analyst worker node (deterministic mode execution)."""
     logger.info("Data Analyst starting task")
 
-    result: DataAnalystOutput | None = None
     is_error = False
     artifact_preview_urls: list[str] = []
     workspace_dir_obj: tempfile.TemporaryDirectory[str] | None = None
@@ -509,7 +826,7 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
 
     try:
         step_index, current_step = next(
-            (i, step) for i, step in enumerate(state["plan"]) 
+            (i, step) for i, step in enumerate(state["plan"])
             if step.get("status") == "in_progress"
             and step.get("capability") == "data_analyst"
         )
@@ -521,18 +838,12 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     selected_image_inputs = state.get("selected_image_inputs") or []
     attachments = state.get("attachments") or []
     selected_step_assets = resolve_selected_assets_for_step(state, current_step.get("id"))
+    selected_asset_bindings = resolve_asset_bindings_for_step(state, current_step.get("id"))
+    dependency_context = resolve_step_dependency_context(state, current_step)
+    preferred_visualizer_image_urls = _extract_visualizer_generated_image_urls(dependency_context)
     pptx_context = state.get("pptx_context")
     instruction = current_step.get("instruction", "")
     execution_mode = _resolve_data_analyst_mode(current_step)
-    context = (
-        f"Execution Mode: {execution_mode}\n\n"
-        f"Instruction: {instruction}\n\n"
-        f"Available Artifacts: {json.dumps(artifacts, default=str)}\n\n"
-        f"Selected Step Assets: {json.dumps(selected_step_assets, ensure_ascii=False, default=str)}\n\n"
-        f"Selected Image Inputs: {json.dumps(selected_image_inputs, ensure_ascii=False, default=str)}\n\n"
-        f"Attachments: {json.dumps(attachments, ensure_ascii=False, default=str)}\n\n"
-        f"PPTX Context: {json.dumps(pptx_context, ensure_ascii=False, default=str)}"
-    )
 
     thread_id = config.get("configurable", {}).get("thread_id")
     user_uid = config.get("configurable", {}).get("user_uid")
@@ -542,9 +853,19 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     output_prefix = f"generated_assets/{session_id}/{safe_title}"
 
     source_urls: set[str] = set()
+    binding_priority_assets = _collect_assets_from_bindings_by_roles(
+        selected_asset_bindings,
+        roles={"template_source", "layout_reference", "data_source"},
+    )
+    _collect_file_urls(binding_priority_assets, source_urls)
     _collect_file_urls(selected_step_assets, source_urls)
+    if execution_mode == "images_to_package":
+        for url in preferred_visualizer_image_urls:
+            source_urls.add(url)
+        _collect_file_urls(dependency_context.get("resolved_dependency_artifacts", []), source_urls)
+    elif not source_urls:
+        _collect_file_urls(dependency_context.get("resolved_dependency_artifacts", []), source_urls)
     if not source_urls:
-        _collect_file_urls(artifacts, source_urls)
         _collect_file_urls(selected_image_inputs, source_urls)
         _collect_file_urls(attachments, source_urls)
         _collect_file_urls(pptx_context, source_urls)
@@ -553,31 +874,23 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     workspace_dir_obj = tempfile.TemporaryDirectory(prefix=f"data_analyst_{session_id}_")
     workspace_dir = workspace_dir_obj.name
     try:
-        url_to_local_path, local_file_manifest = await _download_input_files(
+        _url_to_local_path, local_file_manifest = await _download_input_files(
             workspace_dir=workspace_dir,
             urls=sorted(source_urls),
         )
     except Exception as file_err:
         logger.warning("Data Analyst input file prefetch failed: %s", file_err)
-        url_to_local_path = {}
         local_file_manifest = []
-
-    context += (
-        "\n\nMode Policy:\n"
-        "- python_pipeline: execute general python processing only.\n"
-        "\n\nFile I/O Policy:\n"
-        "- All remote files are already downloaded into local workspace.\n"
-        "- Use local paths only when calling tools.\n"
-        "- Runtime discovers generated local files and uploads them to GCS automatically.\n"
-        f"\nWorkspace Directory: {workspace_dir}\n"
-        f"Local File Manifest: {json.dumps(local_file_manifest, ensure_ascii=False)}\n"
-    )
 
     input_summary = {
         "mode": execution_mode,
         "instruction": instruction,
         "artifact_keys": list(artifacts.keys()),
         "selected_step_assets": selected_step_assets,
+        "selected_asset_bindings": selected_asset_bindings,
+        "planned_inputs": dependency_context.get("planned_inputs", []),
+        "depends_on_step_ids": dependency_context.get("depends_on_step_ids", []),
+        "resolved_dependency_artifacts": dependency_context.get("resolved_dependency_artifacts", []),
         "selected_image_inputs": selected_image_inputs,
         "attachments": attachments,
         "pptx_context": pptx_context,
@@ -595,297 +908,85 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
                 "artifact_id": artifact_id,
                 "title": current_step.get("title") or "Data Analyst",
                 "input": input_summary,
-                "status": "streaming"
+                "status": "streaming",
             },
-            config=config
+            config=config,
         )
     except Exception as e:
         logger.warning(f"Failed to dispatch data-analyst-start: {e}")
 
-    messages = apply_prompt_template("data_analyst", state)
-    messages.append(HumanMessage(content=context, name="supervisor"))
-
-    llm = get_llm_by_type(AGENT_LLM_MAP["data_analyst"])
-    
-    # Use restricted local-processing tools. GCS I/O is managed by this node.
-    tools = [
-        python_repl_tool,
-        bash_tool,
-        render_pptx_master_images_tool,
-        package_visual_assets_tool,
-    ]
-    
-    # Bind tools to LLM
-    llm_with_tools = llm.bind_tools(tools)
-
     try:
-        messages[-1].content += (
-            "\n\nIMPORTANT: Only output the final result as valid JSON matching DataAnalystOutput "
-            "when the Planner instruction is fully completed. If more processing is needed, "
-            "call an appropriate tool (python_repl_tool, render_pptx_master_images_tool, package_visual_assets_tool, bash_tool).\n"
-            "Do not include markdown wrappers.\n"
-            f"Current mode is `{execution_mode}` and must be respected strictly."
+        result, detected_output_paths = await _run_deterministic_data_analyst_mode(
+            mode=execution_mode,
+            instruction=str(instruction),
+            deck_title=str(deck_title),
+            workspace_dir=workspace_dir,
+            local_file_manifest=local_file_manifest,
+            preferred_image_source_urls=preferred_visualizer_image_urls,
+            pptx_context=pptx_context,
+            config=config,
         )
 
-        # Add run_name for better visibility in events
-        stream_config = config.copy()
-        stream_config["run_name"] = "data_analyst"
+        failed_checks = _normalize_failed_checks(result.failed_checks)
+        if _looks_like_error_text(result.execution_log):
+            failed_checks = _normalize_failed_checks(failed_checks + _data_analyst_failed_checks(kind="tool_execution"))
+        result.failed_checks = failed_checks
+        is_error = bool(failed_checks)
 
-        content_json = ""
-        result_summary = ""
-        is_error = False
-        error_summary = ""
-        tool_trace: list[str] = []
-        code_trace_blocks: list[str] = []
-        log_trace_blocks: list[str] = []
-        detected_output_paths: set[str] = set()
-        tool_error_occurred = False
+        workspace_detected_files = _discover_workspace_output_files(workspace_dir)
+        detected_output_paths.update(workspace_detected_files)
+        _merge_detected_output_files(
+            result=result,
+            workspace_dir=workspace_dir,
+            detected_local_paths=sorted(detected_output_paths),
+        )
 
-        for round_index in range(MAX_DATA_ANALYST_ROUNDS):
-            response = await llm_with_tools.ainvoke(messages, config=stream_config)
-
-            tool_calls = getattr(response, "tool_calls", None) or []
-            if tool_calls:
-                messages.append(response)
-                logger.info(f"Data Analyst triggered tool calls: {len(tool_calls)}")
-
-                for tool_call in tool_calls:
-                    tool_name = tool_call.get("name")
-                    tool_args = tool_call.get("args")
-                    output = ""
-                    tool_key = (tool_name or "").lower()
-
-                    if isinstance(tool_args, dict):
-                        normalized_args = dict(tool_args)
-                    elif isinstance(tool_args, str):
-                        normalized_args = {"input": tool_args}
-                    else:
-                        normalized_args = {}
-                    normalized_args = _replace_urls_with_local_paths(normalized_args, url_to_local_path)
-
-                    if "python_repl" in tool_key:
-                        code_text = _extract_python_code(normalized_args)
-                        if code_text:
-                            code_block = f"\n# Python Run {round_index + 1}\n{code_text}\n"
-                            code_trace_blocks.append(code_block)
-                            try:
-                                await _dispatch_text_delta("data-analyst-code-delta", artifact_id, code_block, config)
-                            except Exception as e:
-                                logger.warning(f"Failed to dispatch code delta: {e}")
-                        try:
-                            expected_files = current_step.get("outputs", [])
-                            if "query" in normalized_args and "code" not in normalized_args:
-                                normalized_args = {
-                                    "code": normalized_args["query"],
-                                    **{k: v for k, v in normalized_args.items() if k != "query"},
-                                }
-                            if "code" not in normalized_args and "input" in normalized_args:
-                                normalized_args["code"] = normalized_args["input"]
-                            normalized_args["work_dir"] = workspace_dir
-                            normalized_args["expected_files"] = expected_files if isinstance(expected_files, list) else None
-
-                            output = await python_repl_tool.ainvoke(normalized_args, config=config)
-                        except Exception as e:
-                            logger.error(f"Python execution failed: {e}")
-                            output = f"Error executing python_repl: {e}"
-                            tool_error_occurred = True
-                    elif "bash" in tool_key:
-                        cmd_text = normalized_args.get("cmd") or normalized_args.get("command") or str(normalized_args)
-                        if cmd_text:
-                            cmd_block = f"\n# Bash Run {round_index + 1}\n{cmd_text}\n"
-                            code_trace_blocks.append(cmd_block)
-                            try:
-                                await _dispatch_text_delta("data-analyst-code-delta", artifact_id, cmd_block, config)
-                            except Exception as e:
-                                logger.warning(f"Failed to dispatch bash delta: {e}")
-                        try:
-                            if "command" in normalized_args and "cmd" not in normalized_args:
-                                normalized_args = {
-                                    "cmd": normalized_args["command"],
-                                    **{k: v for k, v in normalized_args.items() if k != "command"},
-                                }
-                            normalized_args.setdefault("work_dir", workspace_dir)
-                            output = await bash_tool.ainvoke(normalized_args, config=config)
-                        except Exception as e:
-                            logger.error(f"Bash execution failed: {e}")
-                            output = f"Error executing bash: {e}"
-                            tool_error_occurred = True
-                    elif "render_pptx_master_images" in tool_key:
-                        try:
-                            normalized_args.setdefault("work_dir", workspace_dir)
-                            normalized_args.setdefault("output_dir", "outputs/master_images")
-                            output = await render_pptx_master_images_tool.ainvoke(normalized_args, config=config)
-                        except Exception as e:
-                            logger.error(f"PPTX render tool failed: {e}")
-                            output = f"Error executing render_pptx_master_images_tool: {e}"
-                            tool_error_occurred = True
-                    elif "package_visual_assets" in tool_key:
-                        try:
-                            normalized_args.setdefault("work_dir", workspace_dir)
-                            normalized_args.setdefault("output_dir", "outputs/packaged_assets")
-                            normalized_args.setdefault("deck_title", str(deck_title))
-                            output = await package_visual_assets_tool.ainvoke(normalized_args, config=config)
-                        except Exception as e:
-                            logger.error(f"Asset packaging tool failed: {e}")
-                            output = f"Error executing package_visual_assets_tool: {e}"
-                            tool_error_occurred = True
-                    else:
-                        output = f"Unsupported tool: {tool_name}"
-
-                    tool_trace.append(f"{tool_name} -> {output}")
-                    tool_call_id = tool_call.get("id") or tool_call.get("tool_call_id") or tool_name or "tool"
-                    messages.append(ToolMessage(content=str(output), tool_call_id=tool_call_id))
-
-                    if output:
-                        log_block = f"\n# Output {round_index + 1}\n{output}\n"
-                        log_trace_blocks.append(log_block)
-                        for local_path in _extract_output_paths_from_tool_output(str(output), workspace_dir):
-                            detected_output_paths.add(local_path)
-                        try:
-                            await _dispatch_text_delta("data-analyst-log-delta", artifact_id, log_block, config)
-                        except Exception as e:
-                            logger.warning(f"Failed to dispatch log delta: {e}")
-
-                continue
-
-            content = response.content if hasattr(response, "content") else ""
-            _, text_content = split_content_parts(content)
-            raw_text = text_content or (content if isinstance(content, str) else str(content))
-            json_text = extract_first_json(raw_text)
-
-            if json_text:
-                try:
-                    result = DataAnalystOutput.model_validate_json(json_text)
-                    logger.info("✅ Data Analyst produced valid DataAnalystOutput JSON")
-                    break
-                except Exception as e:
-                    logger.warning(f"Parsed JSON failed validation: {e}")
-                    error_summary = f"Parsed JSON failed validation: {e}"
-            else:
-                error_summary = "No JSON found in Data Analyst output."
-
-            if round_index < MAX_DATA_ANALYST_ROUNDS - 1:
-                messages.append(
-                    HumanMessage(
-                        content=(
-                            "Return ONLY valid JSON for DataAnalystOutput. "
-                            "Do not include any extra text."
-                        ),
-                        name="supervisor",
-                    )
+        if is_error:
+            result.output_files = []
+            result.output_value = None
+            artifact_preview_urls = []
+        else:
+            try:
+                upload_trace = await _upload_result_files_to_gcs(
+                    result=result,
+                    workspace_dir=workspace_dir,
+                    output_prefix=output_prefix,
                 )
-
-        if result:
-            failed_checks = _normalize_failed_checks(result.failed_checks)
-            if tool_error_occurred and "tool_execution" not in failed_checks:
-                failed_checks = _normalize_failed_checks(failed_checks + ["tool_execution"])
-
-            workspace_detected_files = _discover_workspace_output_files(workspace_dir)
-            detected_output_paths.update(workspace_detected_files)
-            _merge_detected_output_files(
-                result=result,
-                workspace_dir=workspace_dir,
-                detected_local_paths=sorted(detected_output_paths),
-            )
-
-            implementation_code = "\n".join(block.strip() for block in code_trace_blocks if block.strip()).strip()
-            execution_log = "\n".join(block.strip() for block in log_trace_blocks if block.strip()).strip()
-            if implementation_code:
-                result.implementation_code = implementation_code
-            else:
-                result.implementation_code = _normalize_text(result.implementation_code)
-            if execution_log:
-                result.execution_log = execution_log
-            else:
-                result.execution_log = _normalize_text(result.execution_log)
-
-            summary_is_error = _looks_like_error_text(result.execution_log)
-            is_error = summary_is_error or bool(failed_checks)
-
-            if is_error and not failed_checks:
-                failed_checks = _data_analyst_failed_checks(kind="worker")
-            result.failed_checks = failed_checks
-
-            if is_error:
-                # Policy: partial success is treated as failure.
+                if upload_trace:
+                    result.execution_log = (
+                        f"{result.execution_log}\n\n# Upload Trace\n" + "\n".join(upload_trace)
+                    ).strip()
+            except Exception as upload_err:
+                logger.error("Failed to upload output files to GCS: %s", upload_err)
+                result.failed_checks = _normalize_failed_checks(result.failed_checks + ["tool_execution"])
                 result.output_files = []
                 result.output_value = None
-                artifact_preview_urls = []
-            else:
-                try:
-                    upload_trace = await _upload_result_files_to_gcs(
-                        result=result,
-                        workspace_dir=workspace_dir,
-                        output_prefix=output_prefix,
-                    )
-                    if upload_trace:
-                        tool_trace.extend(upload_trace)
-                        result.execution_log = (
-                            f"{result.execution_log}\n\n# Upload Trace\n" + "\n".join(upload_trace)
-                        ).strip()
-                except Exception as upload_err:
-                    logger.error("Failed to upload output files to GCS: %s", upload_err)
-                    result.failed_checks = _normalize_failed_checks(result.failed_checks + ["tool_execution"])
-                    result.output_files = []
-                    result.output_value = None
-                    is_error = True
+                is_error = True
 
-                artifact_preview_urls = _extract_preview_urls(result) if not is_error else []
+            artifact_preview_urls = _extract_preview_urls(result) if not is_error else []
 
-            result_summary = _summarize_data_analyst_result(
-                is_error=is_error,
-                failed_checks=result.failed_checks,
-                output_files=result.output_files,
-                output_value=result.output_value,
+        result_summary = _summarize_data_analyst_result(
+            is_error=is_error,
+            failed_checks=result.failed_checks,
+            output_files=result.output_files,
+            output_value=result.output_value,
+        )
+        result_payload = result.model_dump()
+        result_payload["input"] = input_summary
+        content_json = json.dumps(result_payload, ensure_ascii=False)
+
+        try:
+            await adispatch_custom_event(
+                "data-analyst-output",
+                {
+                    "artifact_id": artifact_id,
+                    "output": result_payload,
+                    "status": "completed" if not is_error else "failed",
+                },
+                config=config,
             )
-            content_json = result.model_dump_json()
-            try:
-                await adispatch_custom_event(
-                    "data-analyst-output",
-                    {
-                        "artifact_id": artifact_id,
-                        "output": result.model_dump(),
-                        "status": "completed" if not is_error else "failed"
-                    },
-                    config=config
-                )
-            except Exception as e:
-                logger.warning(f"Failed to dispatch data-analyst-output: {e}")
-        else:
-            logger.warning(f"Data Analyst failed to return valid JSON: {error_summary}")
-            checks = _data_analyst_failed_checks(
-                kind="tool_execution" if tool_error_occurred else "schema_validation"
-            )
-            fallback = DataAnalystOutput(
-                implementation_code="\n".join(block.strip() for block in code_trace_blocks if block.strip()).strip(),
-                execution_log="\n".join(block.strip() for block in log_trace_blocks if block.strip()).strip()
-                or (error_summary or "No execution log."),
-                output_value=None,
-                failed_checks=checks,
-                output_files=[],
-            )
-            content_json = fallback.model_dump_json()
-            result_summary = _summarize_data_analyst_result(
-                is_error=True,
-                failed_checks=checks,
-                output_files=[],
-                output_value=None,
-            )
-            is_error = True
-            artifact_preview_urls = []
-            try:
-                await adispatch_custom_event(
-                    "data-analyst-output",
-                    {
-                        "artifact_id": artifact_id,
-                        "output": fallback.model_dump(),
-                        "status": "failed"
-                    },
-                    config=config
-                )
-            except Exception as e:
-                logger.warning(f"Failed to dispatch data-analyst-output (fallback): {e}")
-                 
+        except Exception as e:
+            logger.warning(f"Failed to dispatch data-analyst-output: {e}")
     except Exception as e:
         logger.error(f"Data Analyst failed: {e}")
         checks = _data_analyst_failed_checks(kind="worker")
@@ -896,7 +997,9 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
             failed_checks=checks,
             output_files=[],
         )
-        content_json = fallback.model_dump_json()
+        fallback_payload = fallback.model_dump()
+        fallback_payload["input"] = input_summary
+        content_json = json.dumps(fallback_payload, ensure_ascii=False)
         result_summary = _summarize_data_analyst_result(
             is_error=True,
             failed_checks=checks,
@@ -910,10 +1013,10 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
                 "data-analyst-output",
                 {
                     "artifact_id": artifact_id,
-                    "output": fallback.model_dump(),
-                    "status": "failed"
+                    "output": fallback_payload,
+                    "status": "failed",
                 },
-                config=config
+                config=config,
             )
         except Exception as dispatch_error:
             logger.warning(f"Failed to dispatch data-analyst-output (error): {dispatch_error}")
@@ -923,9 +1026,9 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
             "data-analyst-complete",
             {
                 "artifact_id": artifact_id,
-                "status": "failed" if is_error else "completed"
+                "status": "failed" if is_error else "completed",
             },
-            config=config
+            config=config,
         )
     except Exception as e:
         logger.warning(f"Failed to dispatch data-analyst-complete: {e}")
@@ -933,16 +1036,16 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     if workspace_dir_obj is not None:
         workspace_dir_obj.cleanup()
     current_step["result_summary"] = result_summary
-    
+
     return create_worker_response(
         role="data_analyst",
         content_json=content_json,
         result_summary=result_summary,
-        current_step_id=current_step['id'],
+        current_step_id=current_step["id"],
         state=state,
         artifact_key_suffix="data",
         artifact_title="Data Analysis Result",
         artifact_icon="BarChart",
         artifact_preview_urls=artifact_preview_urls,
-        is_error=is_error
+        is_error=is_error,
     )

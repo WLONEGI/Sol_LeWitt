@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button"
 import { InpaintCanvas, type InpaintSubmitPayload } from "@/features/preview/components/inpaint-canvas"
 import { useArtifactStore } from "@/features/preview/stores/artifact"
 import { useAuth } from "@/providers/auth-provider"
+import { useChatStore } from "@/features/chat/stores/chat"
+import { uploadInpaintReferenceImages } from "@/features/preview/lib/inpaint-reference-upload"
 import { getAspectRatioClass } from "../utils/aspect-ratio"
 
 interface SlideDeckViewerProps {
@@ -54,6 +56,7 @@ export function SlideDeckViewer({ content, artifactId, aspectRatio }: SlideDeckV
     const [editingSlideNumber, setEditingSlideNumber] = useState<number | null>(null)
     const { updateArtifactContent } = useArtifactStore()
     const { token } = useAuth()
+    const currentThreadId = useChatStore((state) => state.currentThreadId)
 
     const slides = useMemo(() => {
         const list = Array.isArray(content?.slides)
@@ -87,9 +90,14 @@ export function SlideDeckViewer({ content, artifactId, aspectRatio }: SlideDeckV
         updateArtifactContent(artifactId, { ...content, slides: nextSlides })
     }
 
-    const handleInpaintSubmit = async ({ prompt, maskImageUrl }: InpaintSubmitPayload) => {
+    const handleInpaintSubmit = async ({ prompt, maskImageUrl, referenceFiles }: InpaintSubmitPayload) => {
         if (!editingSlide) return
         if (!token) throw new Error("認証情報がありません。再ログインしてください。")
+        const referenceImages = await uploadInpaintReferenceImages({
+            token,
+            files: referenceFiles,
+            threadId: currentThreadId || artifactId,
+        })
         const response = await fetch(`/api/slide-deck/${artifactId}/slides/${editingSlide.slide_number}/inpaint`, {
             method: "POST",
             headers: {
@@ -100,12 +108,21 @@ export function SlideDeckViewer({ content, artifactId, aspectRatio }: SlideDeckV
                 prompt,
                 image_url: getSlideVersionState(editingSlide).url,
                 mask_image_url: maskImageUrl,
+                reference_images: referenceImages,
             }),
         })
-        const data = await response.json()
-        if (!data?.new_image_url) {
-            alert(data?.message || "Request sent (Stub)")
-            return
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) {
+            const detail =
+                typeof data?.detail === "string"
+                    ? data.detail
+                    : (typeof data?.message === "string"
+                        ? data.message
+                        : (typeof data?.error === "string" ? data.error : "In-painting failed"))
+            throw new Error(detail)
+        }
+        if (typeof data?.new_image_url !== "string" || data.new_image_url.length === 0) {
+            throw new Error("In-painting failed: 生成画像URLが返却されませんでした。")
         }
 
         const nextSlides = slides.map((slide) => {

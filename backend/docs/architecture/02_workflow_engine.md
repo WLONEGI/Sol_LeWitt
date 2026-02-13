@@ -5,16 +5,16 @@
 
 ## 1. ノード定義と責務
 
-| ノード名 | ラン名/識別 | 責務 |
+| ノード名 | 識別子 | 責務 |
 | :--- | :--- | :--- |
-| **Coordinator** | `coordinator` | 会話継続か制作開始かを判定し、制作時は `planner` へ。 |
-| **Planner** | `planner` | canonical な実行計画を JSON で生成。 |
-| **Supervisor** | `supervisor` | `plan` の `pending/in_progress` を管理し、Workerへルーティング。 |
-| **Writer** | `writer` | 構成・脚本・設定などの文章系成果物を JSON 生成。 |
-| **Researcher** | `researcher` | サブグラフで調査タスクを分解・実行。調査レポートを返却。 |
-| **Visualizer** | `visualizer` | 画像生成計画と画像生成実行。 |
-| **Data Analyst** | `data_analyst` | Python実行やパッケージングなどの後処理。 |
-| **Retry/Alt Mode** | `retry_or_alt_mode` | blocked ステップの再試行・代替タスク追加。 |
+| **Coordinator** | `coordinator` | 会話の継続（対話）か制作開始かを判定。制作時はプランニングへ。 |
+| **Planner** | `planner` | canonical な実行計画（タスクリスト）を JSON で生成。 |
+| **Supervisor** | `supervisor` | プランのステータス管理と、各 Worker ノードへの動的なルーティング。 |
+| **Writer** | `writer` | 構成、脚本、設定などのテキスト系成果物を生成。 |
+| **Researcher** | `researcher` | 検索エンジンを活用し、調査タスクを分解・実行。詳細レポートを返却。 |
+| **Visualizer** | `visualizer` | 画像生成計画と実行。動的アスペクト比対応や In-paint 指示も担当。 |
+| **Data Analyst** | `data_analyst` | Python実行、PPTX生成、データ集計などの構造化タスクを処理。 |
+| **Supervisor (Manager)** | `supervisor` | 各ステップの完了を確認し、必要に応じて再計画を Planner に依頼。 |
 
 ## 2. 状態管理（State Schema）
 

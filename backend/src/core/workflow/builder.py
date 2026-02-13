@@ -5,7 +5,6 @@ from src.core.workflow.nodes import (
     supervisor_node,
     build_researcher_subgraph,
     coordinator_node,
-    retry_or_alt_mode_node,
     writer_node,
     visualizer_node,
     planner_node,
@@ -25,7 +24,6 @@ def build_graph(checkpointer=None):
     builder.add_node("coordinator", coordinator_node)
     builder.add_node("planner", planner_node)
     builder.add_node("supervisor", supervisor_node)
-    builder.add_node("retry_or_alt_mode", retry_or_alt_mode_node)
     
     # === Researcher Subgraph ===
     researcher_app = build_researcher_subgraph()

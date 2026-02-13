@@ -1,14 +1,15 @@
 "use client"
 
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react"
+import { useEffect, useRef, useState, type ChangeEvent, type PointerEvent as ReactPointerEvent } from "react"
 import { Button } from "@/components/ui/button"
-import { Check, Eraser, Loader2 } from "lucide-react"
+import { Check, Eraser, Loader2, Paperclip, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import TextareaAutosize from "react-textarea-autosize"
 
 export interface InpaintSubmitPayload {
     prompt: string
     maskImageUrl: string
+    referenceFiles: File[]
 }
 
 interface InpaintCanvasProps {
@@ -30,16 +31,21 @@ type RenderArea = {
     height: number
 }
 
+const MAX_REFERENCE_FILES = 3
+
 export function InpaintCanvas({ imageUrl, onSubmit, onCancel, className }: InpaintCanvasProps) {
     const [prompt, setPrompt] = useState("")
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [brushSize, setBrushSize] = useState(28)
     const [hasMask, setHasMask] = useState(false)
     const [isCanvasReady, setIsCanvasReady] = useState(false)
+    const [referenceFiles, setReferenceFiles] = useState<File[]>([])
+    const [referencePreviewUrls, setReferencePreviewUrls] = useState<string[]>([])
 
     const imageRef = useRef<HTMLImageElement>(null)
     const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
     const maskCanvasRef = useRef<HTMLCanvasElement | null>(null)
+    const referenceInputRef = useRef<HTMLInputElement | null>(null)
     const isDrawingRef = useRef(false)
     const previousPointRef = useRef<Point | null>(null)
 
@@ -125,10 +131,47 @@ export function InpaintCanvas({ imageUrl, onSubmit, onCancel, className }: Inpai
     useEffect(() => {
         setPrompt("")
         setIsCanvasReady(false)
+        setReferenceFiles([])
         maskCanvasRef.current = null
         clearMask()
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [imageUrl])
+
+    useEffect(() => {
+        const urls = referenceFiles.map((file) => URL.createObjectURL(file))
+        setReferencePreviewUrls(urls)
+        return () => {
+            urls.forEach((url) => URL.revokeObjectURL(url))
+        }
+    }, [referenceFiles])
+
+    const handleReferenceFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+        const incoming = Array.from(event.target.files || []).filter((file) => file.type.startsWith("image/"))
+        if (incoming.length === 0) {
+            event.currentTarget.value = ""
+            return
+        }
+
+        setReferenceFiles((previous) => {
+            const merged = [...previous]
+            for (const file of incoming) {
+                const exists = merged.some(
+                    (item) =>
+                        item.name === file.name
+                        && item.size === file.size
+                        && item.lastModified === file.lastModified
+                )
+                if (!exists) merged.push(file)
+                if (merged.length >= MAX_REFERENCE_FILES) break
+            }
+            return merged.slice(0, MAX_REFERENCE_FILES)
+        })
+        event.currentTarget.value = ""
+    }
+
+    const removeReferenceFile = (index: number) => {
+        setReferenceFiles((previous) => previous.filter((_, i) => i !== index))
+    }
 
     const drawStroke = (from: Point, to: Point) => {
         const overlayCanvas = overlayCanvasRef.current
@@ -245,6 +288,7 @@ export function InpaintCanvas({ imageUrl, onSubmit, onCancel, className }: Inpai
 
     const handleCancel = () => {
         setPrompt("")
+        setReferenceFiles([])
         clearMask()
         onCancel()
     }
@@ -264,11 +308,12 @@ export function InpaintCanvas({ imageUrl, onSubmit, onCancel, className }: Inpai
             await onSubmit({
                 prompt: prompt.trim(),
                 maskImageUrl: maskCanvas.toDataURL("image/png"),
+                referenceFiles,
             })
             handleCancel()
         } catch (error) {
             console.error("In-painting failed:", error)
-            alert("Failed to submit in-painting request")
+            alert(error instanceof Error ? error.message : "Failed to submit in-painting request")
         } finally {
             setIsSubmitting(false)
         }
@@ -335,6 +380,14 @@ export function InpaintCanvas({ imageUrl, onSubmit, onCancel, className }: Inpai
                     </div>
 
                     <div className="absolute left-1/2 -translate-x-1/2 bottom-3 bg-background/92 backdrop-blur-md border border-border rounded-lg shadow-lg p-3 w-[min(92vw,420px)] z-30">
+                        <input
+                            ref={referenceInputRef}
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp"
+                            multiple
+                            className="hidden"
+                            onChange={handleReferenceFileChange}
+                        />
                         <TextareaAutosize
                             minRows={2}
                             maxRows={3}
@@ -350,6 +403,53 @@ export function InpaintCanvas({ imageUrl, onSubmit, onCancel, className }: Inpai
                                 }
                             }}
                         />
+                        <div className="mt-2 flex items-center justify-between gap-2">
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-7 px-2 text-[11px]"
+                                onClick={() => referenceInputRef.current?.click()}
+                                disabled={isSubmitting || referenceFiles.length >= MAX_REFERENCE_FILES}
+                            >
+                                <Paperclip className="h-3 w-3 mr-1" />
+                                画像添付 ({referenceFiles.length}/{MAX_REFERENCE_FILES})
+                            </Button>
+                            <span className="text-[10px] text-muted-foreground">
+                                任意: 参照画像を追加できます
+                            </span>
+                        </div>
+                        {referenceFiles.length > 0 && (
+                            <div className="mt-2 grid grid-cols-3 gap-2">
+                                {referenceFiles.map((file, index) => (
+                                    <div
+                                        key={`${file.name}-${file.size}-${file.lastModified}-${index}`}
+                                        className="overflow-hidden rounded-md border border-border bg-muted/30"
+                                    >
+                                        {referencePreviewUrls[index] ? (
+                                            <img
+                                                src={referencePreviewUrls[index]}
+                                                alt={file.name}
+                                                className="h-16 w-full object-cover"
+                                            />
+                                        ) : (
+                                            <div className="h-16 w-full bg-muted" />
+                                        )}
+                                        <div className="flex items-center gap-1 px-1.5 py-1">
+                                            <span className="truncate text-[10px] flex-1">{file.name}</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => removeReferenceFile(index)}
+                                                className="opacity-70 hover:opacity-100"
+                                                aria-label={`remove-${file.name}`}
+                                            >
+                                                <X className="h-3 w-3" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                         <div className="mt-2 flex items-center justify-between">
                             <span className="text-[10px] text-muted-foreground">
                                 {!hasMask

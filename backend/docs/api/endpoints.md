@@ -117,10 +117,17 @@ Visualizer の個別画像編集向け。元画像・マスク画像・修正指
 {
   "image_url": "https://storage.googleapis.com/.../source.png",
   "mask_image_url": "data:image/png;base64,...",
-  "prompt": "白く塗った領域だけを、夕方の空に変更"
+  "prompt": "白く塗った領域だけを、夕方の空に変更",
+  "reference_images": [
+    {
+      "image_url": "https://storage.googleapis.com/.../ref-style.png",
+      "caption": "夕方の色味"
+    }
+  ]
 }
 ```
 
 ### Notes
 - `mask_image_url` は `data URL`, `https URL`, `gs://` を受け付けます。
 - マスクは **白=編集対象 / 黒=保持** として扱います。
+- `reference_images` は任意です（最大3枚）。スタイル/モチーフの補助参照として扱われます。

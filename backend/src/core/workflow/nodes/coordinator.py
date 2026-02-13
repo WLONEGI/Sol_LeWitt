@@ -8,7 +8,7 @@ from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 
-from src.infrastructure.llm.llm import get_llm_by_type
+from src.infrastructure.llm.llm import ainvoke_with_retry, get_llm_by_type
 from src.shared.config import AGENT_LLM_MAP
 from src.resources.prompts.template import apply_prompt_template
 from src.core.workflow.state import State
@@ -92,7 +92,10 @@ async def coordinator_node(state: State, config: RunnableConfig) -> Command[Lite
     # Using `ainvoke` with streaming=True allows the underlying callbacks to fire for tokens.
     
     logger.info("Coordinator: Invoking model (structured output)...")
-    result: CoordinatorOutput = await structured_llm.ainvoke(messages, config=stream_config)
+    result: CoordinatorOutput = await ainvoke_with_retry(
+        lambda: structured_llm.ainvoke(messages, config=stream_config),
+        operation_name="coordinator.structured_ainvoke",
+    )
 
     logger.debug(
         "Coordinator Structured Response: product_type='%s', goto='%s', title='%s', followups=%s, response_len=%s",
@@ -129,18 +132,26 @@ async def coordinator_node(state: State, config: RunnableConfig) -> Command[Lite
         if len(followup_options) < 3:
             followup_options = _fill_followup_options(followup_options)
         updates["coordinator_followup_options"] = followup_options
+    else:
+        updates["coordinator_followup_options"] = []
 
     if effective_product_type in SUPPORTED_PRODUCT_TYPES:
         updates["product_type"] = effective_product_type
-    if not state.get("request_intent"):
-        updates["request_intent"] = _detect_intent(latest_user_text)
-    if not state.get("target_scope"):
+        request_intent = _detect_intent(latest_user_text)
+        updates["request_intent"] = request_intent
+        # Single-turn optimized flow: planner always creates a fresh plan.
+        # Do not derive create/update mode in coordinator.
+        updates["interrupt_intent"] = False
+
         detected_scope = _detect_target_scope(latest_user_text)
         if detected_scope:
             updates["target_scope"] = _hydrate_target_scope_from_ledger(
                 detected_scope,
                 state.get("asset_unit_ledger"),
             )
+        else:
+            # stale scopeを引きずらないため、毎ターン明示的にリセットする
+            updates["target_scope"] = {}
 
     if goto_destination == "planner":
         thread_id = config.get("configurable", {}).get("thread_id")

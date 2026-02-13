@@ -7,6 +7,8 @@ import { useArtifactStore } from "@/features/preview/stores/artifact"
 import { cn } from "@/lib/utils"
 import { InpaintCanvas, type InpaintSubmitPayload } from "@/features/preview/components/inpaint-canvas"
 import { useAuth } from "@/providers/auth-provider"
+import { useChatStore } from "@/features/chat/stores/chat"
+import { uploadInpaintReferenceImages } from "@/features/preview/lib/inpaint-reference-upload"
 
 import { getAspectRatioClass } from "../utils/aspect-ratio"
 
@@ -55,6 +57,7 @@ function buildVersionedContent(content: any, url: string, versions: string[], cu
 export function SlideViewer({ content, imageId, aspectRatio }: SlideViewerProps) {
     const { updateArtifactContent } = useArtifactStore()
     const { token } = useAuth()
+    const currentThreadId = useChatStore((state) => state.currentThreadId)
 
     const versionState = useMemo(() => getVersionState(content), [content])
     const imageUrl = versionState.url
@@ -77,9 +80,14 @@ export function SlideViewer({ content, imageId, aspectRatio }: SlideViewerProps)
         updateArtifactContent(imageId, buildVersionedContent(content, nextUrl, versions, nextIndex))
     }
 
-    const handleInpaintSubmit = async ({ prompt, maskImageUrl }: InpaintSubmitPayload) => {
+    const handleInpaintSubmit = async ({ prompt, maskImageUrl, referenceFiles }: InpaintSubmitPayload) => {
         if (!imageId) return
         if (!token) throw new Error("認証情報がありません。再ログインしてください。")
+        const referenceImages = await uploadInpaintReferenceImages({
+            token,
+            files: referenceFiles,
+            threadId: currentThreadId || imageId,
+        })
         const response = await fetch(`/api/image/${imageId}/inpaint`, {
             method: "POST",
             headers: {
@@ -90,12 +98,21 @@ export function SlideViewer({ content, imageId, aspectRatio }: SlideViewerProps)
                 prompt,
                 image_url: imageUrl,
                 mask_image_url: maskImageUrl,
+                reference_images: referenceImages,
             }),
         })
-        const data = await response.json()
-        if (!data?.new_image_url) {
-            alert(data?.message || "Request sent (Stub)")
-            return
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) {
+            const detail =
+                typeof data?.detail === "string"
+                    ? data.detail
+                    : (typeof data?.message === "string"
+                        ? data.message
+                        : (typeof data?.error === "string" ? data.error : "In-painting failed"))
+            throw new Error(detail)
+        }
+        if (typeof data?.new_image_url !== "string" || data.new_image_url.length === 0) {
+            throw new Error("In-painting failed: 生成画像URLが返却されませんでした。")
         }
         const current = getVersionState(content)
         const baseVersions = current.versions.length > 0 ? current.versions : (current.url ? [current.url] : [])

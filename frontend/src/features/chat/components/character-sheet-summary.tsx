@@ -17,13 +17,6 @@ interface CharacterSheetSummaryProps {
     className?: string
 }
 
-function statusLabel(status: unknown): string {
-    if (status === 'failed') return 'failed'
-    if (status === 'streaming') return 'streaming'
-    if (status === 'pending') return 'pending'
-    return 'completed'
-}
-
 export function CharacterSheetSummary({
     artifactId = CHARACTER_SHEET_BUNDLE_ARTIFACT_ID,
     className,
@@ -45,8 +38,6 @@ export function CharacterSheetSummary({
     const writerOutput = activeVersion?.writer_output || {}
     const charactersRaw = Array.isArray(writerOutput.characters) ? writerOutput.characters : []
     const characters = charactersRaw.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-    const latestRun = activeVersion?.visual_runs[activeVersion.visual_runs.length - 1]
-
     const handleOpenPreview = () => {
         setActiveContextId(artifactId)
         setPreviewOpen(true)
@@ -64,8 +55,6 @@ export function CharacterSheetSummary({
                             <div className="flex flex-col text-left gap-1">
                                 <span className="text-sm font-semibold leading-none">Character Sheet</span>
                                 <div className="flex flex-wrap items-center gap-2">
-                                    <Badge variant="secondary" className="text-[11px]">Writer: {statusLabel(activeVersion?.writer_status)}</Badge>
-                                    <Badge variant="secondary" className="text-[11px]">Visualizer: {statusLabel(latestRun?.status)}</Badge>
                                     <Badge variant="outline" className="text-[11px]">Characters: {characters.length}</Badge>
                                 </div>
                             </div>

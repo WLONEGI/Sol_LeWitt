@@ -10,9 +10,13 @@ Create an executable plan that improves output quality while keeping execution s
 # Input Context
 - Fixed product type: `<<product_type>>`
 - Intent: `<<request_intent>>`
-- Planning mode: `<<planning_mode>>`  (`initial` or `replan`)
+- Planning mode: `<<planning_mode>>`  (always `create` in current system)
 - Latest user text: `<<latest_user_text>>`
 - Current plan snapshot (JSON): `<<plan>>`
+- Plan execution snapshot: `<<plan_execution_snapshot>>`
+- Unfinished step cards (JSON): `<<unfinished_steps>>`
+- Target scope hint (JSON): `<<target_scope>>`
+- Interrupt intent: `<<interrupt_intent>>`  (informational only)
 - Conversation history is included in messages.
 
 # Output Contract (Strict)
@@ -80,13 +84,11 @@ Example (shape reference):
   ]
 }
 
-# Replanning Policy (Important)
-- If `planning_mode` is `replan`, do NOT rebuild everything from scratch.
-- Respect execution progress and keep already valid work:
-  - Keep `completed` steps unless the user explicitly requests redo.
-  - Keep `in_progress` steps as-is. If adjustment is needed, add follow-up pending steps instead.
-  - Prefer editing/splitting/adding around pending area with minimal impact.
-- When interrupted or partially completed, produce the smallest feasible recovery plan.
+# Planning Policy (Important)
+- `planning_mode` is always `create`.
+- Always generate a fresh, executable plan for the current user request.
+- Keep the plan minimal and dependency-correct.
+- `unfinished_steps` / `interrupt_intent` are context hints only, not update constraints.
 
 # Hybrid Policy (Important)
 - Category templates are strong defaults, not hard sequence locks.
@@ -131,7 +133,6 @@ For every step, include fallback and prefer these three items:
 
 # Output Sanity Checklist
 - Is the plan executable and minimal for current intent?
-- In `replan`, are completed/in-progress steps treated correctly?
 - Are dependencies only where truly needed?
 - Is Researcher inserted when uncertainty exists?
 - Is `target_scope` minimal and priority-compliant?

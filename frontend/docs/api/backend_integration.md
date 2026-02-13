@@ -53,6 +53,10 @@
   image_url: string;      // 元画像
   mask_image_url: string; // data URL / https / gs://
   prompt: string;         // 修正指示
+  reference_images?: Array<{
+    image_url: string;
+    caption?: string;
+  }>; // 任意の参照画像（最大3枚）
 }
 ```
 

@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 from src.shared.config.settings import settings
 from src.core.workflow.state import State
+from src.infrastructure.llm.llm import ainvoke_with_retry, is_rate_limited_error
 
 T = TypeVar("T", bound=BaseModel)
 ARTIFACT_STEP_ID_PATTERN = re.compile(r"step_(\d+)_")
@@ -252,6 +253,45 @@ def _asset_id_for(source_type: str, uri: str, artifact_id: str | None = None, pr
     return f"asset:{digest}"
 
 
+def _infer_asset_role_hints(
+    *,
+    source_type: str,
+    uri: str,
+    mime_type: str | None,
+    label: str | None,
+    title: str | None,
+    producer_mode: str | None,
+) -> list[str]:
+    hints: set[str] = set()
+    lowered_source = str(source_type or "").lower()
+    lowered_uri = str(uri or "").lower()
+    lowered_mime = str(mime_type or "").lower()
+    lowered_label = str(label or "").lower()
+    lowered_title = str(title or "").lower()
+    lowered_mode = str(producer_mode or "").lower()
+    lowered_blob = " ".join([lowered_label, lowered_title, lowered_mode, lowered_uri])
+
+    if _is_image_mime(mime_type, uri):
+        hints.update({"image", "reference_image", "style_reference"})
+    if "pdf" in lowered_mime or lowered_uri.endswith(".pdf"):
+        hints.add("reference_document")
+    if "pptx" in lowered_mime or lowered_uri.endswith(".pptx"):
+        hints.update({"template_source", "layout_reference"})
+    if any(token in lowered_blob for token in ("template", "layout", "master")):
+        hints.update({"template_source", "layout_reference"})
+    if any(token in lowered_blob for token in ("mask", "inpaint-mask", "alpha_mask")):
+        hints.add("mask_image")
+    if any(token in lowered_blob for token in ("base_image", "source_image", "original")):
+        hints.add("base_image")
+    if any(token in lowered_blob for token in ("data", "table", "dataset", "csv", "json")):
+        hints.add("data_source")
+    if lowered_source in {"user_upload", "selected_image_input"}:
+        hints.add("user_context")
+    if lowered_source == "dependency_artifact":
+        hints.add("dependency_context")
+    return sorted(hints)
+
+
 def _append_asset(
     pool: dict[str, dict[str, Any]],
     *,
@@ -264,6 +304,7 @@ def _append_asset(
     producer_mode: str | None = None,
     label: str | None = None,
     title: str | None = None,
+    role_hints: list[str] | None = None,
 ) -> None:
     normalized_uri = str(uri or "").strip()
     if not normalized_uri:
@@ -289,6 +330,16 @@ def _append_asset(
         "producer_mode": producer_mode,
         "label": label or "",
         "title": title or "",
+        "role_hints": role_hints
+        if isinstance(role_hints, list) and role_hints
+        else _infer_asset_role_hints(
+            source_type=source_type,
+            uri=normalized_uri,
+            mime_type=inferred_mime,
+            label=label,
+            title=title,
+            producer_mode=producer_mode,
+        ),
     }
 
 
@@ -394,7 +445,8 @@ def build_step_asset_pool(
     current_step: dict[str, Any] | None = None,
     dependency_context: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    pool: dict[str, dict[str, Any]] = dict(state.get("asset_pool") or {})
+    # Single-turn safety: rebuild candidate pool per-step, do not inherit prior step/turn pool.
+    pool: dict[str, dict[str, Any]] = {}
 
     attachments = state.get("attachments") or []
     for item in attachments:
@@ -467,20 +519,67 @@ def resolve_selected_assets_for_step(
     if not isinstance(selected_ids, list):
         return []
 
-    pool = state.get("asset_pool") or {}
-    if not isinstance(pool, dict):
-        return []
+    catalog = state.get("asset_catalog")
+    if not isinstance(catalog, dict):
+        catalog = {}
 
     resolved: list[dict[str, Any]] = []
     for asset_id in selected_ids:
         if not isinstance(asset_id, str):
             continue
-        item = pool.get(asset_id)
+        item = catalog.get(asset_id)
         if not isinstance(item, dict):
             continue
         if image_only and not bool(item.get("is_image")):
             continue
         resolved.append(item)
+    return resolved
+
+
+def resolve_asset_bindings_for_step(
+    state: State,
+    step_id: int | str | None,
+) -> list[dict[str, Any]]:
+    if step_id is None:
+        return []
+    key = str(step_id)
+    bindings_map = state.get("asset_bindings_by_step") or {}
+    raw_bindings = bindings_map.get(key) if isinstance(bindings_map, dict) else None
+    if not isinstance(raw_bindings, list):
+        return []
+
+    catalog = state.get("asset_catalog")
+    if not isinstance(catalog, dict):
+        catalog = {}
+
+    resolved: list[dict[str, Any]] = []
+    for row in raw_bindings:
+        if not isinstance(row, dict):
+            continue
+        role = row.get("role")
+        if not isinstance(role, str) or not role.strip():
+            continue
+        asset_ids = row.get("asset_ids")
+        if not isinstance(asset_ids, list):
+            asset_ids = []
+        assets: list[dict[str, Any]] = []
+        valid_ids: list[str] = []
+        for asset_id in asset_ids:
+            if not isinstance(asset_id, str):
+                continue
+            item = catalog.get(asset_id)
+            if not isinstance(item, dict):
+                continue
+            valid_ids.append(asset_id)
+            assets.append(item)
+        resolved.append(
+            {
+                "role": role,
+                "reason": row.get("reason") if isinstance(row.get("reason"), str) else None,
+                "asset_ids": valid_ids,
+                "assets": assets,
+            }
+        )
     return resolved
 
 
@@ -585,8 +684,13 @@ async def run_structured_output(
     while attempt <= max_retries:
         try:
             structured_llm = llm.with_structured_output(schema)
-            return await structured_llm.ainvoke(current_messages, config=config)
+            return await ainvoke_with_retry(
+                lambda: structured_llm.ainvoke(current_messages, config=config),
+                operation_name=f"structured_output.{schema.__name__}",
+            )
         except Exception as e:
+            if is_rate_limited_error(e):
+                raise
             last_error = e
             if attempt >= max_retries:
                 break
@@ -625,20 +729,28 @@ def create_worker_response(
     Ensures consistent AIMessage usage and artifact updates.
     """
     
-    # 1. Main Response (Raw Content for Context)
-    # Using generic response format from settings
+    # 1. Main Response (compact context only; full payload lives in artifacts)
     worker_capability = _normalize_worker_capability(capability or role)
     message_name = emitter_name or role
+    status_label = "completed" if not is_error else "error"
+    artifact_id = f"step_{current_step_id}_{artifact_key_suffix}"
+    compact_payload = {
+        "artifact_id": artifact_id,
+        "status": status_label,
+        "result_summary": result_summary,
+    }
+    response_format = settings.RESPONSE_FORMAT or "Role: {role}\nContent: {content}"
+    response_content = response_format.format(
+        role=worker_capability,
+        content=json.dumps(compact_payload, ensure_ascii=False),
+    )
 
-    response_content = settings.RESPONSE_FORMAT.format(role=worker_capability, content=content_json)
     main_message = AIMessage(
         content=response_content, 
         name=message_name
     )
 
     # 2. Worker Result UI Message
-    status_label = "completed" if not is_error else "error"
-    
     result_message = AIMessage(
         content=result_summary if result_summary else f"{role.capitalize()} finished.",
         additional_kwargs={
@@ -651,9 +763,6 @@ def create_worker_response(
     )
 
     # 3. Artifact UI Message
-    # Standardize artifact ID generation
-    artifact_id = f"step_{current_step_id}_{artifact_key_suffix}"
-    
     # Prepare artifact button data
     artifact_kwargs = {
         "ui_type": "artifact_view",

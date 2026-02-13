@@ -87,6 +87,10 @@ export function useChatTimeline(
         const analystMap = new Map<string, { item: any; lastTimestamp: number }>();
         const outlineMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
         const writerArtifactMap = new Map<string, { item: TimelineEvent; lastTimestamp: number }>();
+        const visualDeckMap = new Map<
+            string,
+            { item: TimelineEvent; lastTimestamp: number; slidesMap: Map<number, any> }
+        >();
         const researchMap = new Map<string, ResearchReportTimelineItem>();
 
         const ingestStructuredEvent = (
@@ -189,9 +193,15 @@ export function useChatTimeline(
             if (type.startsWith('data-analyst-')) {
                 const artifactId = eventPayload.artifact_id || 'data_analyst';
                 const existing = analystMap.get(artifactId);
+                const nextStatus =
+                    typeof eventPayload.status === 'string' && eventPayload.status.trim().length > 0
+                        ? eventPayload.status.trim()
+                        : (type === 'data-analyst-complete' ? 'completed' : 'running');
                 if (existing) {
                     existing.lastTimestamp = timestamp;
                     if (eventPayload.title) existing.item.title = eventPayload.title;
+                    (existing.item as any).status = nextStatus;
+                    (existing.item as any).kind = 'data_analyst';
                     return;
                 }
 
@@ -202,7 +212,9 @@ export function useChatTimeline(
                         timestamp,
                         artifactId,
                         title: eventPayload.title || 'Data Analyst',
-                        icon: 'BarChart'
+                        icon: 'BarChart',
+                        kind: 'data_analyst',
+                        status: nextStatus,
                     },
                     lastTimestamp: timestamp
                 });
@@ -238,8 +250,146 @@ export function useChatTimeline(
                 return;
             }
 
-            // Suppress per-image timeline cards to reduce cognitive load.
-            if (type === 'data-visual-image') {
+            if (type.startsWith('data-visual-')) {
+                const baseArtifactId =
+                    typeof eventPayload.artifact_id === 'string' && eventPayload.artifact_id.trim().length > 0
+                        ? eventPayload.artifact_id.trim()
+                        : 'visual_deck';
+
+                const existing = visualDeckMap.get(baseArtifactId);
+                const previousMode =
+                    existing && typeof (existing.item as any).mode === 'string'
+                        ? (existing.item as any).mode
+                        : null;
+                const inferredMode = inferVisualizerModeFromPayload(eventPayload, previousMode);
+                const deckKind =
+                    inferredMode === 'character_sheet_render'
+                        ? 'character_sheet_deck'
+                        : inferredMode === 'comic_page_render'
+                            ? 'comic_page_deck'
+                            : 'slide_deck';
+
+                const readAspectRatio = (payload: any): string | undefined => {
+                    if (!payload || typeof payload !== 'object') return undefined;
+                    if (typeof payload.aspect_ratio === 'string' && payload.aspect_ratio.trim().length > 0) {
+                        return payload.aspect_ratio.trim();
+                    }
+                    if (
+                        payload.metadata &&
+                        typeof payload.metadata === 'object' &&
+                        typeof payload.metadata.aspect_ratio === 'string' &&
+                        payload.metadata.aspect_ratio.trim().length > 0
+                    ) {
+                        return payload.metadata.aspect_ratio.trim();
+                    }
+                    return undefined;
+                };
+
+                if (existing) {
+                    existing.lastTimestamp = timestamp;
+                    const item = existing.item as any;
+                    item.kind = deckKind;
+                    if (inferredMode) item.mode = inferredMode;
+                    const nextTitle =
+                        (typeof eventPayload.deck_title === 'string' && eventPayload.deck_title.trim().length > 0)
+                            ? eventPayload.deck_title.trim()
+                            : (typeof eventPayload.title === 'string' && eventPayload.title.trim().length > 0)
+                                ? eventPayload.title.trim()
+                                : item.title;
+                    if (nextTitle) item.title = nextTitle;
+
+                    const nextAspectRatio = readAspectRatio(eventPayload);
+                    if (nextAspectRatio) item.aspectRatio = nextAspectRatio;
+
+                    if (typeof eventPayload.pdf_url === 'string' && eventPayload.pdf_url.trim().length > 0) {
+                        item.pdf_url = eventPayload.pdf_url.trim();
+                    }
+
+                    const slideNumber = eventPayload.slide_number;
+                    if (typeof slideNumber === 'number' && Number.isFinite(slideNumber) && slideNumber > 0) {
+                        const previousSlide = existing.slidesMap.get(slideNumber) || { slide_number: slideNumber };
+                        existing.slidesMap.set(slideNumber, {
+                            ...previousSlide,
+                            slide_number: slideNumber,
+                            title: eventPayload.title ?? previousSlide.title,
+                            image_url: eventPayload.image_url ?? previousSlide.image_url,
+                            prompt_text: eventPayload.prompt_text ?? previousSlide.prompt_text,
+                            structured_prompt: eventPayload.structured_prompt ?? previousSlide.structured_prompt,
+                            rationale: eventPayload.rationale ?? previousSlide.rationale,
+                            layout_type: eventPayload.layout_type ?? previousSlide.layout_type,
+                            selected_inputs: eventPayload.selected_inputs ?? previousSlide.selected_inputs,
+                            status: eventPayload.status ?? previousSlide.status,
+                        });
+                    }
+
+                    item.slides = Array.from(existing.slidesMap.values()).sort(
+                        (a: any, b: any) => (a.slide_number || 0) - (b.slide_number || 0)
+                    );
+                    const allReady =
+                        Array.isArray(item.slides) &&
+                        item.slides.length > 0 &&
+                        item.slides.every((slide: any) => Boolean(slide?.image_url));
+                    if (type === 'data-visual-pdf') {
+                        item.status = 'completed';
+                    } else if (typeof eventPayload.status === 'string' && eventPayload.status.trim().length > 0) {
+                        item.status = eventPayload.status;
+                    } else {
+                        item.status = allReady ? 'completed' : (item.status || 'streaming');
+                    }
+                    return;
+                }
+
+                const slidesMap = new Map<number, any>();
+                const firstSlideNumber = eventPayload.slide_number;
+                if (typeof firstSlideNumber === 'number' && Number.isFinite(firstSlideNumber) && firstSlideNumber > 0) {
+                    slidesMap.set(firstSlideNumber, {
+                        slide_number: firstSlideNumber,
+                        title: eventPayload.title,
+                        image_url: eventPayload.image_url,
+                        prompt_text: eventPayload.prompt_text,
+                        structured_prompt: eventPayload.structured_prompt,
+                        rationale: eventPayload.rationale,
+                        layout_type: eventPayload.layout_type,
+                        selected_inputs: eventPayload.selected_inputs,
+                        status: eventPayload.status,
+                    });
+                }
+
+                const nextItem: any = {
+                    id: `visual-${baseArtifactId}`,
+                    type: 'artifact',
+                    timestamp,
+                    artifactId: baseArtifactId,
+                    title:
+                        (typeof eventPayload.deck_title === 'string' && eventPayload.deck_title.trim().length > 0)
+                            ? eventPayload.deck_title.trim()
+                            : (typeof eventPayload.title === 'string' && eventPayload.title.trim().length > 0)
+                                ? eventPayload.title.trim()
+                                : 'Generated Slides',
+                    icon: 'Image',
+                    kind: deckKind,
+                    mode: inferredMode || undefined,
+                    pdf_url:
+                        typeof eventPayload.pdf_url === 'string' && eventPayload.pdf_url.trim().length > 0
+                            ? eventPayload.pdf_url.trim()
+                            : undefined,
+                    aspectRatio: readAspectRatio(eventPayload),
+                    slides: Array.from(slidesMap.values()).sort(
+                        (a: any, b: any) => (a.slide_number || 0) - (b.slide_number || 0)
+                    ),
+                    status:
+                        type === 'data-visual-pdf'
+                            ? 'completed'
+                            : (typeof eventPayload.status === 'string' && eventPayload.status.trim().length > 0)
+                                ? eventPayload.status
+                                : 'streaming',
+                };
+
+                visualDeckMap.set(baseArtifactId, {
+                    item: nextItem as TimelineEvent,
+                    lastTimestamp: timestamp,
+                    slidesMap,
+                });
                 return;
             }
 
@@ -510,6 +660,10 @@ export function useChatTimeline(
             items.push(item);
         });
         writerArtifactMap.forEach(({ item, lastTimestamp }) => {
+            item.timestamp = lastTimestamp;
+            items.push(item);
+        });
+        visualDeckMap.forEach(({ item, lastTimestamp }) => {
             item.timestamp = lastTimestamp;
             items.push(item);
         });

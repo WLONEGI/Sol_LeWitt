@@ -4,6 +4,9 @@ import { TaskAccordion } from "./task-accordion";
 import { ArtifactButton } from "./artifact-button";
 import { WorkerResult } from "./worker-result";
 import { ResearchTaskCard } from "./message/research-task-card";
+import { DataAnalystTaskCard } from "./message/data-analyst-task-card";
+import { WriterStoryFrameworkCard } from "./message/writer-story-framework-card";
+import { WriterComicScriptCard } from "./message/writer-comic-script-card";
 import { ArtifactPreview } from "./artifact-preview";
 import { CodeExecutionBlock } from "./code-execution-block";
 import { SlideOutline } from "./slide-outline";
@@ -19,7 +22,6 @@ import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
     CHARACTER_SHEET_BUNDLE_ARTIFACT_ID,
-    inferVisualizerModeFromPayload,
     normalizeCharacterSheetBundle,
 } from "@/features/preview/lib/character-sheet-bundle";
 
@@ -81,7 +83,6 @@ export function ChatList({
     timeline,
     latestPlan,
     latestOutline,
-    latestSlideDeck,
     queuedUserMessage,
     isLoading,
     status,
@@ -96,6 +97,7 @@ export function ChatList({
     const scrollAreaRef = useRef<HTMLDivElement | null>(null);
     const viewportRef = useRef<HTMLElement | null>(null);
     const shouldAutoScrollRef = useRef(true);
+    const autoScrollRafRef = useRef<number | null>(null);
     const NEAR_BOTTOM_THRESHOLD = 120;
 
     useEffect(() => {
@@ -117,6 +119,10 @@ export function ChatList({
             if (viewportRef.current === viewport) {
                 viewportRef.current = null;
             }
+            if (autoScrollRafRef.current !== null) {
+                window.cancelAnimationFrame(autoScrollRafRef.current);
+                autoScrollRafRef.current = null;
+            }
         };
     }, []);
 
@@ -124,9 +130,15 @@ export function ChatList({
         const viewport = viewportRef.current;
         if (!viewport) return;
         if (!shouldAutoScrollRef.current) return;
-        viewport.scrollTo({
-            top: viewport.scrollHeight,
-            behavior: isLoading ? "auto" : "smooth",
+        if (autoScrollRafRef.current !== null) {
+            window.cancelAnimationFrame(autoScrollRafRef.current);
+        }
+        autoScrollRafRef.current = window.requestAnimationFrame(() => {
+            viewport.scrollTo({
+                top: viewport.scrollHeight,
+                behavior: "smooth",
+            });
+            autoScrollRafRef.current = null;
         });
     }, [timeline, isLoading]);
 
@@ -150,46 +162,10 @@ export function ChatList({
 
     const shouldRenderPendingAssistant = Boolean(isLoading && !isLastPartReasoning);
     const pendingLabel = status === "streaming" ? "Generating..." : "Thinking...";
-    const hasSlideDeckInTimeline = useMemo(
-        () =>
-            processedTimeline.some(
-                (item) =>
-                    item.type === "artifact" &&
-                    ((item as any).kind === "slide_deck" ||
-                        (item as any).kind === "character_sheet_deck" ||
-                        (item as any).kind === "comic_page_deck")
-            ),
-        [processedTimeline]
-    );
     const hasOutlineInTimeline = useMemo(
         () => processedTimeline.some((item) => item.type === "slide_outline"),
         [processedTimeline]
     );
-    const latestSlideDeckFromArtifactStore = useMemo(() => {
-        const slideDeckArtifacts = Object.values(artifacts).filter((artifact) => artifact?.type === "slide_deck");
-        if (slideDeckArtifacts.length === 0) return null;
-        const latestArtifact = slideDeckArtifacts
-            .slice()
-            .sort((a, b) => (b?.version ?? 0) - (a?.version ?? 0))[0];
-        if (!latestArtifact) return null;
-        const content = latestArtifact.content && typeof latestArtifact.content === "object" ? latestArtifact.content : {};
-        const mode = inferVisualizerModeFromPayload(content, typeof (content as any).mode === "string" ? (content as any).mode : null);
-        return {
-            artifactId: latestArtifact.id,
-            title: latestArtifact.title || "Generated Slides",
-            slides: Array.isArray(content.slides) ? content.slides : [],
-            status: latestArtifact.status || "completed",
-            pdf_url: typeof content.pdf_url === "string" ? content.pdf_url : undefined,
-            mode,
-            aspectRatio:
-                typeof (content as any).aspect_ratio === "string"
-                    ? (content as any).aspect_ratio
-                    : typeof (content as any).metadata?.aspect_ratio === "string"
-                        ? (content as any).metadata.aspect_ratio
-                        : undefined,
-        };
-    }, [artifacts]);
-    const effectiveLatestSlideDeck = latestSlideDeck ?? latestSlideDeckFromArtifactStore;
     const characterSheetVisualRunArtifactIds = useMemo(() => {
         const bundleArtifact = artifacts[CHARACTER_SHEET_BUNDLE_ARTIFACT_ID];
         const bundle = normalizeCharacterSheetBundle(bundleArtifact?.content);
@@ -345,6 +321,59 @@ export function ChatList({
         }
 
         if (item.type === "artifact") {
+            const artifactFromStore =
+                typeof item.artifactId === "string" && item.artifactId.trim().length > 0
+                    ? artifacts[item.artifactId]
+                    : undefined;
+            const isDataAnalystArtifact =
+                (item as any).kind === "data_analyst" || artifactFromStore?.type === "data_analyst";
+
+            if (isDataAnalystArtifact) {
+                return (
+                    <div key={key} className="flex w-full justify-start">
+                        <DataAnalystTaskCard
+                            className="max-w-4xl"
+                            title={item.title || artifactFromStore?.title || "Data Analyst"}
+                            status={(item as any).status || artifactFromStore?.status}
+                            content={artifactFromStore?.content}
+                        />
+                    </div>
+                );
+            }
+
+            const writerKind =
+                typeof (item as any).kind === "string"
+                    ? (item as any).kind
+                    : typeof artifactFromStore?.type === "string"
+                        ? artifactFromStore.type
+                        : null;
+
+            if (writerKind === "writer_story_framework") {
+                return (
+                    <div key={key} className="flex w-full justify-start">
+                        <WriterStoryFrameworkCard
+                            className="max-w-4xl"
+                            title={item.title || artifactFromStore?.title || "Story Framework"}
+                            status={(item as any).status || artifactFromStore?.status}
+                            content={artifactFromStore?.content}
+                        />
+                    </div>
+                );
+            }
+
+            if (writerKind === "writer_comic_script") {
+                return (
+                    <div key={key} className="flex w-full justify-start">
+                        <WriterComicScriptCard
+                            className="max-w-4xl"
+                            title={item.title || artifactFromStore?.title || "Comic Script"}
+                            status={(item as any).status || artifactFromStore?.status}
+                            content={artifactFromStore?.content}
+                        />
+                    </div>
+                );
+            }
+
             if (
                 (item as any).kind === "slide_deck" ||
                 (item as any).kind === "character_sheet_deck" ||
@@ -374,7 +403,6 @@ export function ChatList({
                         <ChatItem
                             role="assistant"
                             content=""
-                            name="Visualizer"
                             artifact={{
                                 kind: deckKind,
                                 id: previewArtifactId,
@@ -445,6 +473,7 @@ export function ChatList({
             return (
                 <div key={key} className="flex w-full justify-start">
                     <ResearchTaskCard
+                        className="max-w-3xl"
                         taskId={item.taskId}
                         perspective={item.perspective}
                         status={item.status}
@@ -509,6 +538,24 @@ export function ChatList({
                             key={`fallback-writer-${artifact.id}`}
                             artifactId={artifact.id}
                         />
+                    ) : artifact.type === "writer_story_framework" ? (
+                        <div key={`fallback-writer-${artifact.id}`} className="flex w-full justify-start">
+                            <WriterStoryFrameworkCard
+                                className="max-w-4xl"
+                                title={artifact.title || "Story Framework"}
+                                status={artifact.status}
+                                content={artifact.content}
+                            />
+                        </div>
+                    ) : artifact.type === "writer_comic_script" ? (
+                        <div key={`fallback-writer-${artifact.id}`} className="flex w-full justify-start">
+                            <WriterComicScriptCard
+                                className="max-w-4xl"
+                                title={artifact.title || "Comic Script"}
+                                status={artifact.status}
+                                content={artifact.content}
+                            />
+                        </div>
                     ) : (
                         <div key={`fallback-writer-${artifact.id}`} className="flex flex-col gap-1 pl-4 md:pl-10">
                             <ArtifactButton
@@ -519,44 +566,6 @@ export function ChatList({
                         </div>
                     )
                 ))}
-
-                {effectiveLatestSlideDeck && !hasSlideDeckInTimeline ? (
-                    <div className="flex flex-col gap-2">
-                        {(() => {
-                            const mode = typeof effectiveLatestSlideDeck.mode === "string"
-                                ? effectiveLatestSlideDeck.mode
-                                : null;
-                            const deckKind = resolveVisualDeckKind(mode);
-                            const aspectRatio = resolveVisualAspectRatio(
-                                mode,
-                                (effectiveLatestSlideDeck as any).aspectRatio || (effectiveLatestSlideDeck as any).metadata?.aspect_ratio,
-                                deckKind
-                            );
-                            const previewArtifactId =
-                                mode === "character_sheet_render" &&
-                                    typeof effectiveLatestSlideDeck.artifactId === "string" &&
-                                    characterSheetVisualRunArtifactIds.has(effectiveLatestSlideDeck.artifactId)
-                                    ? CHARACTER_SHEET_BUNDLE_ARTIFACT_ID
-                                    : (effectiveLatestSlideDeck.artifactId || "visual_deck");
-                            return (
-                                <ChatItem
-                                    role="assistant"
-                                    content=""
-                                    name="Visualizer"
-                                    artifact={{
-                                        kind: deckKind,
-                                        id: previewArtifactId,
-                                        title: effectiveLatestSlideDeck.title || "Generated Slides",
-                                        slides: Array.isArray(effectiveLatestSlideDeck.slides) ? effectiveLatestSlideDeck.slides : [],
-                                        status: effectiveLatestSlideDeck.status,
-                                        aspectRatio,
-                                    }}
-                                    isStreaming={effectiveLatestSlideDeck.status === "streaming"}
-                                />
-                            );
-                        })()}
-                    </div>
-                ) : null}
 
                 {shouldRenderPendingAssistant && (
                     <div className="flex flex-col gap-2">

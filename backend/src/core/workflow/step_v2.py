@@ -44,7 +44,7 @@ def default_mode_for_capability(
     if capability == "researcher":
         return "text_search"
     if capability == "data_analyst":
-        return "python_pipeline"
+        return "template_manifest_extract"
     return "generic"
 
 
@@ -83,6 +83,50 @@ def _normalize_depends_on(value: Any) -> list[int]:
     return out
 
 
+def _normalize_asset_requirements(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    seen_roles: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        role = _normalize_string(item.get("role"))
+        if not role:
+            continue
+        if role in seen_roles:
+            continue
+        seen_roles.add(role)
+
+        required = bool(item.get("required")) if isinstance(item.get("required"), bool) else False
+        scope_raw = _normalize_string(item.get("scope")) or "global"
+        scope = scope_raw if scope_raw in {"global", "per_unit"} else "global"
+
+        mime_allow = _normalize_str_list(item.get("mime_allow"))
+        source_preference = _normalize_str_list(item.get("source_preference"))
+
+        max_items_raw = item.get("max_items")
+        if isinstance(max_items_raw, int):
+            max_items = max(1, min(8, max_items_raw))
+        else:
+            max_items = 3
+
+        instruction = _normalize_string(item.get("instruction"))
+
+        row: dict[str, Any] = {
+            "role": role,
+            "required": required,
+            "scope": scope,
+            "mime_allow": mime_allow,
+            "source_preference": source_preference,
+            "max_items": max_items,
+        }
+        if instruction:
+            row["instruction"] = instruction
+        normalized.append(row)
+    return normalized
+
+
 def normalize_step_v2(
     raw_step: dict[str, Any],
     *,
@@ -96,7 +140,7 @@ def normalize_step_v2(
     Canonical keys:
     id, capability, mode, instruction, title, description,
     inputs, outputs, preconditions, validation, success_criteria,
-    fallback, depends_on, target_scope, design_direction,
+    fallback, depends_on, asset_requirements, target_scope, design_direction,
     status, result_summary.
     """
     step = dict(raw_step or {})
@@ -141,6 +185,7 @@ def normalize_step_v2(
         "success_criteria": _normalize_str_list(step.get("success_criteria")),
         "fallback": _normalize_str_list(step.get("fallback")),
         "depends_on": _normalize_depends_on(step.get("depends_on")),
+        "asset_requirements": _normalize_asset_requirements(step.get("asset_requirements")),
         "status": status,
         "result_summary": result_summary,
     }

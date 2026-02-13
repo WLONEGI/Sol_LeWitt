@@ -1,6 +1,7 @@
 from src.core.workflow.nodes.researcher import (
     _build_fallback_research_tasks,
     _ensure_minimum_task_diversity,
+    _ensure_unique_task_ids,
     _extract_instruction_perspectives,
 )
 from src.shared.schemas import ResearchTask
@@ -54,3 +55,27 @@ def test_ensure_minimum_task_diversity_expands_single_task() -> None:
     diversified = _ensure_minimum_task_diversity(single, instruction, step_mode="text_search")
     assert len(diversified) >= 2
     assert diversified[0].perspective != "単一観点"
+
+
+def test_ensure_unique_task_ids_reindexes_duplicates() -> None:
+    tasks = [
+        ResearchTask(
+            id=1,
+            perspective="観点A",
+            search_mode="text_search",
+            query_hints=["観点A"],
+            priority="high",
+            expected_output="A",
+        ),
+        ResearchTask(
+            id=1,
+            perspective="観点B",
+            search_mode="text_search",
+            query_hints=["観点B"],
+            priority="medium",
+            expected_output="B",
+        ),
+    ]
+
+    normalized = _ensure_unique_task_ids(tasks)
+    assert [task.id for task in normalized] == [1, 2]

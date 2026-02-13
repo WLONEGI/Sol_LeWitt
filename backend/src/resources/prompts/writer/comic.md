@@ -39,6 +39,26 @@ Required quality rules:
 5. Subject/Composition/Action の詳細定義はここで固定しすぎない。
    - キャラ固有の被写体定義は `character_sheet` で確定
    - コマ単位の構図/動作は `comic_script` で確定
+6. 情報密度の下限:
+   - `concept` は最低2文、または16文字以上で「誰が/何を/なぜ」を含める。
+   - `theme` は最低10文字以上で価値対立（例: 自由 vs 規律）を含める。
+   - `core_conflict` は最低18文字以上で対立主体・衝突条件・代償を含める。
+   - `world_policy.primary_locations` は2件以上、`social_rules` も2件以上。
+   - `arc_overview` は最低3フェーズ、各 `purpose` は12文字以上で行動レベルで書く。
+7. 作品の固有性ルール（重要）:
+   - `concept` は「既知の題材 × 未発見の切り口」で作る。凡庸な題材語の並列だけで終わらせない。
+   - `theme` は一般論（例: 友情は大切）だけで終わらせず、作品固有の価値対立を入れる。
+   - `core_conflict` には必ず「勝った時に得るもの」と「失った時の代償」を同時に入れる。
+8. 世界観3層ルール（既存フィールドで表現する）:
+   - 不変法則: `world_policy.social_rules` に「破ると何が起こるか」が分かる規則を最低1件入れる。
+   - 日常運用: `world_policy.primary_locations` は生活/仕事/統治など機能の異なる場所を含める。
+   - 代償: `core_conflict` または `arc_overview` に能力/制度/選択のコストを明記する。
+9. 冒頭フックルール:
+   - `arc_overview` の最初のフェーズ目的には「読者を掴む異常・謎・誓い」のいずれかを含める。
+   - 物語の最初の10ページ相当で提示すべき核心情報（欲望・異常・約束）を省略しない。
+10. 主人公変化の因果ルール:
+   - `arc_overview` は「出来事 -> 判断 -> 行動 -> 結果」の連鎖が見える文で書く。
+   - 突然の覚醒や都合の良い解決を前提にしない。変化には前段の根拠を置く。
 
 Line Art / Tone & Shading baseline (must be defined in `story_framework.art_style_policy`):
 - 線画:
@@ -77,6 +97,12 @@ Per character requirements:
 3. Optional field:
    - `speech_style`
 4. Identity anchors must be explicit and reusable across scenes.
+5. 属性ラベル禁止ルール:
+   - `core_personality` は形容詞の列挙で終わらせず、「圧力がかかった時にどう行動するか」を含める。
+   - `motivation` と `weakness_or_fear` は抽象語を避け、失敗時の具体的損失が想像できる文にする。
+6. 印象固定ルール:
+   - `signature_items` には場面を跨いで反復できる具体物を入れる（抽象語や概念語のみは禁止）。
+   - `speech_style` がある場合は語尾傾向だけでなく、目的達成時/追い詰め時の口調差を短く含める。
 
 Reference-image handling (`selected_image_inputs`):
 - If references exist, reflect them directly in `face_hair_anchors`, `costume_anchors`, and `silhouette_signature`.
@@ -106,10 +132,51 @@ Panel writing requirements:
 6. `negative_constraints` は `story_framework.art_style_policy.negative_constraints` を継承し、必要最小限の追加のみ行う。
 7. `camera` は angle + shot size を最低限含め、必要時のみ lens/tilt を追加する。
 8. `lighting` は時間帯/光源/コントラストを短く具体化する。
+9. 詳細度の下限（厳守）:
+   - `foreground` / `background` はそれぞれ14文字以上。
+   - `composition` は16文字以上で視線誘導・被写体配置を含める。
+   - `camera` / `lighting` は12文字以上で撮影意図が分かる語を含める。
+   - `dialogue` は各コマ最低1行。短すぎる相槌のみは禁止（意図・感情を含める）。
+   - `negative_constraints` は空にしない（最低1件以上）。
+10. 状況説明の具体化:
+   - `foreground` には「誰が」「何をしているか」「その瞬間の意図」を含める。
+   - `background` には時代感・場所の機能・状況手掛かり（群衆、天候、設備、痕跡など）を含める。
+   - `composition` には被写体配置（前景/中景/後景）と視線導線を明示する。
+   - `camera` は角度 + サイズに加え、必要時は距離感や歪み意図を補足する。
+   - `lighting` は光源方向・強弱・コントラスト理由（不安、緊張、安堵など）を含める。
+11. 背景・世界観の連続性ロック（最重要）:
+   - 連続するコマでは、明示的な場面転換がない限り `background` の世界設定を維持する。
+   - 同一シーン中は、最低2つの固定アンカー（例: 地名、建築様式、設備、天候、時間帯）を繰り返し保持する。
+   - `background` は `story_framework.world_policy.primary_locations` と `social_rules` に整合しない要素へ飛ばさない。
+   - 直前コマから場所・時刻・環境が変わる場合は、変化理由が分かる転換描写を最初の1コマ目で明示する。
+   - 連続シーンで「屋外路地→高層オフィス→学校教室」のような無根拠ジャンプは禁止。
+12. ページ内遷移ルール:
+   - 1ページ内では、原則として1シーンまたは隣接シーンに限定する。
+   - ページを跨ぐ転換は可能だが、最初のコマで `background` に転換情報（移動先/時間経過）を含める。
+13. 背景記述の書き方:
+   - `background` は「場所名 + 空間特徴 + 現在状態」の3要素を基本形にする。
+   - 例: 「第7区の蒸気路地、赤錆の配管群、夜間外出制限で人影がまばら」
+14. 冒頭ページ優先ルール（page 1-10）:
+   - 最初の10ページでは、各ページに最低1つ「作品固有フック」（異常な規則、未解決の謎、後戻り不能な選択）を入れる。
+   - 1-3ページのどこかで主人公の欲望または欠落を明示し、以後の行動と因果で接続する。
+15. 固有ディテール挿入ルール:
+   - 各ページで最低1コマは、職能・文化・道具・制度・癖などの具体ディテールを `foreground` か `background` に入れる。
+   - どの作品にも置き換え可能な無個性描写（例: ただの路地、ただの会議室）だけで終わらせない。
 
 Text rendering policy:
-- Prefer short speech lines.
-- For long exposition, split into multiple bubbles or reduce to concise key lines.
+- セリフは冗長にしないが、意味が欠ける短文化は禁止。
+- 説明が必要な場合は「短い文を複数」に分割して、意図を落とさない。
+- セリフは「話者の目的」「感情温度」「関係性の変化」の少なくとも1つを反映する。
+- 単なる状況説明の棒読みは避け、対立・迷い・決意のいずれかが伝わる文を優先する。
+
+Preflight self-check (返却前に内部確認):
+- `concept/theme/core_conflict/world_policy` が抽象語だけで終わっていないか。
+- 各パネルで `foreground/background/composition/camera/lighting/dialogue` が相互に矛盾していないか。
+- すべてのパネルで、読者が「誰が・どこで・何を・なぜ」を推定できるか。
+- 連続コマで `background` の場所・時刻・世界ルールが無根拠に変化していないか。
+- 1-10ページに「作品固有フック」が十分に配置され、冒頭で読む理由が成立しているか。
+- 主要人物の行動が `character_sheet` の動機/弱点/口調と因果的に接続しているか。
+- 不足がある場合は JSON を返す前に書き直してから返す。
 
 # Genre Optimization Hints (Comic Modes)
 - Shonen/action: dynamic pose, foreshortening, speed lines, bold contrast.

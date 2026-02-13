@@ -157,3 +157,25 @@ def test_build_snapshot_payload_supports_writer_structured_artifacts() -> None:
     writer_events = [event for event in snapshot["ui_events"] if event["type"] == "data-writer-output"]
     assert len(writer_events) == 1
     assert writer_events[0]["data"]["artifact_type"] == "writer_story_framework"
+
+
+def test_build_snapshot_payload_includes_coordinator_followups() -> None:
+    state_values = {
+        "messages": [],
+        "plan": [],
+        "artifacts": {},
+        "coordinator_followup_options": [
+            {"id": "f1", "prompt": "目的を明確化する"},
+            {"id": "f2", "prompt": "対象読者を定義する"},
+            {"id": "f3", "prompt": "トーンを指定する"},
+        ],
+    }
+
+    snapshot = _build_snapshot_payload("thread-followup", state_values)
+    followup_events = [event for event in snapshot["ui_events"] if event["type"] == "data-coordinator-followups"]
+
+    assert len(followup_events) == 1
+    options = followup_events[0]["data"]["options"]
+    assert len(options) == 3
+    assert options[0]["id"] == "f1"
+    assert options[0]["prompt"] == "目的を明確化する"

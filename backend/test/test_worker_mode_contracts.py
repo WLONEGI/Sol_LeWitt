@@ -1,4 +1,4 @@
-from src.core.workflow.nodes.planner import _normalize_plan_steps
+from src.core.workflow.nodes.planner import _finalize_plan, _normalize_plan_steps
 from src.shared.schemas.outputs import (
     ResearchImageCandidate,
     ResearchResult,
@@ -68,6 +68,60 @@ def test_planner_normalize_step_uses_canonical_v2() -> None:
     assert "role" not in steps[0]
     assert steps[0]["mode"] == "slide_outline"
     assert steps[0]["instruction"] == "漫画のページ構成を作る"
+
+
+def test_planner_normalize_step_normalizes_asset_requirements() -> None:
+    steps = _normalize_plan_steps(
+        [
+            {
+                "id": 1,
+                "capability": "visualizer",
+                "mode": "slide_render",
+                "instruction": "画像生成",
+                "asset_requirements": [
+                    {
+                        "role": "style_reference",
+                        "required": True,
+                        "scope": "global",
+                        "mime_allow": ["image/*"],
+                        "source_preference": ["user_upload"],
+                        "max_items": 99,
+                    },
+                    {
+                        "role": "style_reference",  # duplicate role should be dropped
+                        "required": False,
+                    },
+                ],
+            }
+        ],
+        product_type="slide",
+    )
+    requirements = steps[0]["asset_requirements"]
+    assert len(requirements) == 1
+    assert requirements[0]["role"] == "style_reference"
+    assert requirements[0]["required"] is True
+    assert requirements[0]["max_items"] == 8
+
+
+def test_planner_normalize_step_adds_required_character_reference_for_comic_visualizer() -> None:
+    steps = _finalize_plan(
+        raw_plan_steps=[
+            {
+                "id": 1,
+                "capability": "visualizer",
+                "mode": "comic_page_render",
+                "instruction": "漫画ページを描画する",
+            }
+        ],
+        product_type="comic",
+    )
+    requirements = steps[0]["asset_requirements"]
+    character_reference = next(
+        (item for item in requirements if item.get("role") == "character_reference"),
+        None,
+    )
+    assert character_reference is not None
+    assert character_reference["required"] is True
 
 
 def test_planner_normalize_comic_keeps_model_sequence_in_hybrid_mode() -> None:

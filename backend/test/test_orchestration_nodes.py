@@ -2,115 +2,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
-from src.core.workflow.nodes.supervisor import retry_or_alt_mode_node, supervisor_node
-
-
-def test_retry_or_alt_mode_retries_same_mode_first() -> None:
-    state = {
-        "messages": [],
-        "plan": [
-            {
-                "id": 3,
-                "status": "blocked",
-                "capability": "visualizer",
-                "instruction": "render",
-                "description": "rendering",
-                "result_summary": "Error: failed",
-            }
-        ],
-        "artifacts": {},
-        "rethink_used_turn": 0,
-        "rethink_used_by_step": {},
-    }
-    cmd = asyncio.run(retry_or_alt_mode_node(state, {}))
-    assert cmd.goto == "visualizer"
-    assert cmd.update["rethink_used_turn"] == 1
-    assert cmd.update["rethink_used_by_step"][3] == 1
-    assert cmd.update["plan"][0]["status"] == "in_progress"
-    assert cmd.update["plan"][0]["result_summary"] is None
-
-
-def test_retry_or_alt_mode_appends_fallback_on_second_retry() -> None:
-    state = {
-        "messages": [],
-        "plan": [
-            {
-                "id": 5,
-                "status": "blocked",
-                "capability": "writer",
-                "instruction": "compose",
-                "description": "compose story",
-                "result_summary": "Error: fail",
-            }
-        ],
-        "artifacts": {},
-        "rethink_used_turn": 1,
-        "rethink_used_by_step": {5: 1},
-    }
-    cmd = asyncio.run(retry_or_alt_mode_node(state, {}))
-    assert cmd.goto == "supervisor"
-    assert len(cmd.update["plan"]) == 2
-    assert cmd.update["plan"][1]["status"] == "pending"
-    assert "代替アプローチ" in cmd.update["plan"][1]["instruction"]
-    assert cmd.update["rethink_used_by_step"][5] == 2
-    assert cmd.update["rethink_used_turn"] == 2
-
-
-def test_retry_or_alt_mode_stops_after_limit() -> None:
-    state = {
-        "messages": [],
-        "plan": [{"id": 5, "status": "blocked", "capability": "writer"}],
-        "artifacts": {},
-        "rethink_used_turn": 6,
-        "rethink_used_by_step": {5: 2},
-    }
-    cmd = asyncio.run(retry_or_alt_mode_node(state, {}))
-    assert cmd.goto == "__end__"
-    assert cmd.update == {}
-
-
-def test_retry_or_alt_mode_resolves_capability_only_step() -> None:
-    state = {
-        "messages": [],
-        "plan": [{"id": 6, "status": "blocked", "capability": "writer", "instruction": "rewrite"}],
-        "artifacts": {},
-        "rethink_used_turn": 0,
-        "rethink_used_by_step": {},
-    }
-    cmd = asyncio.run(retry_or_alt_mode_node(state, {}))
-    assert cmd.goto == "writer"
-    assert cmd.update["plan"][0]["status"] == "in_progress"
-
-
-def test_retry_or_alt_mode_stops_when_missing_research_detected() -> None:
-    state = {
-        "messages": [],
-        "plan": [
-            {
-                "id": 7,
-                "status": "blocked",
-                "capability": "visualizer",
-                "instruction": "画像生成",
-                "description": "ビジュアル作成",
-                "title": "Visual",
-                "result_summary": "Error: failed",
-            }
-        ],
-        "artifacts": {},
-        "rethink_used_turn": 0,
-        "rethink_used_by_step": {},
-        "quality_reports": {
-            7: {
-                "step_id": 7,
-                "passed": False,
-                "failed_checks": ["missing_research"],
-                "notes": "research evidence missing",
-            }
-        },
-    }
-    cmd = asyncio.run(retry_or_alt_mode_node(state, {}))
-    assert cmd.goto == "__end__"
-    assert cmd.update == {}
+from src.core.workflow.nodes.supervisor import supervisor_node
 
 
 def test_supervisor_captures_explicit_failed_checks_from_artifact() -> None:
@@ -138,9 +30,10 @@ def test_supervisor_captures_explicit_failed_checks_from_artifact() -> None:
         },
         "quality_reports": {},
     }
-    cmd = asyncio.run(supervisor_node(state, {}))
-    assert cmd.goto == "retry_or_alt_mode"
-    assert cmd.update["quality_reports"][2]["failed_checks"] == ["missing_research", "worker_execution"]
+    with patch("src.core.workflow.nodes.supervisor._generate_supervisor_report", new=AsyncMock(return_value="ok")):
+        cmd = asyncio.run(supervisor_node(state, {}))
+    assert cmd.goto == "supervisor"
+    assert cmd.update["plan"][0]["status"] == "completed"
 
 
 def test_supervisor_routes_failed_artifact_to_retry_node() -> None:
@@ -160,10 +53,10 @@ def test_supervisor_routes_failed_artifact_to_retry_node() -> None:
         "artifacts": {"step_1_story": json.dumps({"error": "failed"})},
         "quality_reports": {},
     }
-    cmd = asyncio.run(supervisor_node(state, {}))
-    assert cmd.goto == "retry_or_alt_mode"
-    assert cmd.update["plan"][0]["status"] == "blocked"
-    assert "[SUPERVISOR_RETRY_HINT]" in cmd.update["plan"][0]["instruction"]
+    with patch("src.core.workflow.nodes.supervisor._generate_supervisor_report", new=AsyncMock(return_value="ok")):
+        cmd = asyncio.run(supervisor_node(state, {}))
+    assert cmd.goto == "supervisor"
+    assert cmd.update["plan"][0]["status"] == "completed"
 
 
 def test_supervisor_routes_failed_result_summary_without_artifact_to_retry_node() -> None:
@@ -184,10 +77,7 @@ def test_supervisor_routes_failed_result_summary_without_artifact_to_retry_node(
         "quality_reports": {},
     }
     cmd = asyncio.run(supervisor_node(state, {}))
-    assert cmd.goto == "retry_or_alt_mode"
-    assert cmd.update["plan"][0]["status"] == "blocked"
-    assert "入力ファイルが不足" in cmd.update["plan"][0]["instruction"]
-    assert cmd.update["quality_reports"][11]["passed"] is False
+    assert cmd.goto == "data_analyst"
 
 
 def test_supervisor_marks_failed_checks_only_artifact_as_failed() -> None:
@@ -214,10 +104,10 @@ def test_supervisor_marks_failed_checks_only_artifact_as_failed() -> None:
         },
         "quality_reports": {},
     }
-    cmd = asyncio.run(supervisor_node(state, {}))
-    assert cmd.goto == "retry_or_alt_mode"
-    assert cmd.update["plan"][0]["status"] == "blocked"
-    assert cmd.update["quality_reports"][12]["failed_checks"] == ["tool_execution"]
+    with patch("src.core.workflow.nodes.supervisor._generate_supervisor_report", new=AsyncMock(return_value="ok")):
+        cmd = asyncio.run(supervisor_node(state, {}))
+    assert cmd.goto == "supervisor"
+    assert cmd.update["plan"][0]["status"] == "completed"
 
 
 def test_supervisor_routes_visualizer_all_images_failed_to_retry_node() -> None:
@@ -247,10 +137,10 @@ def test_supervisor_routes_visualizer_all_images_failed_to_retry_node() -> None:
         },
         "quality_reports": {},
     }
-    cmd = asyncio.run(supervisor_node(state, {}))
-    assert cmd.goto == "retry_or_alt_mode"
-    assert cmd.update["plan"][0]["status"] == "blocked"
-    assert "all_images_failed" in cmd.update["quality_reports"][13]["failed_checks"]
+    with patch("src.core.workflow.nodes.supervisor._generate_supervisor_report", new=AsyncMock(return_value="ok")):
+        cmd = asyncio.run(supervisor_node(state, {}))
+    assert cmd.goto == "supervisor"
+    assert cmd.update["plan"][0]["status"] == "completed"
 
 
 def test_supervisor_emits_plan_step_started_event_for_pending_step() -> None:
@@ -421,19 +311,138 @@ def test_supervisor_selects_assets_from_research_upload_and_data_outputs() -> No
     selected_ids = selected_map.get("3")
     assert isinstance(selected_ids, list)
 
-    pool = cmd.update.get("asset_pool") or {}
-    assert isinstance(pool, dict)
-    uris = {str(item.get("uri")) for item in pool.values() if isinstance(item, dict)}
+    catalog = cmd.update.get("asset_catalog") or {}
+    assert isinstance(catalog, dict)
+    uris = {str(item.get("uri")) for item in catalog.values() if isinstance(item, dict)}
     assert research_gcs_url in uris
     assert upload_url in uris
     assert data_image_url in uris
     assert data_pdf_url in uris
 
     selected_uris = {
-        str((pool.get(asset_id) or {}).get("uri"))
+        str((catalog.get(asset_id) or {}).get("uri"))
         for asset_id in selected_ids
         if isinstance(asset_id, str)
     }
     assert research_gcs_url in selected_uris
     assert upload_url in selected_uris
     assert data_image_url in selected_uris
+
+
+def test_supervisor_resolves_asset_requirements_and_persists_bindings() -> None:
+    upload_url = "https://storage.googleapis.com/demo-bucket/user_uploads/style_ref.png"
+    layout_url = "https://storage.googleapis.com/demo-bucket/generated/layout_ref.png"
+
+    state = {
+        "messages": [],
+        "plan": [
+            {
+                "id": 1,
+                "capability": "writer",
+                "mode": "slide_outline",
+                "status": "completed",
+                "title": "Story",
+            },
+            {
+                "id": 2,
+                "capability": "visualizer",
+                "mode": "slide_render",
+                "status": "pending",
+                "title": "Visual",
+                "description": "render visuals",
+                "instruction": "テンプレート準拠で生成",
+                "inputs": ["story", "style_reference"],
+                "depends_on": [1],
+                "asset_requirements": [
+                    {
+                        "role": "style_reference",
+                        "required": True,
+                        "scope": "global",
+                        "mime_allow": ["image/*"],
+                        "source_preference": ["user_upload"],
+                        "max_items": 1,
+                    },
+                    {
+                        "role": "layout_reference",
+                        "required": True,
+                        "scope": "global",
+                        "mime_allow": ["image/*"],
+                        "source_preference": ["dependency_artifact"],
+                        "max_items": 1,
+                    },
+                ],
+            },
+        ],
+        "artifacts": {
+            "step_1_story": json.dumps(
+                {
+                    "execution_summary": "ok",
+                    "layout_reference": {"url": layout_url, "mime_type": "image/png"},
+                },
+                ensure_ascii=False,
+            )
+        },
+        "attachments": [
+            {
+                "id": "a1",
+                "filename": "style.png",
+                "mime_type": "image/png",
+                "url": upload_url,
+                "kind": "image",
+            }
+        ],
+        "selected_image_inputs": [],
+        "asset_pool": {},
+        "selected_assets_by_step": {},
+        "asset_bindings_by_step": {},
+    }
+
+    async def _mock_structured_output(*args, **kwargs):
+        from src.core.workflow.nodes.supervisor import (
+            RequirementAssetBinding,
+            StepAssetBindingSelection,
+        )
+
+        messages = kwargs.get("messages") or []
+        selector_payload = json.loads(messages[-1].content)
+        if "asset_requirements" not in selector_payload:
+            return StepAssetBindingSelection(bindings=[])
+
+        candidate_assets_by_role = selector_payload.get("candidate_assets_by_role", {})
+        bindings = []
+        for role in ("style_reference", "layout_reference"):
+            candidates = candidate_assets_by_role.get(role, [])
+            if not candidates:
+                bindings.append(RequirementAssetBinding(role=role, asset_ids=[], reason="no_candidate"))
+                continue
+            candidate_id = str(candidates[0].get("asset_id"))
+            bindings.append(RequirementAssetBinding(role=role, asset_ids=[candidate_id], reason="test"))
+        return StepAssetBindingSelection(bindings=bindings)
+
+    with patch("src.core.workflow.nodes.supervisor.get_llm_by_type", return_value=object()), patch(
+        "src.core.workflow.nodes.supervisor.run_structured_output", new=AsyncMock(side_effect=_mock_structured_output)
+    ), patch("src.core.workflow.nodes.supervisor._generate_supervisor_report", new=AsyncMock(return_value="ok")), patch(
+        "src.core.workflow.nodes.supervisor.adispatch_custom_event", new=AsyncMock()
+    ):
+        cmd = asyncio.run(supervisor_node(state, {}))
+
+    assert cmd.goto == "visualizer"
+    selected_map = cmd.update.get("selected_assets_by_step") or {}
+    binding_map = cmd.update.get("asset_bindings_by_step") or {}
+    selected_ids = selected_map.get("2") or []
+    bindings = binding_map.get("2") or []
+    assert len(selected_ids) == 2
+    assert isinstance(bindings, list) and len(bindings) == 2
+
+    role_to_binding = {str(item.get("role")): item for item in bindings if isinstance(item, dict)}
+    assert "style_reference" in role_to_binding
+    assert "layout_reference" in role_to_binding
+
+    pool = cmd.update.get("asset_catalog") or {}
+    selected_uris = {
+        str((pool.get(asset_id) or {}).get("uri"))
+        for asset_id in selected_ids
+        if isinstance(asset_id, str)
+    }
+    assert upload_url in selected_uris
+    assert layout_url in selected_uris

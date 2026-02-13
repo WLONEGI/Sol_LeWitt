@@ -22,6 +22,22 @@ interface SlideDeckPreviewProps {
     compact?: boolean;
 }
 
+const CHAT_PREVIEW_MAX_WIDTH_BY_ASPECT: Record<string, string> = {
+    "21:9": "max-w-[58rem]",
+    "16:9": "max-w-[52rem]",
+    "4:3": "max-w-[46rem]",
+    "1:1": "max-w-[40rem]",
+    "4:5": "max-w-[34rem]",
+    "3:4": "max-w-[32rem]",
+    "2:3": "max-w-[30rem]",
+    "9:16": "max-w-[24rem]",
+};
+
+function resolveChatPreviewContainerClass(aspectRatio?: string): string {
+    if (!aspectRatio) return CHAT_PREVIEW_MAX_WIDTH_BY_ASPECT["16:9"];
+    return CHAT_PREVIEW_MAX_WIDTH_BY_ASPECT[aspectRatio] || CHAT_PREVIEW_MAX_WIDTH_BY_ASPECT["16:9"];
+}
+
 export function SlideDeckPreview({
     artifactId,
     slides,
@@ -45,7 +61,7 @@ export function SlideDeckPreview({
                 "my-4 w-full",
                 compact
                     ? "flex flex-wrap items-start gap-3 max-w-[560px]"
-                    : "flex flex-col gap-6 max-w-2xl"
+                    : cn("flex flex-col gap-6", resolveChatPreviewContainerClass(aspectRatio))
             )}
         >
             {slides.map((slide, idx) => (
@@ -71,6 +87,14 @@ export function SlideDeckPreview({
                             </span>
                         </div>
                         <div className={cn("flex items-center shrink-0", compact ? "gap-1" : "gap-3")}>
+                            {!compact && aspectRatio && (
+                                <span
+                                    className="rounded-md border border-white/10 bg-black/20 px-2 py-1 text-[11px] font-mono font-semibold tracking-tight text-muted-foreground"
+                                    title={`Aspect ratio: ${aspectRatio}`}
+                                >
+                                    {aspectRatio}
+                                </span>
+                            )}
                             {slide.status === "generating" && (
                                 <Loader2 className={cn("animate-spin text-primary/60", compact ? "w-3 h-3" : "w-3.5 h-3.5")} />
                             )}

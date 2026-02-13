@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
-from src.infrastructure.llm.llm import get_llm_by_type
+from src.infrastructure.llm.llm import astream_with_retry, get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
 from src.shared.schemas import PlannerOutput
 from src.core.workflow.state import State
@@ -45,6 +45,15 @@ FIXED_FALLBACK = [
 ]
 
 SUPPORTED_PRODUCT_TYPES = {"slide", "design", "comic"}
+
+SLIDE_WRITER_DENSITY_CHECKS: tuple[str, ...] = (
+    "非タイトルスライドに具体データ（数値・期間・比較軸・固有名詞）が含まれる",
+    "主張と根拠の対応関係が確認できる",
+)
+SLIDE_VISUALIZER_DENSITY_CHECKS: tuple[str, ...] = (
+    "Writerで定義した数値・列挙情報が画像で欠落していない",
+    "非タイトルスライドが装飾過多でなく情報伝達を優先している",
+)
 
 
 def _step_signature(step: dict[str, Any]) -> tuple[str, str]:
@@ -392,6 +401,140 @@ def _default_research_perspectives(product_type: str | None) -> list[str]:
     ]
 
 
+def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    lowered = text.lower()
+    return any(keyword in text or keyword in lowered for keyword in keywords)
+
+
+def _default_asset_requirements_for_step(step: dict[str, Any]) -> list[dict[str, Any]]:
+    capability = capability_from_any(step)
+    mode = str(step.get("mode") or "")
+    text = _step_text_blob(step)
+
+    if capability == "visualizer":
+        requirements: list[dict[str, Any]] = [
+            {
+                "role": "style_reference",
+                "required": False,
+                "scope": "global",
+                "mime_allow": ["image/*"],
+                "source_preference": ["user_upload", "selected_image_input"],
+                "max_items": 2,
+            },
+            {
+                "role": "layout_reference",
+                "required": False,
+                "scope": "per_unit",
+                "mime_allow": ["image/*", "application/pdf"],
+                "source_preference": ["derived_template", "dependency_artifact"],
+                "max_items": 1,
+            },
+        ]
+        if _contains_any(text, ("inpaint", "in-paint", "マスク", "修正範囲")):
+            requirements.extend(
+                [
+                    {
+                        "role": "base_image",
+                        "required": True,
+                        "scope": "per_unit",
+                        "mime_allow": ["image/*"],
+                        "source_preference": [],
+                        "max_items": 1,
+                    },
+                    {
+                        "role": "mask_image",
+                        "required": True,
+                        "scope": "per_unit",
+                        "mime_allow": ["image/*"],
+                        "source_preference": [],
+                        "max_items": 1,
+                    },
+                ]
+            )
+        if mode == "character_sheet_render":
+            requirements.append(
+                {
+                    "role": "character_reference",
+                    "required": False,
+                    "scope": "global",
+                    "mime_allow": ["image/*"],
+                    "source_preference": ["dependency_artifact"],
+                    "max_items": 3,
+                }
+            )
+        if mode == "comic_page_render":
+            requirements.append(
+                {
+                    "role": "character_reference",
+                    "required": True,
+                    "scope": "global",
+                    "mime_allow": ["image/*"],
+                    "source_preference": ["dependency_artifact"],
+                    "max_items": 6,
+                }
+            )
+        return requirements
+
+    if capability == "data_analyst":
+        template_required = _contains_any(text, ("pptx", "テンプレート", "master", "layout"))
+        return [
+            {
+                "role": "template_source",
+                "required": template_required,
+                "scope": "global",
+                "mime_allow": [
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    "application/pdf",
+                    "image/*",
+                ],
+                "source_preference": ["user_upload", "dependency_artifact"],
+                "max_items": 3,
+            },
+            {
+                "role": "data_source",
+                "required": False,
+                "scope": "global",
+                "mime_allow": [
+                    "text/csv",
+                    "application/json",
+                    "application/pdf",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ],
+                "source_preference": ["dependency_artifact", "user_upload"],
+                "max_items": 5,
+            },
+        ]
+
+    if capability == "writer":
+        return [
+            {
+                "role": "reference_document",
+                "required": False,
+                "scope": "global",
+                "mime_allow": ["application/pdf", "text/*", "application/json", "image/*"],
+                "source_preference": ["dependency_artifact", "user_upload"],
+                "max_items": 4,
+            }
+        ]
+
+    return []
+
+
+def _ensure_asset_requirements(plan_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    updated: list[dict[str, Any]] = []
+    for step in plan_steps:
+        next_step = dict(step)
+        existing = next_step.get("asset_requirements")
+        if isinstance(existing, list) and existing:
+            updated.append(next_step)
+            continue
+        defaults = _default_asset_requirements_for_step(next_step)
+        if defaults:
+            next_step["asset_requirements"] = defaults
+        updated.append(next_step)
+    return updated
+
+
 def _ensure_multi_perspective_research_steps(
     plan_steps: list[dict[str, Any]],
     product_type: str | None,
@@ -429,8 +572,193 @@ def _ensure_multi_perspective_research_steps(
     return updated
 
 
+def _merge_required_strings(existing: Any, required: tuple[str, ...]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    if isinstance(existing, list):
+        for item in existing:
+            if not isinstance(item, str):
+                continue
+            text = item.strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+
+    for item in required:
+        text = item.strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        merged.append(text)
+
+    return merged
+
+
+def _append_instruction_block_if_missing(base_text: Any, block_title: str, block_body: str) -> str:
+    text = str(base_text or "").strip()
+    if block_title in text:
+        return text
+    if not text:
+        return f"{block_title}\n{block_body}"
+    return f"{text}\n\n{block_title}\n{block_body}"
+
+
+def _enforce_slide_information_density_plan(plan_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    updated: list[dict[str, Any]] = []
+    for step in plan_steps:
+        next_step = dict(step)
+        capability = capability_from_any(next_step)
+        mode = str(next_step.get("mode") or "")
+
+        if capability == "writer" and mode in {"slide_outline", "infographic_spec"}:
+            next_step["instruction"] = _append_instruction_block_if_missing(
+                next_step.get("instruction"),
+                "情報密度要件:",
+                "- 非タイトルスライドに具体データ（数値・期間・比較軸・固有名詞）を含める。\n"
+                "- 主張と根拠の対応を明示し、曖昧語だけの記述を避ける。",
+            )
+            next_step["validation"] = _merge_required_strings(
+                next_step.get("validation"),
+                SLIDE_WRITER_DENSITY_CHECKS,
+            )
+            next_step["success_criteria"] = _merge_required_strings(
+                next_step.get("success_criteria"),
+                SLIDE_WRITER_DENSITY_CHECKS,
+            )
+
+        if capability == "visualizer" and mode == "slide_render":
+            next_step["instruction"] = _append_instruction_block_if_missing(
+                next_step.get("instruction"),
+                "情報反映要件:",
+                "- Writerアウトラインの数値・比較軸・列挙情報を漏れなく反映する。\n"
+                "- 装飾優先ではなく、情報伝達と可読性を優先する。",
+            )
+            next_step["validation"] = _merge_required_strings(
+                next_step.get("validation"),
+                SLIDE_VISUALIZER_DENSITY_CHECKS,
+            )
+            next_step["success_criteria"] = _merge_required_strings(
+                next_step.get("success_criteria"),
+                SLIDE_VISUALIZER_DENSITY_CHECKS,
+            )
+
+        updated.append(next_step)
+    return updated
+
+
+def _is_valid_request_intent(value: Any) -> bool:
+    return isinstance(value, str) and value in {"new", "refine", "regenerate"}
+
+
+def _plan_execution_snapshot(plan: Any) -> dict[str, Any]:
+    snapshot = {
+        "total": 0,
+        "pending": 0,
+        "in_progress": 0,
+        "completed": 0,
+        "blocked": 0,
+    }
+    if not isinstance(plan, list):
+        return snapshot
+
+    for step in plan:
+        if not isinstance(step, dict):
+            continue
+        snapshot["total"] += 1
+        status = str(step.get("status") or "pending")
+        if status in snapshot:
+            snapshot[status] += 1
+        else:
+            snapshot["pending"] += 1
+    return snapshot
+
+
+def _unfinished_steps_snapshot(plan: Any) -> list[dict[str, Any]]:
+    if not isinstance(plan, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for step in plan:
+        if not isinstance(step, dict):
+            continue
+        status = str(step.get("status") or "pending")
+        if status == "completed":
+            continue
+        step_id = step.get("id")
+        rows.append(
+            {
+                "id": int(step_id) if isinstance(step_id, int) else None,
+                "status": status,
+                "capability": capability_from_any(step),
+                "mode": str(step.get("mode") or ""),
+                "title": str(step.get("title") or ""),
+                "depends_on": list(step.get("depends_on") or []) if isinstance(step.get("depends_on"), list) else [],
+                "result_summary": str(step.get("result_summary") or ""),
+            }
+        )
+    return rows
+
+
+async def _invoke_planner_llm(
+    *,
+    llm: Any,
+    messages: list[Any],
+    stream_config: RunnableConfig,
+) -> PlannerOutput:
+    full_text = ""
+    async for chunk in astream_with_retry(
+        lambda: llm.astream(messages, config=stream_config),
+        operation_name="planner.astream",
+    ):
+        if not getattr(chunk, "content", None):
+            continue
+        _, text = split_content_parts(chunk.content)
+        if text:
+            full_text += text
+
+    try:
+        json_text = extract_first_json(full_text) or full_text
+        return PlannerOutput.model_validate_json(json_text)
+    except Exception as parse_error:
+        logger.warning("Planner streaming JSON parse failed: %s. Falling back to repair.", parse_error)
+        return await run_structured_output(
+            llm=llm,
+            schema=PlannerOutput,
+            messages=messages,
+            config=stream_config,
+            repair_hint="Schema: PlannerOutput. No extra text.",
+        )
+
+
+def _finalize_plan(
+    *,
+    raw_plan_steps: list[dict[str, Any]],
+    product_type: str,
+) -> list[dict[str, Any]]:
+    plan_data = _normalize_plan_steps(raw_plan_steps, product_type=product_type)
+    plan_data = _ensure_multi_perspective_research_steps(plan_data, product_type=product_type)
+    plan_data = _ensure_asset_requirements(plan_data)
+    if product_type == "slide":
+        plan_data = _enforce_slide_information_density_plan(plan_data)
+    return plan_data
+
+
+def _planner_ui_message(plan_data: list[dict[str, Any]]) -> AIMessage:
+    return AIMessage(
+        content="Plan Created",
+        additional_kwargs={
+            "ui_type": "plan_update",
+            "plan": plan_steps_for_ui(plan_data),
+            "title": "Execution Plan",
+            "description": "The updated execution plan.",
+        },
+        name="planner_ui",
+    )
+
+
 async def planner_node(state: State, config: RunnableConfig) -> Command[Literal["supervisor", "__end__"]]:
-    """Planner node - uses structured output for reliable JSON execution plan."""
+    """Planner node (single-turn optimized: always create a fresh plan)."""
     logger.info("Planner creating execution plan")
 
     product_type = state.get("product_type") if isinstance(state.get("product_type"), str) else None
@@ -449,20 +777,27 @@ async def planner_node(state: State, config: RunnableConfig) -> Command[Literal[
         )
 
     latest_user_text = _extract_latest_user_text(state)
-    request_intent = (
-        state.get("request_intent")
-        if isinstance(state.get("request_intent"), str) and state.get("request_intent") in {"new", "refine", "regenerate"}
-        else _detect_intent(latest_user_text)
-    )
-    has_existing_plan = bool(state.get("plan"))
-    planning_mode = "replan" if has_existing_plan and request_intent in {"refine", "regenerate"} else "initial"
+    request_intent = state.get("request_intent") if _is_valid_request_intent(state.get("request_intent")) else _detect_intent(latest_user_text)
+    planning_mode = "create"
+    existing_plan: list[dict[str, Any]] = []
+    target_scope = state.get("target_scope") if isinstance(state.get("target_scope"), dict) else {}
 
     context_state = deepcopy(state)
     context_state["product_type"] = product_type
-    context_state["request_intent"] = request_intent
+    context_state["request_intent"] = str(request_intent)
     context_state["planning_mode"] = planning_mode
     context_state["latest_user_text"] = latest_user_text
-    context_state["plan"] = json.dumps(state.get("plan", []), ensure_ascii=False, indent=2)
+    context_state["plan"] = json.dumps(existing_plan, ensure_ascii=False, indent=2)
+    context_state["plan_execution_snapshot"] = json.dumps(
+        _plan_execution_snapshot(existing_plan),
+        ensure_ascii=False,
+    )
+    context_state["unfinished_steps"] = json.dumps(
+        _unfinished_steps_snapshot(existing_plan),
+        ensure_ascii=False,
+    )
+    context_state["target_scope"] = json.dumps(target_scope or {}, ensure_ascii=False)
+    context_state["interrupt_intent"] = "true" if bool(state.get("interrupt_intent")) else "false"
 
     messages = apply_prompt_template("planner", context_state)
     logger.debug(f"[DEBUG] Planner Input Messages: {messages}")
@@ -476,32 +811,20 @@ async def planner_node(state: State, config: RunnableConfig) -> Command[Literal[
         stream_config = config.copy()
         stream_config["run_name"] = "planner"
 
-        # Stream tokens via on_chat_model_stream; keep final JSON in-buffer
-        full_text = ""
-        async for chunk in llm.astream(messages, config=stream_config):
-            if not getattr(chunk, "content", None):
-                continue
-            thinking_text, text = split_content_parts(chunk.content)
-            if text:
-                full_text += text
-
-        try:
-            json_text = extract_first_json(full_text) or full_text
-            planner_output = PlannerOutput.model_validate_json(json_text)
-        except Exception as parse_error:
-            logger.warning(f"Planner streaming JSON parse failed: {parse_error}. Falling back to repair.")
-            planner_output = await run_structured_output(
-                llm=llm,
-                schema=PlannerOutput,
-                messages=messages,
-                config=stream_config,
-                repair_hint="Schema: PlannerOutput. No extra text."
-            )
+        planner_output = await _invoke_planner_llm(
+            llm=llm,
+            messages=messages,
+            stream_config=stream_config,
+        )
 
         logger.debug(f"[DEBUG] Planner Output: {planner_output}")
-        plan_data = [step.model_dump(exclude_none=True) for step in planner_output.steps]
-        plan_data = _normalize_plan_steps(plan_data, product_type=product_type)
-        plan_data = _ensure_multi_perspective_research_steps(plan_data, product_type=product_type)
+        proposed_steps = [step.model_dump(exclude_none=True) for step in planner_output.steps]
+        proposed_steps = _finalize_plan(
+            raw_plan_steps=proposed_steps,
+            product_type=product_type,
+        )
+
+        plan_data = proposed_steps
 
         missing_research, reason = _missing_required_research_step(plan_data, latest_user_text)
         if missing_research:
@@ -514,21 +837,22 @@ async def planner_node(state: State, config: RunnableConfig) -> Command[Literal[
         
         return Command(
             update={
-                "messages": [
-                    AIMessage(
-                        content="Plan Created",
-                        additional_kwargs={
-                            "ui_type": "plan_update",
-                            "plan": plan_steps_for_ui(plan_data),
-                            "title": "Execution Plan",
-                            "description": "The updated execution plan."
-                        },
-                        name="planner_ui"
-                    )
-                ],
-                "request_intent": request_intent,
+                "messages": [_planner_ui_message(plan_data)],
+                "request_intent": str(request_intent),
+                "planning_mode": planning_mode,
                 "plan": plan_data,
-                "artifacts": {}
+                # Single-turn optimization: reset per-request execution state.
+                "artifacts": {},
+                "interrupt_intent": False,
+                # Top-level scope is short-lived; concrete scope stays on each plan step.
+                "target_scope": {},
+                "quality_reports": {},
+                "asset_unit_ledger": {},
+                "asset_catalog": {},
+                "candidate_assets_by_step": {},
+                "selected_assets_by_step": {},
+                "asset_bindings_by_step": {},
+                "coordinator_followup_options": [],
             },
             goto="supervisor",
         )

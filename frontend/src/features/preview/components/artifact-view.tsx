@@ -82,7 +82,11 @@ export function ArtifactView() {
         )
     }
 
-    const title = activeResearchTask ? "Research Report" : (displayArtifact?.title || "Artifact")
+    const title = activeResearchTask
+        ? "Research Report"
+        : displayArtifact?.type === "writer_character_sheet"
+            ? "Preview"
+            : (displayArtifact?.title || "Artifact")
     const subtitle = activeResearchTask ? activeResearchTask.perspective : undefined
     const renderContent = () => {
         if (activeResearchTask) {

@@ -422,6 +422,15 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
         }
         if (eventType === 'output' && payload.output) {
             nextContent.output = payload.output
+            if (!nextContent.input && payload.output.input) {
+                nextContent.input = payload.output.input
+            }
+            if ((!nextContent.code || String(nextContent.code).trim().length === 0) && typeof payload.output.implementation_code === 'string') {
+                nextContent.code = payload.output.implementation_code
+            }
+            if ((!nextContent.log || String(nextContent.log).trim().length === 0) && typeof payload.output.execution_log === 'string') {
+                nextContent.log = payload.output.execution_log
+            }
         }
 
         const nextStatus =

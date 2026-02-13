@@ -182,7 +182,7 @@ def package_visual_assets_tool(
         return json.dumps(
             {
                 "status": "ok",
-                "image_paths": normalized_images,
+                "input_image_count": len(normalized_images),
                 "pptx_path": pptx_path,
                 "pdf_path": pdf_path,
                 "zip_path": zip_path,
@@ -192,4 +192,3 @@ def package_visual_assets_tool(
     except Exception as e:
         logger.error("package_visual_assets_tool failed: %s", e)
         return f"Error: {e}"
-

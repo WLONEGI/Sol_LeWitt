@@ -19,8 +19,18 @@ source .venv/bin/activate
 
 ### 環境設定 (`.env`)
 `.env.example` をコピーし、以下の必須項目を設定してください。
-- `VERTEX_PROJECT_ID`: Google Cloud プロジェクト ID
-- `POSTGRES_DB_URI`: データベース接続 URI
+
+- **Google Cloud 関連**
+  - `VERTEX_PROJECT_ID`: Google Cloud プロジェクト ID
+  - `VERTEX_LOCATION`: リージョン (例: `asia-northeast1`)
+  - `GCS_BUCKET_NAME`: 成果物保存用バケット名
+- **認証 関連**
+  - `FIREBASE_SERVICE_ACCOUNT_JSON`: Firebase サービスアカウント JSON
+  - `FIREBASE_AUTH_DOMAIN`: Firebase Auth ドメイン
+- **データベース 関連**
+  - `POSTGRES_DB_URI`: データベース接続 URI (例: `postgresql+psycopg://user:pass@localhost:5432/db`)
+- **外部サービス 関連**
+  - `TAVILY_API_KEY`: 検索エージェント用 API キー (任意)
 
 ## 2. サーバーの起動
 ```bash

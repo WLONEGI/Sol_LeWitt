@@ -6,8 +6,8 @@
 メインの対話ロジックは `@ai-sdk/react` の `useChat` を通じて実装されています。
 
 - **Transport**: `DefaultChatTransport` を使用し、`/api/chat/stream` エンドポイントと通信。
-- **Metadata**: 実行時に `thread_id` を body に含め、バックエンドでの状態復元を実現。
-- **Flexible Data**: `data` オブジェクトを通じて、通常のテキストメッセージ (`0:`) 以外のカスタムデータ (`d:`) をリアルタイムに取得。
+- **Metadata**: 実行時に `thread_id` や `product_type` (`slide`, `design`, `comic`) を body に含め、バックエンドでの状態復元を実現。
+- **Data Stream Protocol**: Vercel AI SDK の Data Stream Protocol を採用し、テキストメッセージ (`0:`) とカスタムデータ (`d:`)、思考プロセス (`e:`) を混在させて受信。
 
 ## 2. カスタムフック: `useChatTimeline`
 `useChat` の生データ（`data`, `messages`）を受け取り、UI に表示するための「タイムライン」へと変換するリアクティブなフックです。

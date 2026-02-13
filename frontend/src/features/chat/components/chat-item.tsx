@@ -4,13 +4,15 @@ import { cn } from "@/lib/utils"
 import { Markdown } from "@/components/ui/markdown"
 import { motion } from "framer-motion";
 import { FileCode2, FileImage, FileSpreadsheet, FileText } from "lucide-react";
-import type { ComponentType } from "react";
+import { type ComponentType, useEffect, useRef, useState } from "react";
 import { SlideDeckPreview } from "./slide-deck-preview"; // Assuming relative path
 import { CharacterSheetDeckPreview } from "./character-sheet-deck-preview";
 import { ComicPageDeckPreview } from "./comic-page-deck-preview";
 import { ToolInvocationBlock } from "./tool-invocation";
 import { TimelineReasoning } from "./timeline-reasoning";
 import { WaveText } from "@/components/ui/wave-text";
+
+const STREAM_TYPEWRITER_SPEED_MS = 30;
 
 interface ChatItemProps {
     role: 'user' | 'assistant' | 'system';
@@ -86,12 +88,58 @@ export function ChatItem({ role, content, parts, avatar, name, className, isStre
         (part) => part?.type === 'reasoning' && typeof part.text === 'string'
     );
     const shouldShowLoader = isStreaming && !isUser && streamedText.length === 0 && !hasReasoningPart;
+    const [displayedStreamLength, setDisplayedStreamLength] = useState(0);
+    const streamTimerRef = useRef<number | null>(null);
+    const shouldTypeStreamText = isStreaming && !isUser && !hasReasoningPart;
+
+    useEffect(() => {
+        if (streamTimerRef.current !== null) {
+            window.clearTimeout(streamTimerRef.current);
+            streamTimerRef.current = null;
+        }
+
+        if (!shouldTypeStreamText) {
+            setDisplayedStreamLength(streamedText.length);
+            return;
+        }
+
+        if (streamedText.length < displayedStreamLength) {
+            setDisplayedStreamLength(0);
+            return;
+        }
+
+        if (displayedStreamLength >= streamedText.length) {
+            return;
+        }
+
+        streamTimerRef.current = window.setTimeout(() => {
+            setDisplayedStreamLength((prev) => Math.min(prev + 1, streamedText.length));
+            streamTimerRef.current = null;
+        }, STREAM_TYPEWRITER_SPEED_MS);
+
+        return () => {
+            if (streamTimerRef.current !== null) {
+                window.clearTimeout(streamTimerRef.current);
+                streamTimerRef.current = null;
+            }
+        };
+    }, [displayedStreamLength, shouldTypeStreamText, streamedText]);
+
+    useEffect(() => {
+        return () => {
+            if (streamTimerRef.current !== null) {
+                window.clearTimeout(streamTimerRef.current);
+                streamTimerRef.current = null;
+            }
+        };
+    }, []);
 
     const shouldRenderDeck =
         artifact &&
         (artifact.kind === 'slide_deck' ||
             artifact.kind === 'character_sheet_deck' ||
             artifact.kind === 'comic_page_deck');
+    const typedStreamText = shouldTypeStreamText ? streamedText.slice(0, displayedStreamLength) : streamedText;
 
     // Render visual deck cards in chat stream.
     if (shouldRenderDeck && artifact) {
@@ -146,13 +194,13 @@ export function ChatItem({ role, content, parts, avatar, name, className, isStre
                                 className="text-sm font-medium text-muted-foreground"
                             />
                         </div>
-                    ) : isStreaming && !isUser && !hasReasoningPart ? (
+                    ) : shouldTypeStreamText ? (
                         <div>
                             <Markdown className={cn(
                                 "prose prose-base prose-tight max-w-none text-gray-800 leading-normal font-medium",
                                 "font-sans",
                                 "prose-p:text-gray-800 prose-p:leading-normal prose-p:font-medium prose-headings:text-gray-900 prose-strong:text-gray-900 prose-li:text-gray-800 prose-li:font-medium prose-code:text-blue-600 prose-code:bg-blue-50 prose-code:px-1 prose-code:rounded prose-code:before:content-none prose-code:after:content-none"
-                            )}>{streamedText}</Markdown>
+                            )}>{typedStreamText}</Markdown>
                         </div>
                     ) : (
                         <div className="flex flex-col w-full">

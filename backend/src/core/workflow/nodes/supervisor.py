@@ -6,35 +6,39 @@ from pydantic import BaseModel, Field
 
 from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
-from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, RemoveMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.callbacks.manager import adispatch_custom_event
 
-from src.infrastructure.llm.llm import get_llm_by_type
+from src.infrastructure.llm.llm import astream_with_retry, get_llm_by_type
 from src.resources.prompts.template import apply_prompt_template
 from src.core.workflow.state import State
-from src.core.workflow.step_v2 import capability_from_any, normalize_step_v2, plan_steps_for_ui
+from src.core.workflow.step_v2 import capability_from_any, plan_steps_for_ui
 from .common import run_structured_output, resolve_step_dependency_context, build_step_asset_pool
 
 logger = logging.getLogger(__name__)
 
-MAX_MESSAGES = 40
-KEEP_LAST_MESSAGES = 10
-MAX_ARTIFACTS = 20
-MAX_RETHINK_PER_TASK = 2
-MAX_RETHINK_PER_TURN = 6
 CAPABILITY_TO_DESTINATION = {
     "writer": "writer",
     "researcher": "researcher",
     "visualizer": "visualizer",
     "data_analyst": "data_analyst",
 }
-SUPERVISOR_RETRY_HINT_MARKER = "[SUPERVISOR_RETRY_HINT]"
 MAX_SELECTED_ASSETS_PER_STEP = 8
 
 
 class StepAssetSelection(BaseModel):
     selected_asset_ids: list[str] = Field(default_factory=list, description="選択したasset_id一覧")
     reason: str | None = Field(default=None, description="選択理由")
+
+
+class RequirementAssetBinding(BaseModel):
+    role: str = Field(description="asset requirement role")
+    asset_ids: list[str] = Field(default_factory=list, description="選択したasset_id一覧")
+    reason: str | None = Field(default=None, description="選択理由")
+
+
+class StepAssetBindingSelection(BaseModel):
+    bindings: list[RequirementAssetBinding] = Field(default_factory=list, description="roleごとの選択結果")
 
 
 def _extract_text_from_content(content: Any) -> str:
@@ -194,14 +198,6 @@ def _hydrate_target_scope_from_ledger(
     return next_scope
 
 
-def _next_step_id(plan: list[dict[str, Any]]) -> int:
-    max_id = 0
-    for step in plan:
-        value = step.get("id") if isinstance(step, dict) else None
-        if isinstance(value, int):
-            max_id = max(max_id, value)
-    return max_id + 1
-
 def _normalize_plan_statuses(plan: list[dict]) -> None:
     """Normalize statuses in-place to canonical values."""
     for step in plan:
@@ -253,28 +249,13 @@ def _result_summary_indicates_failure(text: str | None) -> bool:
     return any(keyword in lowered or keyword in trimmed for keyword in keyword_groups)
 
 
-def _resolve_origin_step_id(step: dict) -> int:
-    origin_step_id = step.get("origin_step_id", step.get("id"))
-    if isinstance(origin_step_id, int):
-        return origin_step_id
-    return int(step.get("id") or 0)
-
-
-def _strip_supervisor_retry_hint(instruction: str) -> str:
-    marker_index = instruction.find(SUPERVISOR_RETRY_HINT_MARKER)
-    if marker_index >= 0:
-        return instruction[:marker_index].rstrip()
-    return instruction.strip()
-
-
-def _build_retry_instruction(
+def _build_failure_instruction(
     *,
     instruction: str | None,
     result_summary: str | None,
     failed_checks: list[str],
-    step_retry_count: int,
 ) -> str:
-    base_instruction = _strip_supervisor_retry_hint(instruction or "")
+    base_instruction = (instruction or "").strip()
     if not base_instruction:
         base_instruction = "タスクを実行する"
 
@@ -286,17 +267,14 @@ def _build_retry_instruction(
     if not notes:
         notes.append("前回結果: 出力が要件を満たしませんでした。")
 
-    retries_left = max(MAX_RETHINK_PER_TASK - step_retry_count, 0)
     guidance = (
-        "修正指示: 上記の失敗要因を解消して同じ成果物を再生成してください。"
-        "出力が不完全な場合も完了扱いにしないでください。"
+        "上記の失敗要因を解消したうえで再リクエストしてください。"
+        "現在の実行は失敗として終了します。"
     )
     return (
-        f"{base_instruction}\n\n"
-        f"{SUPERVISOR_RETRY_HINT_MARKER}\n"
+        f"{base_instruction}\n\n[SUPERVISOR_FAILURE]\n"
         f"{' / '.join(notes)}\n"
-        f"{guidance}\n"
-        f"残り再試行回数: {retries_left}"
+        f"{guidance}"
     )
 
 
@@ -390,21 +368,226 @@ def _extract_failure_metadata(current_step: dict, artifact_value: object) -> tup
     failed_checks = sorted(set(failed_checks))
     return failed, failed_checks, notes
 
-def _merge_updates(*updates: dict) -> dict:
-    """Merge update dicts while concatenating messages."""
-    merged: dict = {}
-    for update in updates:
-        if not update:
+def _normalize_step_asset_requirements(step: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = step.get("asset_requirements")
+    if not isinstance(raw, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    seen_roles: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
             continue
-        for key, value in update.items():
-            if key == "messages":
-                merged.setdefault("messages", []).extend(value)
-            elif key == "artifacts":
-                prev = merged.get("artifacts", {})
-                merged["artifacts"] = {**prev, **value}
-            else:
-                merged[key] = value
-    return merged
+        role = str(item.get("role") or "").strip()
+        if not role or role in seen_roles:
+            continue
+        seen_roles.add(role)
+        scope = str(item.get("scope") or "global").strip()
+        if scope not in {"global", "per_unit"}:
+            scope = "global"
+        mime_allow = [str(v).strip() for v in (item.get("mime_allow") or []) if isinstance(v, str) and str(v).strip()]
+        source_preference = [
+            str(v).strip() for v in (item.get("source_preference") or []) if isinstance(v, str) and str(v).strip()
+        ]
+        max_items = item.get("max_items")
+        if not isinstance(max_items, int):
+            max_items = 3
+        max_items = max(1, min(max_items, MAX_SELECTED_ASSETS_PER_STEP))
+        normalized.append(
+            {
+                "role": role,
+                "required": bool(item.get("required")) if isinstance(item.get("required"), bool) else False,
+                "scope": scope,
+                "mime_allow": mime_allow,
+                "source_preference": source_preference,
+                "max_items": max_items,
+                "instruction": str(item.get("instruction") or "").strip() or None,
+            }
+        )
+    return normalized
+
+
+def _asset_hints(item: dict[str, Any]) -> list[str]:
+    hints = item.get("role_hints")
+    if isinstance(hints, list):
+        return [str(v).strip().lower() for v in hints if isinstance(v, str) and str(v).strip()]
+    return []
+
+
+def _mime_matches(asset: dict[str, Any], pattern: str) -> bool:
+    mime_type = str(asset.get("mime_type") or "").lower()
+    uri = str(asset.get("uri") or "").lower()
+    is_image = bool(asset.get("is_image"))
+    candidate = pattern.strip().lower()
+    if not candidate:
+        return False
+    if candidate == "*/*":
+        return True
+    if candidate == "image/*":
+        return is_image or mime_type.startswith("image/")
+    if candidate.endswith("/*"):
+        prefix = candidate[:-1]
+        return mime_type.startswith(prefix)
+    if mime_type == candidate:
+        return True
+    if candidate == "application/pdf":
+        return uri.endswith(".pdf")
+    if candidate == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+        return uri.endswith(".pptx")
+    if candidate == "text/csv":
+        return uri.endswith(".csv")
+    if candidate == "application/json":
+        return uri.endswith(".json")
+    return False
+
+
+def _matches_role_semantics(asset: dict[str, Any], role: str) -> bool:
+    role_l = role.lower()
+    is_image = bool(asset.get("is_image"))
+    mime_type = str(asset.get("mime_type") or "").lower()
+    uri = str(asset.get("uri") or "").lower()
+    hints = set(_asset_hints(asset))
+
+    if role_l in {"style_reference", "reference_image", "character_reference", "base_image", "mask_image"}:
+        return is_image or mime_type.startswith("image/")
+    if role_l == "layout_reference":
+        return is_image or mime_type.startswith("image/") or mime_type == "application/pdf" or uri.endswith(".pdf")
+    if role_l == "template_source":
+        return (
+            "template_source" in hints
+            or uri.endswith(".pptx")
+            or mime_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            or mime_type == "application/pdf"
+            or is_image
+        )
+    if role_l == "data_source":
+        return "data_source" in hints or (not is_image)
+    if role_l == "reference_document":
+        return mime_type.startswith("text/") or mime_type == "application/pdf" or (not is_image)
+    return True
+
+
+def _matches_source_preference(asset: dict[str, Any], source_preference: list[str]) -> bool:
+    if not source_preference:
+        return True
+    blob = " ".join(
+        [
+            str(asset.get("source_type") or "").lower(),
+            str(asset.get("producer_mode") or "").lower(),
+            str(asset.get("producer_capability") or "").lower(),
+            str(asset.get("label") or "").lower(),
+            str(asset.get("title") or "").lower(),
+            " ".join(_asset_hints(asset)),
+        ]
+    )
+    for pref in source_preference:
+        token = str(pref or "").strip().lower()
+        if token and token in blob:
+            return True
+    return False
+
+
+def _filter_assets_by_requirement(
+    requirement: dict[str, Any],
+    asset_pool: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    role = str(requirement.get("role") or "")
+    mime_allow = [str(v) for v in (requirement.get("mime_allow") or []) if isinstance(v, str)]
+    source_preference = [str(v) for v in (requirement.get("source_preference") or []) if isinstance(v, str)]
+
+    candidates: list[dict[str, Any]] = []
+    for item in asset_pool.values():
+        if not isinstance(item, dict):
+            continue
+        if mime_allow and not any(_mime_matches(item, pattern) for pattern in mime_allow):
+            continue
+        if not _matches_role_semantics(item, role):
+            continue
+        if source_preference and not _matches_source_preference(item, source_preference):
+            continue
+        candidates.append(item)
+
+    if candidates:
+        return candidates
+
+    # source_preferenceで該当ゼロなら、前段の制約を緩めて再取得する
+    if source_preference:
+        for item in asset_pool.values():
+            if not isinstance(item, dict):
+                continue
+            if mime_allow and not any(_mime_matches(item, pattern) for pattern in mime_allow):
+                continue
+            if not _matches_role_semantics(item, role):
+                continue
+            candidates.append(item)
+    return candidates
+
+
+def _asset_rank_score(asset: dict[str, Any], requirement: dict[str, Any]) -> int:
+    score = 0
+    role = str(requirement.get("role") or "").lower()
+    hints = set(_asset_hints(asset))
+    source_type = str(asset.get("source_type") or "").lower()
+    producer_step_id = int(asset.get("producer_step_id") or 0)
+
+    if role in hints:
+        score += 7
+    if role in {"style_reference", "reference_image"} and source_type in {"user_upload", "selected_image_input"}:
+        score += 5
+    if role in {"layout_reference", "template_source"} and (
+        "template_source" in hints or source_type in {"user_upload", "dependency_artifact"}
+    ):
+        score += 5
+    if role == "data_source" and ("data_source" in hints or not bool(asset.get("is_image"))):
+        score += 4
+    if bool(asset.get("is_image")) and role in {"style_reference", "layout_reference", "character_reference"}:
+        score += 2
+    score += max(min(producer_step_id, 100), 0)
+    return score
+
+
+def _sort_candidates_for_requirement(
+    requirement: dict[str, Any],
+    asset_pool: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates = _filter_assets_by_requirement(requirement, asset_pool)
+    return sorted(
+        candidates,
+        key=lambda item: (
+            _asset_rank_score(item, requirement),
+            int(item.get("producer_step_id") or 0),
+        ),
+        reverse=True,
+    )
+
+
+def _fallback_asset_bindings(
+    requirements: list[dict[str, Any]],
+    asset_pool: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not requirements:
+        return []
+    bindings: list[dict[str, Any]] = []
+    for requirement in requirements:
+        role = str(requirement.get("role") or "").strip()
+        if not role:
+            continue
+        max_items = int(requirement.get("max_items") or 3)
+        sorted_candidates = _sort_candidates_for_requirement(requirement, asset_pool)
+        selected_ids: list[str] = []
+        for item in sorted_candidates:
+            asset_id = item.get("asset_id")
+            if isinstance(asset_id, str) and asset_id not in selected_ids:
+                selected_ids.append(asset_id)
+            if len(selected_ids) >= max_items:
+                break
+        bindings.append(
+            {
+                "role": role,
+                "asset_ids": selected_ids,
+                "reason": "rule_based_fallback",
+            }
+        )
+    return bindings
 
 
 def _fallback_selected_asset_ids(
@@ -430,32 +613,181 @@ def _fallback_selected_asset_ids(
     return selected
 
 
+def _asset_candidate_payload(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "asset_id": item.get("asset_id"),
+        "source_type": item.get("source_type"),
+        "mime_type": item.get("mime_type"),
+        "is_image": bool(item.get("is_image")),
+        "producer_step_id": item.get("producer_step_id"),
+        "producer_capability": item.get("producer_capability"),
+        "producer_mode": item.get("producer_mode"),
+        "label": item.get("label"),
+        "title": item.get("title"),
+        "role_hints": item.get("role_hints") if isinstance(item.get("role_hints"), list) else [],
+    }
+
+
 async def _select_assets_for_step(
     *,
     state: State,
     step: dict[str, Any],
     dependency_context: dict[str, Any],
     config: RunnableConfig,
-) -> tuple[dict[str, dict[str, Any]], list[str]]:
+) -> tuple[dict[str, dict[str, Any]], list[str], list[dict[str, Any]]]:
     asset_pool = build_step_asset_pool(state, current_step=step, dependency_context=dependency_context)
     if not asset_pool:
-        return asset_pool, []
+        return asset_pool, [], []
 
     step_id = step.get("id")
-    candidate_assets = []
-    for item in asset_pool.values():
-        candidate_assets.append(
-            {
-                "asset_id": item.get("asset_id"),
-                "source_type": item.get("source_type"),
-                "mime_type": item.get("mime_type"),
-                "is_image": bool(item.get("is_image")),
-                "producer_step_id": item.get("producer_step_id"),
-                "producer_capability": item.get("producer_capability"),
-                "label": item.get("label"),
-                "title": item.get("title"),
+    requirements = _normalize_step_asset_requirements(step)
+    candidate_assets = [_asset_candidate_payload(item) for item in asset_pool.values()]
+
+    if requirements:
+        sorted_candidates_by_role: dict[str, list[dict[str, Any]]] = {}
+        requirement_candidates: dict[str, list[dict[str, Any]]] = {}
+        for requirement in requirements:
+            role = str(requirement.get("role") or "").strip()
+            if not role:
+                continue
+            sorted_candidates = _sort_candidates_for_requirement(requirement, asset_pool)
+            sorted_candidates_by_role[role] = sorted_candidates
+            requirement_candidates[role] = [_asset_candidate_payload(item) for item in sorted_candidates[:12]]
+
+        selector_input = {
+            "step_id": step_id,
+            "capability": step.get("capability"),
+            "mode": step.get("mode"),
+            "instruction": step.get("instruction"),
+            "description": step.get("description"),
+            "inputs": step.get("inputs") or [],
+            "depends_on": step.get("depends_on") or [],
+            "asset_requirements": requirements,
+            "candidate_assets_by_role": requirement_candidates,
+            "candidate_assets": candidate_assets,
+        }
+
+        selector_messages = [
+            SystemMessage(
+                content=(
+                    "あなたはSupervisor配下のアセット解決器です。"
+                    "asset_requirementsごとに適切なasset_idを選択してください。"
+                    "各roleはmax_items以内、required=trueのroleは可能な限り空にしないでください。"
+                    "出力はStepAssetBindingSelectionスキーマに厳密準拠してください。"
+                )
+            ),
+            HumanMessage(content=json.dumps(selector_input, ensure_ascii=False), name="supervisor"),
+        ]
+
+        selected_bindings: list[dict[str, Any]] = []
+        try:
+            llm = get_llm_by_type("reasoning")
+            stream_config = config.copy()
+            stream_config["run_name"] = "supervisor_asset_requirement_resolver"
+            selection = await run_structured_output(
+                llm=llm,
+                schema=StepAssetBindingSelection,
+                messages=selector_messages,
+                config=stream_config,
+                repair_hint="Schema: StepAssetBindingSelection. No extra text.",
+            )
+            role_to_requirement = {
+                str(req.get("role")): req for req in requirements if isinstance(req.get("role"), str)
             }
-        )
+            for row in selection.bindings:
+                role = str(row.role).strip()
+                if not role or role not in role_to_requirement:
+                    continue
+                requirement = role_to_requirement[role]
+                max_items = int(requirement.get("max_items") or 3)
+                valid_candidates = sorted_candidates_by_role.get(role) or _sort_candidates_for_requirement(
+                    requirement, asset_pool
+                )
+                valid_ids = {
+                    str(item.get("asset_id"))
+                    for item in valid_candidates
+                    if isinstance(item.get("asset_id"), str)
+                }
+                deduped_ids: list[str] = []
+                for asset_id in row.asset_ids:
+                    if not isinstance(asset_id, str):
+                        continue
+                    if asset_id not in asset_pool:
+                        continue
+                    if valid_ids and asset_id not in valid_ids:
+                        continue
+                    if asset_id in deduped_ids:
+                        continue
+                    deduped_ids.append(asset_id)
+                    if len(deduped_ids) >= max_items:
+                        break
+                selected_bindings.append(
+                    {
+                        "role": role,
+                        "asset_ids": deduped_ids,
+                        "reason": row.reason,
+                    }
+                )
+        except Exception as e:
+            logger.warning("Supervisor requirement-based asset selection failed, fallback is applied: %s", e)
+
+        if not selected_bindings:
+            selected_bindings = _fallback_asset_bindings(requirements, asset_pool)
+
+        # required roleが空ならfallbackで補完
+        existing_roles = {str(row.get("role")) for row in selected_bindings if isinstance(row, dict)}
+        for requirement in requirements:
+            role = str(requirement.get("role") or "").strip()
+            if not role or role in existing_roles:
+                continue
+            selected_bindings.append(
+                {
+                    "role": role,
+                    "asset_ids": [],
+                    "reason": "missing_in_llm_response",
+                }
+            )
+
+        role_to_binding = {
+            str(row.get("role")): row
+            for row in selected_bindings
+            if isinstance(row, dict) and isinstance(row.get("role"), str)
+        }
+        for requirement in requirements:
+            role = str(requirement.get("role") or "").strip()
+            if not role or not requirement.get("required"):
+                continue
+            binding = role_to_binding.get(role)
+            asset_ids = binding.get("asset_ids") if isinstance(binding, dict) else None
+            if isinstance(asset_ids, list) and asset_ids:
+                continue
+            fallback_row = _fallback_asset_bindings([requirement], asset_pool)
+            if fallback_row and fallback_row[0].get("asset_ids"):
+                role_to_binding[role] = fallback_row[0]
+            elif binding is None:
+                role_to_binding[role] = {"role": role, "asset_ids": [], "reason": "required_but_not_found"}
+
+        finalized_bindings = list(role_to_binding.values())
+        selected_ids: list[str] = []
+        for row in finalized_bindings:
+            asset_ids = row.get("asset_ids")
+            if not isinstance(asset_ids, list):
+                continue
+            for asset_id in asset_ids:
+                if not isinstance(asset_id, str):
+                    continue
+                if asset_id not in asset_pool or asset_id in selected_ids:
+                    continue
+                selected_ids.append(asset_id)
+                if len(selected_ids) >= MAX_SELECTED_ASSETS_PER_STEP:
+                    break
+            if len(selected_ids) >= MAX_SELECTED_ASSETS_PER_STEP:
+                break
+
+        if not selected_ids:
+            selected_ids = _fallback_selected_asset_ids(step, asset_pool)
+
+        return asset_pool, selected_ids, finalized_bindings
 
     selector_input = {
         "step_id": step_id,
@@ -509,77 +841,7 @@ async def _select_assets_for_step(
     if not selected_ids:
         selected_ids = _fallback_selected_asset_ids(step, asset_pool)
 
-    return asset_pool, selected_ids
-
-def _format_messages_for_summary(messages: list) -> str:
-    lines = []
-    for m in messages:
-        if getattr(m, "type", None) in ("human", "ai", "system"):
-            lines.append(f"{m.type}: {m.content}")
-    return "\n".join(lines)
-
-async def _compact_state_if_needed(state: State, config: RunnableConfig) -> dict | None:
-    """Summarize and delete old messages using RemoveMessage."""
-    try:
-        messages = state.get("messages", [])
-        if len(messages) <= MAX_MESSAGES:
-            return None
-
-        old_messages = messages[:-KEEP_LAST_MESSAGES]
-        removable = [m for m in old_messages if getattr(m, "id", None)]
-        if not removable:
-            return None
-
-        summary_source = _format_messages_for_summary(old_messages)
-        if not summary_source:
-            return None
-
-        previous_summary = state.get("summary") or ""
-        prompt = (
-            "Summarize the following conversation briefly in Japanese, focusing on "
-            "user intent, decisions, and produced artifacts.\n\n"
-            f"Existing summary (if any):\n{previous_summary}\n\n"
-            f"New conversation to summarize:\n{summary_source}"
-        )
-
-        llm = get_llm_by_type("basic")
-        stream_config = config.copy()
-        stream_config["run_name"] = "supervisor_summarizer"
-
-        summary_response = await llm.ainvoke([SystemMessage(content=prompt)], config=stream_config)
-        summary_text = (summary_response.content or "").strip()
-        if not summary_text:
-            return None
-
-        # Remove any prior summary messages that are old enough to be in the removable set
-        removal_ids = {
-            m.id
-            for m in old_messages
-            if getattr(m, "id", None) and getattr(m, "name", "") == "summary"
-        }
-        removal_ids.update({m.id for m in removable})
-        remove_ops = [RemoveMessage(id=mid) for mid in removal_ids]
-
-        return {
-            "messages": remove_ops + [
-                SystemMessage(content=f"Conversation Summary:\n{summary_text}", name="summary")
-            ],
-            "summary": summary_text
-        }
-    except Exception as e:
-        logger.warning(f"State compaction failed: {e}")
-        return None
-
-def _prune_artifacts_if_needed(state: State) -> dict | None:
-    """Remove oldest artifacts by setting value=None (see reducer)."""
-    artifacts = state.get("artifacts", {})
-    if len(artifacts) <= MAX_ARTIFACTS:
-        return None
-    keys = list(artifacts.keys())
-    to_remove = keys[:-MAX_ARTIFACTS]
-    if not to_remove:
-        return None
-    return {"artifacts": {k: None for k in to_remove}}
+    return asset_pool, selected_ids, []
 
 async def _generate_supervisor_report(
     state: State,
@@ -651,7 +913,10 @@ async def _generate_supervisor_report(
         stream_config = config.copy()
         stream_config["run_name"] = "supervisor"
         
-        async for chunk in llm.astream(messages, config=stream_config):
+        async for chunk in astream_with_retry(
+            lambda: llm.astream(messages, config=stream_config),
+            operation_name="supervisor.astream",
+        ):
             if chunk.content:
                 if isinstance(chunk.content, list):
                     for part in chunk.content:
@@ -716,101 +981,15 @@ async def _dispatch_plan_step_ended(step: dict, status: str, config: RunnableCon
         logger.warning(f"Failed to dispatch plan step ended: {e}")
 
 
-async def retry_or_alt_mode_node(
-    state: State, config: RunnableConfig
-) -> Command[Literal["researcher", "writer", "visualizer", "data_analyst", "supervisor", "__end__"]]:
-    """
-    Retry policy:
-      - first retry: same mode
-      - second retry: append fallback step
-      - exceed limits: end
-    """
-    product_type = state.get("product_type") if isinstance(state.get("product_type"), str) else None
-    plan = [
-        normalize_step_v2(
-            dict(step),
-            product_type=product_type,
-            fallback_capability=capability_from_any(dict(step)),
-            fallback_instruction=str(dict(step).get("instruction") or "タスクを実行する"),
-            fallback_title=str(dict(step).get("title") or dict(step).get("description") or "タスク"),
-        )
-        for step in (state.get("plan", []) or [])
-        if isinstance(step, dict)
-    ]
-    blocked_index = -1
-    blocked_step: dict[str, Any] | None = None
-    for idx in range(len(plan) - 1, -1, -1):
-        step = plan[idx]
-        if step.get("status") == "blocked":
-            blocked_index = idx
-            blocked_step = step
-            break
+def _find_current_step(plan: list[dict[str, Any]]) -> tuple[int, dict[str, Any] | None]:
+    for index, step in enumerate(plan):
+        if step.get("status") == "in_progress":
+            return index, step
+    for index, step in enumerate(plan):
+        if step.get("status") == "pending":
+            return index, step
+    return -1, None
 
-    if blocked_step is None:
-        return Command(goto="supervisor", update={})
-
-    origin_step_id = blocked_step.get("origin_step_id", blocked_step.get("id"))
-    if not isinstance(origin_step_id, int):
-        origin_step_id = int(blocked_step.get("id") or 0)
-
-    rethink_used_by_step = dict(state.get("rethink_used_by_step", {}) or {})
-    rethink_used_turn = int(state.get("rethink_used_turn", 0) or 0)
-    step_retry_count = int(rethink_used_by_step.get(origin_step_id, 0) or 0)
-
-    if rethink_used_turn >= MAX_RETHINK_PER_TURN or step_retry_count >= MAX_RETHINK_PER_TASK:
-        return Command(goto="__end__", update={})
-
-    destination = _resolve_worker_destination(blocked_step)
-    if destination is None:
-        return Command(goto="supervisor", update={})
-
-    quality_reports = dict(state.get("quality_reports", {}) or {})
-    report = quality_reports.get(origin_step_id)
-    failed_checks = report.get("failed_checks") if isinstance(report, dict) else None
-    if isinstance(failed_checks, list) and any(str(item) == "missing_research" for item in failed_checks):
-        return Command(goto="__end__", update={})
-
-    rethink_used_by_step[origin_step_id] = step_retry_count + 1
-    rethink_used_turn += 1
-
-    if step_retry_count == 0:
-        plan[blocked_index]["status"] = "in_progress"
-        plan[blocked_index]["result_summary"] = None
-        return Command(
-            goto=destination,  # type: ignore[arg-type]
-            update={
-                "plan": plan,
-                "rethink_used_turn": rethink_used_turn,
-                "rethink_used_by_step": rethink_used_by_step,
-            },
-        )
-
-    next_id = _next_step_id(plan)
-    fallback_step = dict(blocked_step)
-    fallback_step["id"] = next_id
-    fallback_step["status"] = "pending"
-    fallback_step["origin_step_id"] = origin_step_id
-    fallback_step["instruction"] = f"代替アプローチで実行: {blocked_step.get('instruction', '')}"
-    fallback_step["description"] = f"{blocked_step.get('description', 'タスク')}（代替）"
-    fallback_step["result_summary"] = None
-    plan.append(
-        normalize_step_v2(
-            fallback_step,
-            product_type=product_type,
-            fallback_capability=capability_from_any(fallback_step) or "writer",
-            fallback_instruction=str(fallback_step.get("instruction") or "代替アプローチを実行する"),
-            fallback_title=str(fallback_step.get("title") or fallback_step.get("description") or "代替タスク"),
-        )
-    )
-
-    return Command(
-        goto="supervisor",
-        update={
-            "plan": plan,
-            "rethink_used_turn": rethink_used_turn,
-            "rethink_used_by_step": rethink_used_by_step,
-        },
-    )
 
 async def supervisor_node(state: State, config: RunnableConfig) -> Command:
     """
@@ -821,23 +1000,7 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command:
     plan = state.get("plan", [])
     _normalize_plan_statuses(plan)
     
-    current_step_index = -1
-    current_step = None
-    
-    # Check for in-progress step
-    for i, step in enumerate(plan):
-        if step.get("status") == "in_progress":
-            current_step_index = i
-            current_step = step
-            break
-            
-    # If no step is in progress, find the first pending step
-    if current_step is None:
-        for i, step in enumerate(plan):
-            if step.get("status") == "pending":
-                current_step_index = i
-                current_step = step
-                break
+    current_step_index, current_step = _find_current_step(plan)
     
     if current_step is None:
         logger.info("All steps completed. Generating final report.")
@@ -859,42 +1022,6 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command:
         
         artifacts = state.get("artifacts", {})
         artifact_exists = artifact_key in artifacts
-        artifact_value = artifacts.get(artifact_key) if artifact_exists else None
-        has_result_summary = isinstance(current_step.get("result_summary"), str) and bool(
-            str(current_step.get("result_summary")).strip()
-        )
-        failed, failed_checks, failure_notes = _extract_failure_metadata(current_step, artifact_value)
-
-        if failed and (artifact_exists or has_result_summary):
-            plan[current_step_index]["status"] = "blocked"
-            step_retry_count = int(
-                (state.get("rethink_used_by_step", {}) or {}).get(_resolve_origin_step_id(current_step), 0) or 0
-            )
-            plan[current_step_index]["instruction"] = _build_retry_instruction(
-                instruction=str(current_step.get("instruction") or ""),
-                result_summary=failure_notes or current_step.get("result_summary"),
-                failed_checks=failed_checks,
-                step_retry_count=step_retry_count,
-            )
-            await _dispatch_plan_step_ended(current_step, "blocked", config)
-            quality_reports = dict(state.get("quality_reports", {}) or {})
-            step_id = current_step.get("id")
-            if isinstance(step_id, int):
-                quality_reports[step_id] = {
-                    "step_id": step_id,
-                    "passed": False,
-                    "failed_checks": failed_checks,
-                    "notes": failure_notes or current_step.get("result_summary") or "Worker output indicates failure.",
-                }
-            logger.warning(
-                "Step %s (%s) marked blocked by supervisor result_summary decision.",
-                current_step_index,
-                destination or "unknown",
-            )
-            return Command(
-                goto="retry_or_alt_mode",
-                update={"plan": plan, "quality_reports": quality_reports},
-            )
 
         if artifact_exists:
 
@@ -907,24 +1034,20 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command:
             # Generate report after completion
             report = await _generate_supervisor_report(state, config, report_event="step_completed")
 
-            compact_update = await _compact_state_if_needed(state, config)
-            prune_update = _prune_artifacts_if_needed(state)
-
             return Command(
                 goto="supervisor",
-                update=_merge_updates(
-                    {"plan": plan, "messages": [AIMessage(content=report, name="supervisor")]},
-                    compact_update,
-                    prune_update
-                )
+                update={
+                    "plan": plan,
+                    "messages": [AIMessage(content=report, name="supervisor")],
+                },
             )
         else:
              if destination is None:
                  logger.error(f"Step {current_step_index} has no resolvable destination.")
                  plan[current_step_index]["status"] = "blocked"
                  return Command(
-                     goto="retry_or_alt_mode",
-                     update={"plan": plan}
+                     goto="__end__",
+                     update={"plan": plan},
                  )
              logger.info(f"Step {current_step_index} ({destination}) in progress but no artifact. Re-assigning.")
              return Command(goto=destination)
@@ -934,25 +1057,29 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command:
             logger.error(f"Pending step {current_step_index} has no resolvable destination.")
             plan[current_step_index]["status"] = "blocked"
             return Command(
-                goto="retry_or_alt_mode",
-                update={"plan": plan}
+                goto="__end__",
+                update={"plan": plan},
             )
 
         logger.info(f"Starting Step {current_step_index} ({destination})")
 
         dependency_context = resolve_step_dependency_context(state, current_step)
-        step_asset_pool, selected_asset_ids = await _select_assets_for_step(
+        step_asset_pool, selected_asset_ids, selected_asset_bindings = await _select_assets_for_step(
             state=state,
             step=current_step,
             dependency_context=dependency_context,
             config=config,
         )
-        merged_asset_pool = dict(state.get("asset_pool") or {})
-        merged_asset_pool.update(step_asset_pool)
+        asset_catalog = dict(state.get("asset_catalog") or {})
+        asset_catalog.update(step_asset_pool)
+        candidate_assets_by_step = dict(state.get("candidate_assets_by_step") or {})
         selected_assets_by_step = dict(state.get("selected_assets_by_step") or {})
+        asset_bindings_by_step = dict(state.get("asset_bindings_by_step") or {})
         step_id = current_step.get("id")
         if isinstance(step_id, int):
+            candidate_assets_by_step[str(step_id)] = list(step_asset_pool.keys())
             selected_assets_by_step[str(step_id)] = selected_asset_ids
+            asset_bindings_by_step[str(step_id)] = selected_asset_bindings
 
         plan[current_step_index]["status"] = "in_progress"
         await _dispatch_plan_step_started(current_step, config)
@@ -964,6 +1091,7 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command:
                     "capability": current_step.get("capability"),
                     "mode": current_step.get("mode"),
                     "selected_asset_ids": selected_asset_ids,
+                    "asset_bindings": selected_asset_bindings,
                 },
                 config=config,
             )
@@ -975,21 +1103,16 @@ async def supervisor_node(state: State, config: RunnableConfig) -> Command:
         # Generate report for next step
         report = await _generate_supervisor_report(state, config, report_event="step_started")
 
-        compact_update = await _compact_state_if_needed(state, config)
-        prune_update = _prune_artifacts_if_needed(state)
-
         return Command(
             goto=destination,
-            update=_merge_updates(
-                {
-                    "plan": plan,
-                    "messages": [AIMessage(content=report, name="supervisor")],
-                    "asset_pool": merged_asset_pool,
-                    "selected_assets_by_step": selected_assets_by_step,
-                },
-                compact_update,
-                prune_update
-            )
+            update={
+                "plan": plan,
+                "messages": [AIMessage(content=report, name="supervisor")],
+                "asset_catalog": asset_catalog,
+                "candidate_assets_by_step": candidate_assets_by_step,
+                "selected_assets_by_step": selected_assets_by_step,
+                "asset_bindings_by_step": asset_bindings_by_step,
+            },
         )
         
     return Command(goto="__end__")

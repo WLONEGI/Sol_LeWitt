@@ -6,12 +6,104 @@ Google Vertex AI に対応（ChatVertexAI経由）。
 """
 from functools import lru_cache
 import logging
+import asyncio
+import random
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import TypeVar
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from src.shared.config.settings import settings
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
+
+RETRY_BASE_DELAY_SECONDS = 1.0
+RETRY_MAX_DELAY_SECONDS = 8.0
+RETRY_JITTER_SECONDS = 0.6
+DEFAULT_MAX_RETRIES = 2
+MAX_RETRY_CAP = 6
+
+
+def _effective_max_retries() -> int:
+    configured = settings.MAX_RETRIES
+    if isinstance(configured, int):
+        return max(0, min(configured, MAX_RETRY_CAP))
+    return DEFAULT_MAX_RETRIES
+
+
+def is_rate_limited_error(error: Exception) -> bool:
+    status_code = getattr(error, "status_code", None)
+    if status_code == 429:
+        return True
+    text = str(error).lower()
+    return (
+        "429" in text
+        or "resource_exhausted" in text
+        or "too many requests" in text
+        or "rate limit" in text
+    )
+
+
+def _retry_delay_seconds(attempt: int) -> float:
+    backoff = min(RETRY_MAX_DELAY_SECONDS, RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)))
+    return backoff + random.uniform(0.0, RETRY_JITTER_SECONDS)
+
+
+async def ainvoke_with_retry(
+    operation: Callable[[], Awaitable[T]],
+    *,
+    operation_name: str,
+    max_retries: int | None = None,
+) -> T:
+    retries = _effective_max_retries() if max_retries is None else max(0, min(max_retries, MAX_RETRY_CAP))
+    attempts = retries + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return await operation()
+        except Exception as exc:
+            if not is_rate_limited_error(exc) or attempt >= attempts:
+                raise
+            delay = _retry_delay_seconds(attempt)
+            logger.warning(
+                "Rate limited on %s (attempt %s/%s). Retrying in %.2fs.",
+                operation_name,
+                attempt,
+                attempts,
+                delay,
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError(f"Unexpected retry state for {operation_name}")
+
+
+async def astream_with_retry(
+    stream_factory: Callable[[], AsyncIterator[T]],
+    *,
+    operation_name: str,
+    max_retries: int | None = None,
+) -> AsyncIterator[T]:
+    retries = _effective_max_retries() if max_retries is None else max(0, min(max_retries, MAX_RETRY_CAP))
+    attempts = retries + 1
+    for attempt in range(1, attempts + 1):
+        emitted_any = False
+        try:
+            async for chunk in stream_factory():
+                emitted_any = True
+                yield chunk
+            return
+        except Exception as exc:
+            # If some tokens already streamed, do not retry to avoid duplicate content.
+            if emitted_any or not is_rate_limited_error(exc) or attempt >= attempts:
+                raise
+            delay = _retry_delay_seconds(attempt)
+            logger.warning(
+                "Rate limited on %s before first chunk (attempt %s/%s). Retrying in %.2fs.",
+                operation_name,
+                attempt,
+                attempts,
+                delay,
+            )
+            await asyncio.sleep(delay)
 
 
 def create_gemini_llm(

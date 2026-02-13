@@ -73,6 +73,8 @@ def test_coordinator_sets_product_intent_and_scope_for_supported_category() -> N
     assert cmd.goto == "planner"
     assert cmd.update["product_type"] == "comic"
     assert cmd.update["request_intent"] == "refine"
+    assert "planning_mode" not in cmd.update
+    assert cmd.update["interrupt_intent"] is False
     assert cmd.update["target_scope"]["page_numbers"] == [3]
     assert cmd.update["target_scope"]["asset_unit_ids"] == ["page:3"]
 
@@ -102,6 +104,38 @@ def test_coordinator_keeps_existing_product_type_locked() -> None:
 
     assert cmd.goto == "planner"
     assert cmd.update["product_type"] == "comic"
+
+
+def test_coordinator_does_not_derive_update_mode_even_when_existing_plan_has_unfinished_steps() -> None:
+    state = {
+        "messages": [HumanMessage(content="3ページ目だけ修正して")],
+        "plan": [
+            {"id": 1, "capability": "writer", "status": "completed"},
+            {"id": 2, "capability": "visualizer", "status": "in_progress"},
+        ],
+        "artifacts": {},
+        "product_type": "comic",
+    }
+    output = CoordinatorOutput(
+        product_type="comic",
+        response="修正計画に更新します。",
+        goto="planner",
+        title="修正",
+    )
+
+    with patch("src.core.workflow.nodes.coordinator.get_llm_by_type", return_value=_LLMStub(output)), patch(
+        "src.core.workflow.nodes.coordinator.apply_prompt_template",
+        return_value=[HumanMessage(content="coordinator prompt")],
+    ), patch(
+        "src.core.workflow.nodes.coordinator._save_title",
+        new=AsyncMock(return_value=None),
+    ):
+        cmd = asyncio.run(coordinator_node(state, {"configurable": {}}))
+
+    assert cmd.goto == "planner"
+    assert "planning_mode" not in cmd.update
+    assert cmd.update["interrupt_intent"] is False
+    assert cmd.update["target_scope"]["page_numbers"] == [3]
 
 
 def test_coordinator_end_route_includes_three_followup_options() -> None:

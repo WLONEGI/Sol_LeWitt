@@ -10,6 +10,7 @@
 - **Hierarchical Agent 構造**: 大規模なタスクを階層化し、必要に応じてサブグラフ（例: Researcher）を起動。
 - **Artifact-Centric**: 処理の各ステップを独立した成果物（Artifact）として定義し、データの永続化と追跡を容易にする。
 - **Streaming & Multi-Channel**: Vercel AI SDK 互換のストリーミングプロトコルにより、推論プロセス、進捗、成果物をリアルタイムにフロントエンドへ配信。
+- **Hand for the Mind**: 生成AIを単なるツールではなく、人間の思考を具現化する「手」として位置づける。
 
 ## 3. システムコンポーネント
 

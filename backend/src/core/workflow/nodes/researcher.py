@@ -8,7 +8,7 @@ from langgraph.types import Command, Send
 from langgraph.graph import StateGraph, START, END
 from langchain_core.runnables import RunnableConfig
 
-from src.infrastructure.llm.llm import get_llm_by_type
+from src.infrastructure.llm.llm import astream_with_retry, get_llm_by_type
 from src.resources.prompts.template import load_prompt_markdown
 from src.shared.schemas import (
     ResearchTask,
@@ -144,6 +144,27 @@ def _ensure_minimum_task_diversity(
     return _build_fallback_research_tasks(instruction_text, step_mode)
 
 
+def _ensure_unique_task_ids(tasks: list[ResearchTask]) -> list[ResearchTask]:
+    if not tasks:
+        return []
+
+    seen: set[int] = set()
+    has_duplicate = False
+    for task in tasks:
+        if task.id in seen:
+            has_duplicate = True
+            break
+        seen.add(task.id)
+
+    if not has_duplicate:
+        return tasks
+
+    logger.warning(
+        "Research Manager detected duplicate task IDs. Re-indexing tasks sequentially."
+    )
+    return [task.model_copy(update={"id": idx}) for idx, task in enumerate(tasks, start=1)]
+
+
 def _extract_text_from_content(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -258,7 +279,10 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
         # 2. Stream Tokens
         full_content = ""
         
-        async for chunk in llm.astream(messages, config=stream_config):
+        async for chunk in astream_with_retry(
+            lambda: llm.astream(messages, config=stream_config),
+            operation_name=f"research_worker.{task_id}.astream",
+        ):
             # Dispatch Token Event
             if chunk.content:
                 text_chunk = _extract_text_from_content(chunk.content)
@@ -390,7 +414,7 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
     logger.info(f"Research Manager active. Decomposed: {state.get('is_decomposed', False)}")
 
     try:
-        step_index, current_step = next(
+        _step_index, current_step = next(
             (i, step) for i, step in enumerate(state["plan"]) 
             if step.get("status") == "in_progress"
             and step.get("capability") == "researcher"
@@ -401,13 +425,10 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
         
     internal_tasks = state.get("internal_research_tasks", [])
     results = state.get("internal_research_results", [])
-    current_idx = state.get("current_task_index", 0)
-    completed_task_ids = set()
-    for result in results:
-        if hasattr(result, "task_id"):
-            completed_task_ids.add(result.task_id)
-        elif isinstance(result, dict) and "task_id" in result:
-            completed_task_ids.add(result["task_id"])
+    current_idx_raw = state.get("current_task_index", 0)
+    current_idx = current_idx_raw if isinstance(current_idx_raw, int) else 0
+    if current_idx < 0:
+        current_idx = 0
 
     if not state.get("is_decomposed"):
         logger.info("Manager: Decomposing research step...")
@@ -444,11 +465,13 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
                 preferred_mode=step_mode,
             )
             tasks = _ensure_minimum_task_diversity(tasks, step_instruction, step_mode)
+            tasks = _ensure_unique_task_ids(tasks)
             if not tasks:
                  raise ValueError("No tasks generated")
         except Exception as e:
             logger.warning(f"Decomposition failed: {e}. Fallback to multi-perspective tasks.")
             tasks = _build_fallback_research_tasks(step_instruction, step_mode)
+            tasks = _ensure_unique_task_ids(tasks)
 
         logger.info(f"Manager: Decomposition complete. {len(tasks)} tasks generated.")
         # [Serialization] Start sequential execution from the first task
@@ -471,19 +494,18 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
             }
         )
 
-    # If already decomposed, check if there are more tasks to run
-    if current_idx < len(internal_tasks):
-        while current_idx < len(internal_tasks):
-            next_task = internal_tasks[current_idx]
-            next_task_id = next_task.id if hasattr(next_task, "id") else next_task.get("id")
-            if next_task_id in completed_task_ids:
-                logger.info(f"Manager: Skipping already completed task {next_task_id}")
-                current_idx += 1
-                continue
-            break
+    task_count = len(internal_tasks)
+    result_count = len(results)
+    if result_count > current_idx:
+        logger.info(
+            "Manager: Advancing current_task_index from %s to %s based on completed results.",
+            current_idx,
+            result_count,
+        )
+        current_idx = result_count
 
-    if current_idx < len(internal_tasks):
-        logger.info(f"Manager: Dispatching next task ({current_idx + 1}/{len(internal_tasks)})")
+    if current_idx < task_count:
+        logger.info(f"Manager: Dispatching next task ({current_idx + 1}/{task_count})")
         next_task = internal_tasks[current_idx]
         return Command(
             goto=Send(
@@ -501,7 +523,7 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
         )
 
     # Check if all workers finished (safety check, though in sequential it should be true here)
-    if len(results) >= len(internal_tasks) and len(internal_tasks) > 0:
+    if result_count >= task_count and task_count > 0:
         logger.info("Manager: All workers finished. Finalizing step.")
 
         failed_results = 0
@@ -551,8 +573,40 @@ async def research_manager_node(state: ResearchSubgraphState, config: RunnableCo
             }
         )
     
-    logger.info(f"Manager: Waiting for results (Sequential). {len(results)}/{len(internal_tasks)} completed.")
-    return Command(goto=END) # Should not reach here in normal sequential flow
+    mismatch_message = (
+        "Research manager detected inconsistent sequential state. "
+        f"results={result_count}, tasks={task_count}, current_task_index={current_idx}."
+    )
+    logger.error("Manager: %s", mismatch_message)
+    current_step["result_summary"] = mismatch_message
+
+    failed_tasks = max(0, task_count - result_count)
+    return Command(
+        goto=END,
+        update={
+            "artifacts": _update_artifact(
+                state,
+                f"step_{current_step['id']}_research",
+                json.dumps(
+                    {
+                        "error": mismatch_message,
+                        "notes": mismatch_message,
+                        "failed_checks": ["research_manager_state_inconsistent"],
+                        "summary": mismatch_message,
+                        "total_tasks": task_count,
+                        "completed_tasks": result_count,
+                        "failed_tasks": failed_tasks,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+            "internal_research_tasks": [],
+            "internal_research_results": [],
+            "is_decomposed": False,
+            "current_task_index": 0,
+            "plan": state["plan"],
+        },
+    )
 
 
 def build_researcher_subgraph():
