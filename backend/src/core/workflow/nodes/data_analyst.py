@@ -59,6 +59,7 @@ PACKAGE_MODE_KEYWORDS = (
 )
 TEMPLATE_MASTER_KEYWORDS = ("マスター", "master", "テンプレート", "template", "layout")
 TEMPLATE_SLIDE_KEYWORDS = ("スライド", "content", "本文")
+DATA_ANALYST_STREAM_CHUNK_CHARS = 1200
 
 
 def _resolve_data_analyst_mode(step: dict) -> str:
@@ -170,6 +171,72 @@ def _normalize_text(value: Any) -> str:
     return value.strip()
 
 
+def _chunk_text_for_stream(text: str, *, max_chars: int = DATA_ANALYST_STREAM_CHUNK_CHARS) -> list[str]:
+    if not isinstance(text, str) or not text:
+        return []
+    if max_chars <= 0:
+        return [text]
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks: list[str] = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        if not line:
+            continue
+        if len(line) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            for idx in range(0, len(line), max_chars):
+                chunks.append(line[idx : idx + max_chars])
+            continue
+        if len(current) + len(line) > max_chars and current:
+            chunks.append(current)
+            current = line
+        else:
+            current += line
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def _dispatch_data_analyst_delta_events(
+    *,
+    artifact_id: str,
+    title: str,
+    implementation_code: str,
+    execution_log: str,
+    config: RunnableConfig,
+) -> None:
+    code_chunks = _chunk_text_for_stream(implementation_code)
+    for chunk in code_chunks:
+        await adispatch_custom_event(
+            "data-analyst-code-delta",
+            {
+                "artifact_id": artifact_id,
+                "title": title,
+                "delta": chunk,
+                "status": "streaming",
+            },
+            config=config,
+        )
+
+    log_chunks = _chunk_text_for_stream(execution_log)
+    for chunk in log_chunks:
+        await adispatch_custom_event(
+            "data-analyst-log-delta",
+            {
+                "artifact_id": artifact_id,
+                "title": title,
+                "delta": chunk,
+                "status": "streaming",
+            },
+            config=config,
+        )
+
+
 def _safe_json_loads(value: str) -> Any | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -219,6 +286,18 @@ def _extract_pptx_slide_rows(pptx_path: str) -> list[dict[str, Any]]:
                 "slide_number": slide_number,
                 "title": source_title or None,
                 "texts": source_texts,
+                "layout_name": _normalize_text(row.get("layout_name")) or None,
+                "layout_placeholders": [
+                    _normalize_text(item)
+                    for item in (row.get("layout_placeholders") if isinstance(row.get("layout_placeholders"), list) else [])
+                    if _normalize_text(item)
+                ],
+                "master_name": _normalize_text(row.get("master_name")) or None,
+                "master_texts": [
+                    _normalize_text(item)
+                    for item in (row.get("master_texts") if isinstance(row.get("master_texts"), list) else [])
+                    if _normalize_text(item)
+                ],
             }
         )
     slide_rows.sort(key=lambda item: int(item.get("slide_number") or 0))
@@ -236,15 +315,22 @@ def _build_pptx_render_output_files(
         if not isinstance(image_path, str) or not image_path.strip():
             continue
         slide_meta = slide_rows[idx - 1] if idx - 1 < len(slide_rows) else {}
-        source_slide_number = (
-            slide_meta.get("slide_number")
-            if isinstance(slide_meta.get("slide_number"), int) and int(slide_meta.get("slide_number")) > 0
-            else idx
-        )
         source_title = _normalize_text(slide_meta.get("title")) or None
         source_texts = [
             _normalize_text(item)
             for item in (slide_meta.get("texts") if isinstance(slide_meta.get("texts"), list) else [])
+            if _normalize_text(item)
+        ]
+        source_layout_name = _normalize_text(slide_meta.get("layout_name")) or None
+        source_layout_placeholders = [
+            _normalize_text(item)
+            for item in (slide_meta.get("layout_placeholders") if isinstance(slide_meta.get("layout_placeholders"), list) else [])
+            if _normalize_text(item)
+        ]
+        source_master_name = _normalize_text(slide_meta.get("master_name")) or None
+        source_master_texts = [
+            _normalize_text(item)
+            for item in (slide_meta.get("master_texts") if isinstance(slide_meta.get("master_texts"), list) else [])
             if _normalize_text(item)
         ]
         output_files.append(
@@ -252,9 +338,12 @@ def _build_pptx_render_output_files(
                 "url": image_path,
                 "title": source_title or os.path.basename(image_path),
                 "mime_type": "image/png",
-                "source_slide_number": int(source_slide_number),
                 "source_title": source_title,
                 "source_texts": source_texts,
+                "source_layout_name": source_layout_name,
+                "source_layout_placeholders": source_layout_placeholders,
+                "source_master_name": source_master_name,
+                "source_master_texts": source_master_texts,
                 "source_mode": mode,
             }
         )
@@ -393,28 +482,53 @@ def _merge_detected_output_files(
         mime_type = None
         title = None
         description = None
-        source_slide_number = None
         source_title = None
         source_texts: list[str] = []
+        source_layout_name = None
+        source_layout_placeholders: list[str] = []
+        source_master_name = None
+        source_master_texts: list[str] = []
         source_mode = None
         if existing is not None:
             if isinstance(existing, dict):
                 mime_type = existing.get("mime_type")
                 title = existing.get("title")
                 description = existing.get("description")
-                source_slide_number = existing.get("source_slide_number")
                 source_title = existing.get("source_title")
                 source_texts = existing.get("source_texts") if isinstance(existing.get("source_texts"), list) else []
+                source_layout_name = existing.get("source_layout_name")
+                source_layout_placeholders = (
+                    existing.get("source_layout_placeholders")
+                    if isinstance(existing.get("source_layout_placeholders"), list)
+                    else []
+                )
+                source_master_name = existing.get("source_master_name")
+                source_master_texts = (
+                    existing.get("source_master_texts")
+                    if isinstance(existing.get("source_master_texts"), list)
+                    else []
+                )
                 source_mode = existing.get("source_mode")
             else:
                 mime_type = getattr(existing, "mime_type", None)
                 title = getattr(existing, "title", None)
                 description = getattr(existing, "description", None)
-                source_slide_number = getattr(existing, "source_slide_number", None)
                 source_title = getattr(existing, "source_title", None)
                 source_texts = (
                     getattr(existing, "source_texts", [])
                     if isinstance(getattr(existing, "source_texts", []), list)
+                    else []
+                )
+                source_layout_name = getattr(existing, "source_layout_name", None)
+                source_layout_placeholders = (
+                    getattr(existing, "source_layout_placeholders", [])
+                    if isinstance(getattr(existing, "source_layout_placeholders", []), list)
+                    else []
+                )
+                source_master_name = getattr(existing, "source_master_name", None)
+                source_master_texts = (
+                    getattr(existing, "source_master_texts", [])
+                    if isinstance(getattr(existing, "source_master_texts", []), list)
                     else []
                 )
                 source_mode = getattr(existing, "source_mode", None)
@@ -424,13 +538,25 @@ def _merge_detected_output_files(
             title = os.path.basename(local_path)
         if not isinstance(description, str) or not description:
             description = None
-        if not isinstance(source_slide_number, int) or source_slide_number <= 0:
-            source_slide_number = None
         if not isinstance(source_title, str) or not source_title.strip():
             source_title = None
         normalized_source_texts = [
             str(item).strip()
             for item in source_texts
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if not isinstance(source_layout_name, str) or not source_layout_name.strip():
+            source_layout_name = None
+        normalized_source_layout_placeholders = [
+            str(item).strip()
+            for item in source_layout_placeholders
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if not isinstance(source_master_name, str) or not source_master_name.strip():
+            source_master_name = None
+        normalized_source_master_texts = [
+            str(item).strip()
+            for item in source_master_texts
             if isinstance(item, str) and str(item).strip()
         ]
         if not isinstance(source_mode, str) or not source_mode.strip():
@@ -441,9 +567,12 @@ def _merge_detected_output_files(
                 "title": title,
                 "mime_type": mime_type,
                 "description": description,
-                "source_slide_number": source_slide_number,
                 "source_title": source_title,
                 "source_texts": normalized_source_texts,
+                "source_layout_name": source_layout_name,
+                "source_layout_placeholders": normalized_source_layout_placeholders,
+                "source_master_name": source_master_name,
+                "source_master_texts": normalized_source_master_texts,
                 "source_mode": source_mode,
             }
         )
@@ -939,9 +1068,20 @@ async def _run_deterministic_data_analyst_mode(
             rendered_images.append(
                 {
                     "image_path": row.get("url"),
-                    "source_slide_number": row.get("source_slide_number"),
                     "source_title": row.get("source_title"),
                     "source_texts": row.get("source_texts") if isinstance(row.get("source_texts"), list) else [],
+                    "source_layout_name": row.get("source_layout_name"),
+                    "source_layout_placeholders": (
+                        row.get("source_layout_placeholders")
+                        if isinstance(row.get("source_layout_placeholders"), list)
+                        else []
+                    ),
+                    "source_master_name": row.get("source_master_name"),
+                    "source_master_texts": (
+                        row.get("source_master_texts")
+                        if isinstance(row.get("source_master_texts"), list)
+                        else []
+                    ),
                 }
             )
         call_expression = (
@@ -1136,13 +1276,14 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
         "workspace_dir": workspace_dir,
         "local_file_manifest": local_file_manifest,
     }
+    event_title = current_step.get("title") or "Data Analyst"
 
     try:
         await adispatch_custom_event(
             "data-analyst-start",
             {
                 "artifact_id": artifact_id,
-                "title": current_step.get("title") or "Data Analyst",
+                "title": event_title,
                 "input": input_summary,
                 "status": "streaming",
             },
@@ -1213,10 +1354,22 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
         content_json = json.dumps(result_payload, ensure_ascii=False)
 
         try:
+            await _dispatch_data_analyst_delta_events(
+                artifact_id=artifact_id,
+                title=event_title,
+                implementation_code=str(result.implementation_code or ""),
+                execution_log=str(result.execution_log or ""),
+                config=config,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to dispatch data-analyst deltas: {e}")
+
+        try:
             await adispatch_custom_event(
                 "data-analyst-output",
                 {
                     "artifact_id": artifact_id,
+                    "title": event_title,
                     "output": result_payload,
                     "status": "completed" if not is_error else "failed",
                 },
@@ -1246,10 +1399,21 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
         is_error = True
         artifact_preview_urls = []
         try:
+            await _dispatch_data_analyst_delta_events(
+                artifact_id=artifact_id,
+                title=event_title,
+                implementation_code=str(fallback.implementation_code or ""),
+                execution_log=str(fallback.execution_log or ""),
+                config=config,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to dispatch data-analyst deltas (error): {e}")
+        try:
             await adispatch_custom_event(
                 "data-analyst-output",
                 {
                     "artifact_id": artifact_id,
+                    "title": event_title,
                     "output": fallback_payload,
                     "status": "failed",
                 },

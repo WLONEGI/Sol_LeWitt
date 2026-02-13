@@ -30,7 +30,7 @@ def test_planner_prompt_loads_slide_specific_rules() -> None:
     assert "Product Guidance: slide" in prompt
     assert "Researcher should be inserted by default." in prompt
     assert "PPTX template policy (mandatory)" in prompt
-    assert "mode must be `pptx_slides_to_images` only." in prompt
+    assert "mode should be `pptx_master_to_images` by default." in prompt
 
 
 def test_planner_prompt_loads_design_specific_rules() -> None:

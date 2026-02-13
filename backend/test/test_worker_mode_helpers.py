@@ -12,10 +12,14 @@ from src.core.workflow.nodes.visualizer import (
     _build_comic_page_prompt_text,
     _extract_pptx_slide_reference_assets,
     _find_latest_character_sheet_render_urls,
+    _is_pptx_processing_asset,
+    _is_pptx_processing_dependency_artifact,
     _plan_visual_asset_usage,
     _prompt_item_to_output_payload,
+    _selector_asset_summary,
     _resolve_image_generation_prompt,
     _resolve_asset_unit_meta,
+    _summarize_source_master_layout_meta,
     _writer_output_to_slides,
     compile_structured_prompt,
 )
@@ -492,9 +496,10 @@ def test_extract_pptx_slide_reference_assets_reads_data_analyst_metadata() -> No
                         {
                             "url": "https://example.com/template_01.png",
                             "mime_type": "image/png",
-                            "source_slide_number": 1,
                             "source_title": "交通課題の現状",
                             "source_texts": ["高齢化率 34.2%", "移動困難者 1.8万人"],
+                            "source_layout_placeholders": ["title", "body"],
+                            "source_master_texts": ["年度方針", "重点施策"],
                             "source_mode": "pptx_slides_to_images",
                         },
                         {
@@ -512,10 +517,93 @@ def test_extract_pptx_slide_reference_assets_reads_data_analyst_metadata() -> No
 
     assert len(assets) == 1
     assert assets[0]["uri"] == "https://example.com/template_01.png"
-    assert assets[0]["source_slide_number"] == 1
     assert assets[0]["source_title"] == "交通課題の現状"
     assert assets[0]["source_texts"] == ["高齢化率 34.2%", "移動困難者 1.8万人"]
+    assert assets[0]["source_layout_placeholders"] == ["title", "body"]
+    assert assets[0]["source_master_texts"] == ["年度方針", "重点施策"]
     assert assets[0]["is_pptx_slide_reference"] is True
+
+
+def test_extract_pptx_slide_reference_assets_accepts_master_mode() -> None:
+    dependency_context = {
+        "resolved_dependency_artifacts": [
+            {
+                "artifact_id": "step_1_data",
+                "producer_step_id": 1,
+                "producer_capability": "data_analyst",
+                "producer_mode": "pptx_master_to_images",
+                "content": {
+                    "output_files": [
+                        {
+                            "url": "https://example.com/master_01.png",
+                            "mime_type": "image/png",
+                            "source_master_name": "Corporate Master",
+                            "source_master_texts": ["年度方針", "重点施策"],
+                            "source_layout_placeholders": ["title", "body"],
+                            "source_mode": "pptx_master_to_images",
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+
+    assets = _extract_pptx_slide_reference_assets(dependency_context)
+
+    assert len(assets) == 1
+    assert assets[0]["uri"] == "https://example.com/master_01.png"
+    assert assets[0]["producer_mode"] == "pptx_master_to_images"
+    assert assets[0]["source_mode"] == "pptx_master_to_images"
+    assert assets[0]["source_master_name"] == "Corporate Master"
+    assert assets[0]["source_master_texts"] == ["年度方針", "重点施策"]
+    assert assets[0]["is_pptx_slide_reference"] is True
+
+
+def test_is_pptx_processing_asset_detects_pptx_modes() -> None:
+    assert _is_pptx_processing_asset({"producer_mode": "pptx_slides_to_images"}) is True
+    assert _is_pptx_processing_asset({"source_mode": "pptx_master_to_images"}) is True
+    assert _is_pptx_processing_asset({"label": "pptx_slide_reference"}) is True
+    assert _is_pptx_processing_asset({"producer_mode": "slide_render"}) is False
+
+
+def test_is_pptx_processing_dependency_artifact_detects_output_modes() -> None:
+    artifact = {
+        "producer_mode": "images_to_package",
+        "content": {
+            "output_value": {"mode": "pptx_slides_to_images"},
+            "output_files": [{"url": "https://example.com/a.png", "source_mode": "pptx_slides_to_images"}],
+        },
+    }
+    assert _is_pptx_processing_dependency_artifact(artifact) is True
+    assert _is_pptx_processing_dependency_artifact({"producer_mode": "images_to_package", "content": {}}) is False
+
+
+def test_summarize_source_master_layout_meta_from_placeholders() -> None:
+    assert _summarize_source_master_layout_meta({"source_layout_placeholders": ["title"]}) == "タイトル"
+    assert _summarize_source_master_layout_meta({"source_layout_placeholders": ["title", "body"]}) == "タイトル＋コンテンツ"
+    assert _summarize_source_master_layout_meta({"source_layout_placeholders": ["title", "pic", "body"]}) == "コンテンツ＋絵"
+
+
+def test_selector_asset_summary_for_slide_render_is_minimal() -> None:
+    summary = _selector_asset_summary(
+        mode="slide_render",
+        asset={
+            "asset_id": "asset:pptx:1",
+            "is_pptx_slide_reference": True,
+            "source_layout_placeholders": ["title", "pic", "body"],
+            "source_texts": ["自治体向け交通政策", "高齢化率 34.2%"],
+            "source_master_name": "Corporate Master",
+            "source_layout_name": "Title and Content",
+        },
+    )
+    assert set(summary.keys()) == {
+        "asset_id",
+        "is_pptx_slide_reference",
+        "source_master_layout_meta",
+        "source_texts",
+    }
+    assert summary["source_master_layout_meta"] == "コンテンツ＋絵"
+    assert summary["source_texts"] == ["自治体向け交通政策", "高齢化率 34.2%"]
 
 
 def test_plan_visual_asset_usage_limits_pptx_reference_to_one_per_slide(monkeypatch) -> None:
@@ -558,7 +646,6 @@ def test_plan_visual_asset_usage_limits_pptx_reference_to_one_per_slide(monkeypa
                     "uri": "https://example.com/template_01.png",
                     "is_image": True,
                     "producer_mode": "pptx_slides_to_images",
-                    "source_slide_number": 1,
                     "is_pptx_slide_reference": True,
                 },
                 {
@@ -566,7 +653,6 @@ def test_plan_visual_asset_usage_limits_pptx_reference_to_one_per_slide(monkeypa
                     "uri": "https://example.com/template_02.png",
                     "is_image": True,
                     "producer_mode": "pptx_slides_to_images",
-                    "source_slide_number": 2,
                     "is_pptx_slide_reference": True,
                 },
                 {

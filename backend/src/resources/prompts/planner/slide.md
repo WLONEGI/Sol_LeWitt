@@ -8,8 +8,8 @@
 
 ## PPTX template policy (mandatory)
 - If `has_pptx_attachment=true`, add a preprocessing `data_analyst` step as the FIRST step.
-  - mode must be `pptx_slides_to_images` only.
-  - `pptx_master_to_images` must not be used in slide planning.
+  - mode should be `pptx_master_to_images` by default.
+  - `pptx_slides_to_images` may be added only when slide-level reference extraction is explicitly needed.
   - this preprocessing step must be independent (`depends_on: []`) and placed before writer/visualizer.
   - connect downstream by explicit `inputs`/`outputs` labels and `depends_on` where consumed.
 - Template解析の主成果物は画像（PNG等）として扱う。中間変換で生成されるPDF/PPTXを成果物の主出力にしない。

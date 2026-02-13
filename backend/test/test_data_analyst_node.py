@@ -103,6 +103,12 @@ def test_data_analyst_images_to_package_success(monkeypatch):
     assert stored["failed_checks"] == []
     assert any(item["url"] == "https://example.com/generated/deck.pdf" for item in stored["output_files"])
     assert "Upload Trace" in stored["execution_log"]
+    code_deltas = [data for name, data in events if name == "data-analyst-code-delta"]
+    log_deltas = [data for name, data in events if name == "data-analyst-log-delta"]
+    assert code_deltas
+    assert any("package_visual_assets_tool" in str(item.get("delta") or "") for item in code_deltas)
+    assert log_deltas
+    assert any("status\": \"ok\"" in str(item.get("delta") or "") for item in log_deltas)
     assert any(name == "data-analyst-output" and data.get("status") == "completed" for name, data in events)
 
 
@@ -194,17 +200,38 @@ def test_build_pptx_render_output_files_includes_slide_metadata() -> None:
             "/tmp/workspace/outputs/slide_images/template_master_02.png",
         ],
         slide_rows=[
-            {"slide_number": 1, "title": "現状分析", "texts": ["高齢化率 34.2%", "移動困難者 1.8万人"]},
-            {"slide_number": 2, "title": "施策案", "texts": ["デマンド交通", "MaaS連携"]},
+            {
+                "slide_number": 1,
+                "title": "現状分析",
+                "texts": ["高齢化率 34.2%", "移動困難者 1.8万人"],
+                "layout_name": "Title and Content",
+                "layout_placeholders": ["title", "body"],
+                "master_name": "Corporate Master",
+                "master_texts": ["年度方針", "重点施策"],
+            },
+            {
+                "slide_number": 2,
+                "title": "施策案",
+                "texts": ["デマンド交通", "MaaS連携"],
+                "layout_name": "Picture with Caption",
+                "layout_placeholders": ["title", "pic", "body"],
+                "master_name": "Corporate Master",
+                "master_texts": ["年度方針", "重点施策"],
+            },
         ],
     )
 
     assert len(output_files) == 2
-    assert output_files[0]["source_slide_number"] == 1
     assert output_files[0]["source_title"] == "現状分析"
     assert output_files[0]["source_texts"] == ["高齢化率 34.2%", "移動困難者 1.8万人"]
+    assert output_files[0]["source_layout_name"] == "Title and Content"
+    assert output_files[0]["source_layout_placeholders"] == ["title", "body"]
+    assert output_files[0]["source_master_name"] == "Corporate Master"
+    assert output_files[0]["source_master_texts"] == ["年度方針", "重点施策"]
     assert output_files[0]["source_mode"] == "pptx_slides_to_images"
-    assert output_files[1]["source_slide_number"] == 2
+    assert "source_slide_number" not in output_files[0]
+    assert "source_layout_type" not in output_files[0]
+    assert "source_layout_kind" not in output_files[0]
 
 
 def test_extract_visualizer_generated_image_urls_supports_pages_and_characters() -> None:

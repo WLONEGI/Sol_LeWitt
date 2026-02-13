@@ -891,10 +891,6 @@ class OutputFile(BaseModel):
     title: Optional[str] = Field(default=None, description="成果物の短い名称")
     mime_type: Optional[str] = Field(default=None, description="MIMEタイプ（例: application/pdf）")
     description: Optional[str] = Field(default=None, description="成果物の説明（オプション）")
-    source_slide_number: Optional[int] = Field(
-        default=None,
-        description="PPTX由来画像の場合の元スライド番号",
-    )
     source_title: Optional[str] = Field(
         default=None,
         description="PPTX由来画像の場合の元スライドタイトル",
@@ -902,6 +898,22 @@ class OutputFile(BaseModel):
     source_texts: List[str] = Field(
         default_factory=list,
         description="PPTX由来画像の場合の元スライド本文テキスト抜粋",
+    )
+    source_layout_name: Optional[str] = Field(
+        default=None,
+        description="PPTX由来画像の場合の元レイアウト名",
+    )
+    source_layout_placeholders: List[str] = Field(
+        default_factory=list,
+        description="PPTX由来画像の場合のレイアウトplaceholder type一覧",
+    )
+    source_master_name: Optional[str] = Field(
+        default=None,
+        description="PPTX由来画像の場合の元スライドマスター名",
+    )
+    source_master_texts: List[str] = Field(
+        default_factory=list,
+        description="PPTX由来画像の場合の元スライドマスター内テキスト抜粋",
     )
     source_mode: Optional[str] = Field(
         default=None,

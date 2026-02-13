@@ -155,11 +155,23 @@ def _asset_summary(asset: dict[str, Any]) -> dict[str, Any]:
         "producer_step_id": asset.get("producer_step_id"),
         "producer_capability": asset.get("producer_capability"),
         "producer_mode": asset.get("producer_mode"),
-        "source_slide_number": asset.get("source_slide_number"),
+        "source_mode": asset.get("source_mode"),
         "source_title": asset.get("source_title"),
         "source_texts": (
             asset.get("source_texts")
             if isinstance(asset.get("source_texts"), list)
+            else []
+        ),
+        "source_layout_name": asset.get("source_layout_name"),
+        "source_layout_placeholders": (
+            asset.get("source_layout_placeholders")
+            if isinstance(asset.get("source_layout_placeholders"), list)
+            else []
+        ),
+        "source_master_name": asset.get("source_master_name"),
+        "source_master_texts": (
+            asset.get("source_master_texts")
+            if isinstance(asset.get("source_master_texts"), list)
             else []
         ),
         "is_pptx_slide_reference": bool(asset.get("is_pptx_slide_reference")),
@@ -169,9 +181,11 @@ def _asset_summary(asset: dict[str, Any]) -> dict[str, Any]:
 def _is_pptx_slide_reference_asset(asset: dict[str, Any]) -> bool:
     if bool(asset.get("is_pptx_slide_reference")):
         return True
-    if str(asset.get("producer_mode") or "").strip().lower() == "pptx_slides_to_images":
+    if str(asset.get("producer_mode") or "").strip().lower() in {"pptx_slides_to_images", "pptx_master_to_images"}:
         return True
-    return isinstance(asset.get("source_slide_number"), int)
+    if str(asset.get("source_mode") or "").strip().lower() in {"pptx_slides_to_images", "pptx_master_to_images"}:
+        return True
+    return False
 
 
 def _is_template_reference_asset(asset: dict[str, Any]) -> bool:
@@ -228,8 +242,7 @@ def _extract_pptx_slide_reference_assets(
             ):
                 continue
             source_mode = str(item.get("source_mode") or producer_mode).strip().lower()
-            source_slide_number = item.get("source_slide_number")
-            if source_mode != "pptx_slides_to_images" and not isinstance(source_slide_number, int):
+            if source_mode not in {"pptx_slides_to_images", "pptx_master_to_images"}:
                 continue
             source_title = str(item.get("source_title") or "").strip() or None
             source_texts = [
@@ -237,16 +250,26 @@ def _extract_pptx_slide_reference_assets(
                 for text in (item.get("source_texts") if isinstance(item.get("source_texts"), list) else [])
                 if isinstance(text, str) and str(text).strip()
             ]
+            source_layout_name = str(item.get("source_layout_name") or "").strip() or None
+            source_layout_placeholders = [
+                str(text).strip()
+                for text in (
+                    item.get("source_layout_placeholders")
+                    if isinstance(item.get("source_layout_placeholders"), list)
+                    else []
+                )
+                if isinstance(text, str) and str(text).strip()
+            ]
+            source_master_name = str(item.get("source_master_name") or "").strip() or None
+            source_master_texts = [
+                str(text).strip()
+                for text in (item.get("source_master_texts") if isinstance(item.get("source_master_texts"), list) else [])
+                if isinstance(text, str) and str(text).strip()
+            ]
             artifact_id = str(dependency.get("artifact_id") or "artifact")
             producer_step_id = dependency.get("producer_step_id")
-            digest = hashlib.sha1(
-                f"{artifact_id}|{uri}|{source_slide_number or 0}".encode("utf-8")
-            ).hexdigest()[:16]
-            source_label = (
-                f"PPTX Slide {source_slide_number}"
-                if isinstance(source_slide_number, int)
-                else "PPTX Slide"
-            )
+            digest = hashlib.sha1(f"{artifact_id}|{uri}".encode("utf-8")).hexdigest()[:16]
+            source_label = "PPTX Master" if source_mode == "pptx_master_to_images" else "PPTX Slide"
             output.append(
                 {
                     "asset_id": f"asset:pptx:{digest}",
@@ -258,6 +281,7 @@ def _extract_pptx_slide_reference_assets(
                     "producer_step_id": producer_step_id if isinstance(producer_step_id, int) else None,
                     "producer_capability": "data_analyst",
                     "producer_mode": source_mode or producer_mode or "pptx_slides_to_images",
+                    "source_mode": source_mode or producer_mode or "pptx_slides_to_images",
                     "label": "pptx_slide_reference",
                     "title": source_title or source_label,
                     "role_hints": [
@@ -267,15 +291,65 @@ def _extract_pptx_slide_reference_assets(
                         "template_source",
                         "pptx_slide_reference",
                     ],
-                    "source_slide_number": source_slide_number if isinstance(source_slide_number, int) else None,
                     "source_title": source_title,
                     "source_texts": source_texts,
+                    "source_layout_name": source_layout_name,
+                    "source_layout_placeholders": source_layout_placeholders,
+                    "source_master_name": source_master_name,
+                    "source_master_texts": source_master_texts,
                     "is_pptx_slide_reference": True,
                 }
             )
             seen_by_uri.add(uri)
 
     return output
+
+
+def _is_pptx_processing_asset(asset: dict[str, Any]) -> bool:
+    if not isinstance(asset, dict):
+        return False
+    producer_mode = str(asset.get("producer_mode") or "").strip().lower()
+    source_mode = str(asset.get("source_mode") or "").strip().lower()
+    label = str(asset.get("label") or "").strip().lower()
+    return (
+        producer_mode in {"pptx_slides_to_images", "pptx_master_to_images"}
+        or source_mode in {"pptx_slides_to_images", "pptx_master_to_images"}
+        or label == "pptx_slide_reference"
+    )
+
+
+def _is_pptx_processing_dependency_artifact(item: dict[str, Any]) -> bool:
+    if not isinstance(item, dict):
+        return False
+    producer_mode = str(item.get("producer_mode") or "").strip().lower()
+    if producer_mode in {"pptx_slides_to_images", "pptx_master_to_images"}:
+        return True
+
+    content = item.get("content")
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except Exception:
+            content = None
+    if not isinstance(content, dict):
+        return False
+
+    output_value = content.get("output_value")
+    if isinstance(output_value, dict):
+        value_mode = str(output_value.get("mode") or "").strip().lower()
+        if value_mode in {"pptx_slides_to_images", "pptx_master_to_images"}:
+            return True
+
+    output_files = content.get("output_files")
+    if not isinstance(output_files, list):
+        return False
+    for row in output_files:
+        if not isinstance(row, dict):
+            continue
+        source_mode = str(row.get("source_mode") or "").strip().lower()
+        if source_mode in {"pptx_slides_to_images", "pptx_master_to_images"}:
+            return True
+    return False
 
 
 def _order_assets_with_bindings(
@@ -324,6 +398,76 @@ def _order_assets_with_bindings(
     return ordered_assets
 
 
+def _summarize_source_master_layout_meta(asset: dict[str, Any]) -> str | None:
+    if not isinstance(asset, dict):
+        return None
+    placeholders = [
+        str(item).strip().lower()
+        for item in (
+            asset.get("source_layout_placeholders")
+            if isinstance(asset.get("source_layout_placeholders"), list)
+            else []
+        )
+        if isinstance(item, str) and str(item).strip()
+    ]
+    placeholder_set = set(placeholders)
+    body_count = sum(1 for item in placeholders if item == "body")
+    has_title = bool({"title", "ctrtitle", "subtitle"} & placeholder_set)
+    has_visual = bool({"pic", "obj", "media", "chart", "tbl"} & placeholder_set)
+
+    if has_visual and (body_count >= 1 or has_title):
+        return "コンテンツ＋絵"
+    if body_count >= 2:
+        return "2コンテンツ"
+    if has_title and body_count >= 1:
+        return "タイトル＋コンテンツ"
+    if has_title:
+        return "タイトル"
+    if body_count >= 1:
+        return "コンテンツ"
+
+    layout_name = str(asset.get("source_layout_name") or "").strip()
+    if layout_name:
+        return layout_name
+    return None
+
+
+def _selector_asset_summary(
+    *,
+    mode: str,
+    asset: dict[str, Any],
+) -> dict[str, Any]:
+    # Slide の PPTX 判定は「マスター系メタ情報 + source_texts」に絞る。
+    if mode == "slide_render":
+        return {
+            "asset_id": asset.get("asset_id"),
+            "is_pptx_slide_reference": bool(asset.get("is_pptx_slide_reference")),
+            "source_master_layout_meta": _summarize_source_master_layout_meta(asset),
+            "source_texts": (
+                asset.get("source_texts")
+                if isinstance(asset.get("source_texts"), list)
+                else []
+            ),
+        }
+    return _asset_summary(asset)
+
+
+def _build_asset_router_selector_messages(
+    *,
+    mode: str,
+    selector_input: dict[str, Any],
+) -> list[Any]:
+    prompt_state: dict[str, Any] = {
+        "messages": [],
+        "product_type": mode,
+    }
+    messages = apply_prompt_template("visualizer_asset_router", prompt_state)
+    if not messages:
+        messages = [SystemMessage(content="Visualizer asset router prompt is not available.")]
+    messages.append(HumanMessage(content=json.dumps(selector_input, ensure_ascii=False), name="supervisor"))
+    return messages
+
+
 async def _plan_visual_asset_usage(
     *,
     llm: Any,
@@ -357,27 +501,17 @@ async def _plan_visual_asset_usage(
         "mode": mode,
         "instruction": instruction or "",
         "units": unit_briefs,
-        "candidate_assets": [_asset_summary(asset) for asset in image_assets],
+        "candidate_assets": [
+            _selector_asset_summary(mode=mode, asset=asset)
+            for asset in image_assets
+        ],
         "max_assets_per_unit": MAX_VISUAL_REFERENCES_PER_UNIT,
     }
 
-    selector_messages = [
-        SystemMessage(
-            content=(
-                "あなたはVisualizerの参照画像ルータです。"
-                "各unit(slide/page)に対して、候補asset_idから必要な画像のみを選択してください。"
-                "出力はVisualAssetUsagePlanスキーマのJSONのみ。"
-                "選択上限は入力max_assets_per_unitに従ってください。"
-                "mode=slide_render では、is_pptx_slide_reference=true の候補は"
-                " source_title/source_texts をWriter内容と照合して選び、"
-                " 1 unitあたり最大1件までにしてください。"
-                " さらに、mode=slide_render かつ is_pptx_slide_reference=true の候補が1件以上ある場合は、"
-                " 各unitで is_pptx_slide_reference=true を必ず1件選択してください（空配列禁止）。"
-                " 必要であれば同じasset_idを複数unitで再利用して構いません。"
-            ),
-        ),
-        HumanMessage(content=json.dumps(selector_input, ensure_ascii=False), name="supervisor"),
-    ]
+    selector_messages = _build_asset_router_selector_messages(
+        mode=mode,
+        selector_input=selector_input,
+    )
 
     try:
         stream_config = config.copy()
@@ -1616,6 +1750,12 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         resolve_selected_assets_for_step(state, current_step.get("id")),
         selected_asset_bindings,
     )
+    if mode != "slide_render":
+        selected_step_assets = [
+            asset
+            for asset in selected_step_assets
+            if not _is_pptx_processing_asset(asset)
+        ]
     selected_image_inputs = state.get("selected_image_inputs") or []
     attachments = [
         item
@@ -1714,6 +1854,13 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
 
     writer_slides = _writer_output_to_slides(writer_data, mode)
     data_analyst_data = _get_latest_artifact_by_suffix("_data")
+    resolved_dependency_artifacts_for_prompt = dependency_context.get("resolved_dependency_artifacts", [])
+    if mode != "slide_render":
+        resolved_dependency_artifacts_for_prompt = [
+            item
+            for item in resolved_dependency_artifacts_for_prompt
+            if not _is_pptx_processing_dependency_artifact(item)
+        ]
 
     if not writer_slides:
         logger.error("Visualizer requires Writer output but none was found for mode=%s.", mode)
@@ -1744,7 +1891,7 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         "instruction": current_step.get("instruction"),
         "planned_inputs": dependency_context["planned_inputs"],
         "depends_on_step_ids": dependency_context["depends_on_step_ids"],
-        "resolved_dependency_artifacts": dependency_context["resolved_dependency_artifacts"],
+        "resolved_dependency_artifacts": resolved_dependency_artifacts_for_prompt,
         "resolved_research_inputs": dependency_context["resolved_research_inputs"],
         "design_direction": design_dir,
         "selected_step_assets": [_asset_summary(asset) for asset in selected_step_assets[:20]],
@@ -1755,7 +1902,7 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         "writer_slides": writer_slides,
         "story_framework": story_framework_data if mode in {"character_sheet_render", "comic_page_render"} else None,
         "character_sheet": character_sheet_data if mode in {"character_sheet_render", "comic_page_render"} else None,
-        "data_analyst": data_analyst_data,
+        "data_analyst": data_analyst_data if mode == "slide_render" else None,
         "layout_template_id": CHARACTER_SHEET_TEMPLATE_ID if mode == "character_sheet_render" else None,
     }
     character_sheet_template_bytes = (
@@ -1914,14 +2061,36 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                 selected_template_refs = [
                     {
                         "asset_id": str(asset.get("asset_id") or ""),
-                        "source_slide_number": (
-                            int(asset.get("source_slide_number"))
-                            if isinstance(asset.get("source_slide_number"), int)
-                            else None
+                        "source_mode": (
+                            str(asset.get("source_mode") or asset.get("producer_mode") or "").strip() or None
                         ),
                         "source_title": (
                             str(asset.get("source_title") or "").strip() or None
                         ),
+                        "source_layout_name": (
+                            str(asset.get("source_layout_name") or "").strip() or None
+                        ),
+                        "source_layout_placeholders": [
+                            str(item).strip()
+                            for item in (
+                                asset.get("source_layout_placeholders")
+                                if isinstance(asset.get("source_layout_placeholders"), list)
+                                else []
+                            )
+                            if isinstance(item, str) and str(item).strip()
+                        ],
+                        "source_master_name": (
+                            str(asset.get("source_master_name") or "").strip() or None
+                        ),
+                        "source_master_texts": [
+                            str(item).strip()
+                            for item in (
+                                asset.get("source_master_texts")
+                                if isinstance(asset.get("source_master_texts"), list)
+                                else []
+                            )
+                            if isinstance(item, str) and str(item).strip()
+                        ],
                         "uri": str(asset.get("uri") or "").strip(),
                     }
                     for asset in assigned_assets
@@ -1999,14 +2168,14 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                     "mode": mode,
                     "planned_inputs": dependency_context["planned_inputs"],
                     "depends_on_step_ids": dependency_context["depends_on_step_ids"],
-                    "resolved_dependency_artifacts": dependency_context["resolved_dependency_artifacts"],
+                    "resolved_dependency_artifacts": resolved_dependency_artifacts_for_prompt,
                     "resolved_research_inputs": dependency_context["resolved_research_inputs"],
                     "writer_slide": slide_content,
                     "character_profile": slide_content.get("character_profile") if isinstance(slide_content, dict) else None,
                     "design_direction": design_dir,
                     "story_framework": story_framework_data if mode in {"character_sheet_render", "comic_page_render"} else None,
                     "character_sheet": character_sheet_data if mode in {"character_sheet_render", "comic_page_render"} else None,
-                    "data_analyst": data_analyst_data,
+                    "data_analyst": data_analyst_data if mode == "slide_render" else None,
                     "attachments": attachments,
                     "selected_step_assets": [_asset_summary(asset) for asset in selected_step_assets[:20]],
                     "selected_asset_bindings": selected_asset_bindings,
