@@ -16,6 +16,7 @@ from langgraph.types import Command
 
 from src.shared.schemas import DataAnalystOutput
 from src.core.workflow.state import State
+from src.domain.designer.pptx_parser import extract_pptx_context
 from src.infrastructure.storage.gcs import download_blob_as_bytes, upload_to_gcs
 from .common import (
     create_worker_response,
@@ -44,21 +45,45 @@ STANDARD_FAILED_CHECKS = {
     "missing_research",
     "mode_violation",
 }
+PACKAGE_MODE_KEYWORDS = (
+    "zip",
+    "パッケージ",
+    "書き出し",
+    "export",
+    "エクスポート",
+    "納品",
+    "配布",
+    "pptx/pdf/zip",
+    "pptxとpdf",
+    "pdfとpptx",
+)
+TEMPLATE_MASTER_KEYWORDS = ("マスター", "master", "テンプレート", "template", "layout")
+TEMPLATE_SLIDE_KEYWORDS = ("スライド", "content", "本文")
 
 
 def _resolve_data_analyst_mode(step: dict) -> str:
     mode = str(step.get("mode") or "").strip().lower()
+    instruction = str(step.get("instruction") or "").lower()
+
+    if mode == "images_to_package":
+        has_explicit_package_intent = any(token in instruction for token in PACKAGE_MODE_KEYWORDS)
+        has_template_intent = any(token in instruction for token in TEMPLATE_MASTER_KEYWORDS + TEMPLATE_SLIDE_KEYWORDS)
+        if has_template_intent and not has_explicit_package_intent:
+            return "pptx_master_to_images"
+        return mode
+
     if mode in VALID_DATA_ANALYST_MODES:
         return mode
 
     # Legacy compatibility: infer deterministic mode from instruction text.
-    instruction = str(step.get("instruction") or "").lower()
-    if any(token in instruction for token in ("zip", "pdf", "pptx化", "パッケージ", "書き出し")):
-        return "images_to_package"
-    if "マスター" in instruction or "master" in instruction:
+    if any(token in instruction for token in TEMPLATE_MASTER_KEYWORDS):
         return "pptx_master_to_images"
-    if "スライド" in instruction or "content" in instruction:
+    if any(token in instruction for token in TEMPLATE_SLIDE_KEYWORDS):
         return "pptx_slides_to_images"
+    if any(token in instruction for token in PACKAGE_MODE_KEYWORDS):
+        return "images_to_package"
+    if "pptx" in instruction:
+        return "pptx_master_to_images"
     return "template_manifest_extract"
 
 
@@ -143,6 +168,97 @@ def _normalize_text(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip()
+
+
+def _safe_json_loads(value: str) -> Any | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return json.loads(value)
+    except Exception:
+        return None
+
+
+def _extract_pptx_slide_rows(pptx_path: str) -> list[dict[str, Any]]:
+    try:
+        with open(pptx_path, "rb") as fp:
+            payload = fp.read()
+    except Exception as e:
+        logger.warning("Failed to read pptx for metadata extraction: %s", e)
+        return []
+
+    try:
+        context = extract_pptx_context(
+            payload,
+            filename=os.path.basename(pptx_path),
+            source_url=None,
+        )
+    except Exception as e:
+        logger.warning("Failed to parse pptx metadata for slide mapping: %s", e)
+        return []
+
+    raw_slides = context.get("slides") if isinstance(context, dict) else None
+    if not isinstance(raw_slides, list):
+        return []
+
+    slide_rows: list[dict[str, Any]] = []
+    for row in raw_slides:
+        if not isinstance(row, dict):
+            continue
+        slide_number = row.get("slide_number")
+        if not isinstance(slide_number, int) or slide_number <= 0:
+            continue
+        source_title = _normalize_text(row.get("title"))
+        source_texts = [
+            _normalize_text(item)
+            for item in (row.get("texts") if isinstance(row.get("texts"), list) else [])
+            if _normalize_text(item)
+        ]
+        slide_rows.append(
+            {
+                "slide_number": slide_number,
+                "title": source_title or None,
+                "texts": source_texts,
+            }
+        )
+    slide_rows.sort(key=lambda item: int(item.get("slide_number") or 0))
+    return slide_rows
+
+
+def _build_pptx_render_output_files(
+    *,
+    mode: str,
+    image_paths: list[str],
+    slide_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    output_files: list[dict[str, Any]] = []
+    for idx, image_path in enumerate(image_paths, start=1):
+        if not isinstance(image_path, str) or not image_path.strip():
+            continue
+        slide_meta = slide_rows[idx - 1] if idx - 1 < len(slide_rows) else {}
+        source_slide_number = (
+            slide_meta.get("slide_number")
+            if isinstance(slide_meta.get("slide_number"), int) and int(slide_meta.get("slide_number")) > 0
+            else idx
+        )
+        source_title = _normalize_text(slide_meta.get("title")) or None
+        source_texts = [
+            _normalize_text(item)
+            for item in (slide_meta.get("texts") if isinstance(slide_meta.get("texts"), list) else [])
+            if _normalize_text(item)
+        ]
+        output_files.append(
+            {
+                "url": image_path,
+                "title": source_title or os.path.basename(image_path),
+                "mime_type": "image/png",
+                "source_slide_number": int(source_slide_number),
+                "source_title": source_title,
+                "source_texts": source_texts,
+                "source_mode": mode,
+            }
+        )
+    return output_files
 
 
 def _discover_local_paths_from_value(
@@ -245,7 +361,11 @@ def _merge_detected_output_files(
     existing_items = list(result.output_files or [])
     normalized_candidates: set[str] = set()
     for item in existing_items:
-        local_path = _resolve_local_file_path(item.url, workspace_dir)
+        if isinstance(item, dict):
+            item_url = item.get("url")
+        else:
+            item_url = getattr(item, "url", None)
+        local_path = _resolve_local_file_path(str(item_url or ""), workspace_dir)
         if local_path:
             normalized_candidates.add(local_path)
     for candidate in detected_local_paths:
@@ -255,7 +375,11 @@ def _merge_detected_output_files(
 
     existing_by_local: dict[str, Any] = {}
     for item in existing_items:
-        local_path = _resolve_local_file_path(item.url, workspace_dir)
+        if isinstance(item, dict):
+            item_url = item.get("url")
+        else:
+            item_url = getattr(item, "url", None)
+        local_path = _resolve_local_file_path(str(item_url or ""), workspace_dir)
         if local_path:
             existing_by_local[local_path] = item
 
@@ -268,18 +392,59 @@ def _merge_detected_output_files(
             relative_url = local_path
         mime_type = None
         title = None
+        description = None
+        source_slide_number = None
+        source_title = None
+        source_texts: list[str] = []
+        source_mode = None
         if existing is not None:
-            mime_type = existing.mime_type
-            title = existing.title
+            if isinstance(existing, dict):
+                mime_type = existing.get("mime_type")
+                title = existing.get("title")
+                description = existing.get("description")
+                source_slide_number = existing.get("source_slide_number")
+                source_title = existing.get("source_title")
+                source_texts = existing.get("source_texts") if isinstance(existing.get("source_texts"), list) else []
+                source_mode = existing.get("source_mode")
+            else:
+                mime_type = getattr(existing, "mime_type", None)
+                title = getattr(existing, "title", None)
+                description = getattr(existing, "description", None)
+                source_slide_number = getattr(existing, "source_slide_number", None)
+                source_title = getattr(existing, "source_title", None)
+                source_texts = (
+                    getattr(existing, "source_texts", [])
+                    if isinstance(getattr(existing, "source_texts", []), list)
+                    else []
+                )
+                source_mode = getattr(existing, "source_mode", None)
         if not isinstance(mime_type, str) or not mime_type:
             mime_type = mimetypes.guess_type(local_path)[0] or "application/octet-stream"
         if not isinstance(title, str) or not title:
             title = os.path.basename(local_path)
+        if not isinstance(description, str) or not description:
+            description = None
+        if not isinstance(source_slide_number, int) or source_slide_number <= 0:
+            source_slide_number = None
+        if not isinstance(source_title, str) or not source_title.strip():
+            source_title = None
+        normalized_source_texts = [
+            str(item).strip()
+            for item in source_texts
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if not isinstance(source_mode, str) or not source_mode.strip():
+            source_mode = None
         merged.append(
             {
                 "url": relative_url.replace("\\", "/"),
                 "title": title,
                 "mime_type": mime_type,
+                "description": description,
+                "source_slide_number": source_slide_number,
+                "source_title": source_title,
+                "source_texts": normalized_source_texts,
+                "source_mode": source_mode,
             }
         )
 
@@ -372,6 +537,33 @@ def _extract_preview_urls(result: DataAnalystOutput | None) -> list[str]:
             urls.append(url)
     return urls
 
+
+def _filter_output_files_for_mode(
+    *,
+    mode: str,
+    result: DataAnalystOutput,
+) -> None:
+    if mode not in {"pptx_master_to_images", "pptx_slides_to_images"}:
+        return
+
+    filtered: list[Any] = []
+    for item in result.output_files:
+        if isinstance(item, dict):
+            url = str(item.get("url") or "")
+            raw_mime = item.get("mime_type")
+            mime_type = raw_mime if isinstance(raw_mime, str) else None
+            if _is_image_output(url, mime_type):
+                filtered.append(item)
+            continue
+
+        url = str(getattr(item, "url", "") or "")
+        raw_mime = getattr(item, "mime_type", None)
+        mime_type = raw_mime if isinstance(raw_mime, str) else None
+        if _is_image_output(url, mime_type):
+            filtered.append(item)
+
+    result.output_files = filtered
+
 def _is_remote_url(value: str) -> bool:
     if not isinstance(value, str):
         return False
@@ -422,6 +614,18 @@ def _extract_visualizer_generated_image_urls(dependency_context: dict[str, Any])
     ranked_urls: list[tuple[int, str]] = []
     seen: set[str] = set()
 
+    def _append_url(raw_url: Any, raw_rank: Any) -> None:
+        if not isinstance(raw_url, str) or not raw_url.strip():
+            return
+        if not _looks_like_file_url(raw_url):
+            return
+        normalized = raw_url.strip()
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        rank = raw_rank if isinstance(raw_rank, int) and raw_rank > 0 else 10**9
+        ranked_urls.append((rank, normalized))
+
     for item in raw_dependencies:
         if not isinstance(item, dict):
             continue
@@ -443,35 +647,41 @@ def _extract_visualizer_generated_image_urls(dependency_context: dict[str, Any])
                 if not isinstance(prompt, dict):
                     continue
                 url = prompt.get("generated_image_url")
-                slide_number = prompt.get("slide_number")
                 if not isinstance(url, str) or not url.strip():
-                    continue
-                if not _looks_like_file_url(url):
-                    continue
-                normalized = url.strip()
-                if normalized in seen:
-                    continue
-                seen.add(normalized)
-                rank = slide_number if isinstance(slide_number, int) and slide_number > 0 else 10**9
-                ranked_urls.append((rank, normalized))
+                    url = prompt.get("image_url")
+                _append_url(url, prompt.get("slide_number"))
 
         slides = content.get("slides")
         if isinstance(slides, list):
             for slide in slides:
                 if not isinstance(slide, dict):
                     continue
-                url = slide.get("image_url")
-                slide_number = slide.get("slide_number")
+                url = slide.get("generated_image_url")
                 if not isinstance(url, str) or not url.strip():
+                    url = slide.get("image_url")
+                _append_url(url, slide.get("slide_number"))
+
+        for page_key in ("design_pages", "comic_pages", "pages"):
+            pages = content.get(page_key)
+            if not isinstance(pages, list):
+                continue
+            for page in pages:
+                if not isinstance(page, dict):
                     continue
-                if not _looks_like_file_url(url):
+                url = page.get("generated_image_url")
+                if not isinstance(url, str) or not url.strip():
+                    url = page.get("image_url")
+                _append_url(url, page.get("page_number"))
+
+        characters = content.get("characters")
+        if isinstance(characters, list):
+            for character in characters:
+                if not isinstance(character, dict):
                     continue
-                normalized = url.strip()
-                if normalized in seen:
-                    continue
-                seen.add(normalized)
-                rank = slide_number if isinstance(slide_number, int) and slide_number > 0 else 10**9
-                ranked_urls.append((rank, normalized))
+                url = character.get("generated_image_url")
+                if not isinstance(url, str) or not url.strip():
+                    url = character.get("image_url")
+                _append_url(url, character.get("character_number"))
 
     ranked_urls.sort(key=lambda row: (row[0], row[1]))
     return [url for _, url in ranked_urls]
@@ -709,6 +919,31 @@ async def _run_deterministic_data_analyst_mode(
         tool_output_text = str(tool_output)
         detected_output_paths.update(_extract_output_paths_from_tool_output(tool_output_text, workspace_dir))
         failed_checks = _data_analyst_failed_checks(kind="tool_execution") if tool_output_text.strip().startswith("Error:") else []
+        parsed_tool_output = _safe_json_loads(tool_output_text)
+        image_paths = parsed_tool_output.get("image_paths") if isinstance(parsed_tool_output, dict) else None
+        if not isinstance(image_paths, list):
+            image_paths = []
+        normalized_image_paths = [
+            str(path).strip()
+            for path in image_paths
+            if isinstance(path, str) and str(path).strip()
+        ]
+        slide_rows = _extract_pptx_slide_rows(pptx_path)
+        output_files = _build_pptx_render_output_files(
+            mode=mode,
+            image_paths=normalized_image_paths,
+            slide_rows=slide_rows,
+        )
+        rendered_images: list[dict[str, Any]] = []
+        for row in output_files:
+            rendered_images.append(
+                {
+                    "image_path": row.get("url"),
+                    "source_slide_number": row.get("source_slide_number"),
+                    "source_title": row.get("source_title"),
+                    "source_texts": row.get("source_texts") if isinstance(row.get("source_texts"), list) else [],
+                }
+            )
         call_expression = (
             f"render_pptx_master_images_tool("
             f"pptx_path={pptx_path!r}, output_dir={output_dir!r})"
@@ -724,9 +959,10 @@ async def _run_deterministic_data_analyst_mode(
                     "mode": mode,
                     "instruction": instruction,
                     "source_pptx": pptx_path,
+                    "rendered_images": rendered_images,
                 },
                 failed_checks=failed_checks,
-                output_files=[],
+                output_files=output_files,
             ),
             detected_output_paths,
         )
@@ -940,6 +1176,7 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
             workspace_dir=workspace_dir,
             detected_local_paths=sorted(detected_output_paths),
         )
+        _filter_output_files_for_mode(mode=execution_mode, result=result)
 
         if is_error:
             result.output_files = []

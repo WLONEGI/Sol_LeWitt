@@ -1,4 +1,5 @@
 from src.core.workflow.nodes.planner import (
+    _build_attachment_signal,
     _ensure_multi_perspective_research_steps,
     _missing_required_research_step,
 )
@@ -105,3 +106,35 @@ def test_research_step_instruction_is_not_overwritten_when_already_multi_perspec
 
     enriched = _ensure_multi_perspective_research_steps(plan_steps, product_type="slide")
     assert enriched[0]["instruction"] == plan_steps[0]["instruction"]
+
+
+def test_build_attachment_signal_detects_pptx_from_attachments() -> None:
+    signal = _build_attachment_signal(
+        {
+            "attachments": [
+                {
+                    "filename": "template.pptx",
+                    "kind": "pptx",
+                    "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                }
+            ]
+        }
+    )
+    assert signal["has_pptx_attachment"] is True
+    assert signal["pptx_attachment_count"] == 1
+    assert signal["pptx_context_template_count"] == 0
+
+
+def test_build_attachment_signal_detects_pptx_from_context_only() -> None:
+    signal = _build_attachment_signal(
+        {
+            "attachments": [],
+            "pptx_context": {
+                "template_count": 1,
+                "templates": [{"filename": "template.pptx"}],
+            },
+        }
+    )
+    assert signal["has_pptx_attachment"] is True
+    assert signal["pptx_attachment_count"] == 0
+    assert signal["pptx_context_template_count"] == 1

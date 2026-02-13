@@ -4,7 +4,21 @@
 1. researcher (`text_search`)
 2. writer (`slide_outline` or `infographic_spec`)
 3. visualizer (`slide_render`)
-4. data_analyst (`pptx_master_to_images` / `pptx_slides_to_images` / `images_to_package` / `template_manifest_extract`) when post-processing is needed
+4. data_analyst (`images_to_package`) as terminal packaging step
+
+## PPTX template policy (mandatory)
+- If `has_pptx_attachment=true`, add a preprocessing `data_analyst` step as the FIRST step.
+  - mode must be `pptx_slides_to_images` only.
+  - `pptx_master_to_images` must not be used in slide planning.
+  - this preprocessing step must be independent (`depends_on: []`) and placed before writer/visualizer.
+  - connect downstream by explicit `inputs`/`outputs` labels and `depends_on` where consumed.
+- Template解析の主成果物は画像（PNG等）として扱う。中間変換で生成されるPDF/PPTXを成果物の主出力にしない。
+- preprocessing must not be omitted when PPTX is attached.
+
+## Packaging policy (mandatory terminal step)
+- Always add `data_analyst(mode=images_to_package)` as a separate LAST step for slide plans.
+- Packaging step must be separated from PPTX preprocessing step (do not merge into one step).
+- Packaging step must depend on the final visualizer step and package generated images to zip/pptx/pdf.
 
 ## Information-density first policy
 - Slide案件では「情報密度」を最優先に計画する。

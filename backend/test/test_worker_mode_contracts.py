@@ -189,6 +189,57 @@ def test_planner_normalize_comic_preserves_steps_without_auto_insertion() -> Non
     ]
 
 
+def test_finalize_plan_does_not_append_terminal_packaging_step() -> None:
+    steps = _finalize_plan(
+        raw_plan_steps=[
+            {
+                "id": 1,
+                "capability": "writer",
+                "mode": "slide_outline",
+                "instruction": "構成を作る",
+            },
+            {
+                "id": 2,
+                "capability": "visualizer",
+                "mode": "slide_render",
+                "instruction": "画像を生成する",
+                "outputs": ["slides:images"],
+            },
+        ],
+        product_type="slide",
+    )
+
+    assert len(steps) == 2
+    assert [step["capability"] for step in steps] == ["writer", "visualizer"]
+    assert [step["mode"] for step in steps] == ["slide_outline", "slide_render"]
+
+
+def test_finalize_plan_preserves_existing_packaging_step_order() -> None:
+    steps = _finalize_plan(
+        raw_plan_steps=[
+            {
+                "id": 1,
+                "capability": "data_analyst",
+                "mode": "images_to_package",
+                "instruction": "先にパッケージ化する",
+            },
+            {
+                "id": 2,
+                "capability": "visualizer",
+                "mode": "slide_render",
+                "instruction": "画像を生成する",
+            },
+        ],
+        product_type="slide",
+    )
+
+    assert len(steps) == 2
+    assert steps[0]["capability"] == "data_analyst"
+    assert steps[0]["mode"] == "images_to_package"
+    assert steps[1]["capability"] == "visualizer"
+    assert steps[1]["mode"] == "slide_render"
+
+
 def test_writer_story_framework_output_accepts_new_shape() -> None:
     data = {
         "execution_summary": "ok",

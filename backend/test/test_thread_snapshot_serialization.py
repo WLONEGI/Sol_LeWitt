@@ -50,7 +50,9 @@ def test_build_snapshot_payload_generates_ui_events_and_artifacts() -> None:
             ),
             "step_2_visual": json.dumps(
                 {
-                    "prompts": [
+                    "product_type": "slide",
+                    "mode": "slide_render",
+                    "slides": [
                         {
                             "slide_number": 1,
                             "title": "Intro Visual",

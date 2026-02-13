@@ -647,13 +647,13 @@ class StructuredImagePrompt(BaseModel):
     visual_style: str = Field(
         description="ビジュアルスタイルの詳細な説明（英語）。デザイン、色、構図、モチーフなどを自由に記述。"
     )
-    text_policy: Literal["render_all_text", "render_title_only", "no_text"] = Field(
-        default="render_all_text",
-        description="画像内テキストのレンダリング方針。通常はrender_all_text。"
+    text_policy: Optional[Literal["render_all_text", "render_title_only", "no_text"]] = Field(
+        default=None,
+        description="レガシー互換項目。slide/design では使用しない。"
     )
-    negative_constraints: List[str] = Field(
-        default_factory=list,
-        description="避けるべきアーティファクトや構図崩れ等のネガティブ制約。"
+    negative_constraints: Optional[List[str]] = Field(
+        default=None,
+        description="レガシー互換項目。slide/design では使用しない。"
     )
 
 
@@ -661,10 +661,8 @@ class StructuredImagePrompt(BaseModel):
 class ImagePrompt(BaseModel):
     """画像生成プロンプト（構造化対応版）
     
-    従来の `image_generation_prompt` (str) に加え、
-    新たに `structured_prompt` (StructuredImagePrompt) をサポート。
-    
-    優先度: structured_prompt > image_generation_prompt
+    標準入力は `structured_prompt`。
+    `image_generation_prompt` は後方互換性のためのレガシー入力として保持する。
     """
     slide_number: int = Field(description="対象スライド番号")
     
@@ -681,23 +679,39 @@ class ImagePrompt(BaseModel):
     # --- NEW: 構造化プロンプト ---
     structured_prompt: Optional[StructuredImagePrompt] = Field(
         default=None,
-        description="JSON構造化プロンプト（Nano Banana Pro最適化）。指定された場合、image_generation_promptより優先される。"
+        description="JSON構造化プロンプト（標準）。"
     )
     
     # --- 従来のプロンプト（後方互換性） ---
     image_generation_prompt: Optional[str] = Field(
         default=None,
-        description="従来形式のプロンプト文字列。structured_promptが指定されていない場合に使用。"
+        description="レガシー互換のプレーン文字列プロンプト。structured_prompt未指定時のフォールバックとしてのみ使用。"
     )
 
     compiled_prompt: Optional[str] = Field(
         default=None,
-        description="structured_promptから生成した最終プロンプト（UI表示用）。"
+        description="最終的に画像生成へ送るプロンプト（structured_prompt もしくは legacy prompt から生成）。"
     )
     
     rationale: str = Field(description="このビジュアルを選んだ理由（推論の根拠）")
     generated_image_url: Optional[str] = Field(default=None, description="生成された画像のGCS URL（生成後に入力される）")
     thought_signature: Optional[ThoughtSignature] = Field(default=None, description="Deep Edit用の思考署名")
+
+    @model_validator(mode="after")
+    def _validate_prompt_presence(self) -> "ImagePrompt":
+        has_structured = self.structured_prompt is not None
+        plain_prompt = (
+            self.image_generation_prompt.strip()
+            if isinstance(self.image_generation_prompt, str)
+            else ""
+        )
+        if not has_structured and not plain_prompt:
+            raise ValueError(
+                "ImagePrompt requires either structured_prompt or non-empty image_generation_prompt."
+            )
+        # structured_prompt がある場合は legacy plain prompt を保持しない。
+        self.image_generation_prompt = None if has_structured else (plain_prompt or None)
+        return self
 
 
 
@@ -724,10 +738,33 @@ class GenerationConfig(BaseModel):
 
 
 class VisualizerOutput(BaseModel):
-    """Visualizerノードの出力（v2: Markdown Slide Format 対応版）"""
-    
-    execution_summary: str = Field(description="実行結果の要約（例：『全スライドの画像生成プロンプトを作成しました』）")
-    prompts: List[ImagePrompt] = Field(description="各スライド用の画像生成プロンプト")
+    """Visualizerノードの出力（product_type別フォーマット）"""
+
+    execution_summary: str = Field(description="実行結果の要約")
+    product_type: Optional[Literal["slide", "design", "comic"]] = Field(
+        default=None,
+        description="対象プロダクト種別",
+    )
+    mode: Optional[str] = Field(
+        default=None,
+        description="Visualizer mode（例: slide_render, document_layout_render, comic_page_render）",
+    )
+    slides: Optional[List[dict[str, Any]]] = Field(
+        default=None,
+        description="slide向け出力（slide_numberベース）",
+    )
+    design_pages: Optional[List[dict[str, Any]]] = Field(
+        default=None,
+        description="design向け出力（page_numberベース）",
+    )
+    comic_pages: Optional[List[dict[str, Any]]] = Field(
+        default=None,
+        description="comic page向け出力（page_numberベース）",
+    )
+    characters: Optional[List[dict[str, Any]]] = Field(
+        default=None,
+        description="comic character_sheet向け出力（character_numberベース）",
+    )
     generation_config: GenerationConfig = Field(
         default_factory=lambda: GenerationConfig(
             thinking_level="high", 
@@ -739,6 +776,36 @@ class VisualizerOutput(BaseModel):
     seed: Optional[int] = Field(default=None, description="画像生成に使用するランダムシード（一貫性用）")
     parent_id: Optional[str] = Field(default=None, description="修正元の画像ID（編集時）")
     combined_pdf_url: Optional[str] = Field(default=None, description="生成済みスライドを統合したPDFのURL")
+
+    @model_validator(mode="after")
+    def _validate_visual_payload(self) -> "VisualizerOutput":
+        slide_count = len(self.slides or [])
+        design_page_count = len(self.design_pages or [])
+        comic_page_count = len(self.comic_pages or [])
+        character_count = len(self.characters or [])
+        total = slide_count + design_page_count + comic_page_count + character_count
+        if total == 0:
+            raise ValueError("VisualizerOutput must include slides, design_pages, comic_pages, or characters.")
+
+        if self.product_type == "slide" and slide_count == 0:
+            raise ValueError("slide product_type requires non-empty slides.")
+        if self.product_type == "design":
+            if design_page_count == 0:
+                raise ValueError("design product_type requires non-empty design_pages.")
+            self.mode = None
+        if self.product_type == "comic":
+            if character_count > 0 and comic_page_count > 0:
+                raise ValueError("comic product_type cannot include both characters and comic_pages in one output.")
+            if not self.mode:
+                if character_count > 0 and comic_page_count == 0:
+                    self.mode = "character_sheet_render"
+                elif comic_page_count > 0 and character_count == 0:
+                    self.mode = "comic_page_render"
+            if self.mode == "character_sheet_render" and character_count == 0:
+                raise ValueError("comic character_sheet_render requires non-empty characters.")
+            if self.mode == "comic_page_render" and comic_page_count == 0:
+                raise ValueError("comic comic_page_render requires non-empty comic_pages.")
+        return self
 
 
 # === Visualizer Plan (v3) ===
@@ -824,6 +891,22 @@ class OutputFile(BaseModel):
     title: Optional[str] = Field(default=None, description="成果物の短い名称")
     mime_type: Optional[str] = Field(default=None, description="MIMEタイプ（例: application/pdf）")
     description: Optional[str] = Field(default=None, description="成果物の説明（オプション）")
+    source_slide_number: Optional[int] = Field(
+        default=None,
+        description="PPTX由来画像の場合の元スライド番号",
+    )
+    source_title: Optional[str] = Field(
+        default=None,
+        description="PPTX由来画像の場合の元スライドタイトル",
+    )
+    source_texts: List[str] = Field(
+        default_factory=list,
+        description="PPTX由来画像の場合の元スライド本文テキスト抜粋",
+    )
+    source_mode: Optional[str] = Field(
+        default=None,
+        description="生成元モード（例: pptx_slides_to_images）",
+    )
 
 
 class DataAnalystOutput(BaseModel):

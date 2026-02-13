@@ -104,7 +104,12 @@ def generate_image(
                 ref_data = ref.get("data")
                 ref_mime = ref.get("mime_type") if isinstance(ref.get("mime_type"), str) else None
                 if isinstance(ref_uri, str) and ref_uri.startswith("gs://"):
-                    contents.append(types.Part.from_uri(uri=ref_uri, mime_type=ref_mime or _infer_image_mime_from_uri(ref_uri)))
+                    contents.append(
+                        types.Part.from_uri(
+                            file_uri=ref_uri,
+                            mime_type=ref_mime or _infer_image_mime_from_uri(ref_uri),
+                        )
+                    )
                     continue
                 if isinstance(ref_data, (bytes, bytearray)):
                     contents.append(types.Part.from_bytes(data=bytes(ref_data), mime_type=ref_mime or "image/png"))
@@ -117,7 +122,12 @@ def generate_image(
                 continue
 
             if isinstance(ref, str) and ref.startswith("gs://"):
-                contents.append(types.Part.from_uri(uri=ref, mime_type=_infer_image_mime_from_uri(ref)))
+                contents.append(
+                    types.Part.from_uri(
+                        file_uri=ref,
+                        mime_type=_infer_image_mime_from_uri(ref),
+                    )
+                )
             elif isinstance(ref, bytes):
                 contents.append(types.Part.from_bytes(data=ref, mime_type="image/png"))
             elif isinstance(ref, str):

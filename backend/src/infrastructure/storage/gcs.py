@@ -1,6 +1,6 @@
 import logging
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 from google.cloud import storage
@@ -122,7 +122,7 @@ def _parse_gcs_blob_ref(url: str) -> tuple[str | None, str | None]:
 
     # https://storage.googleapis.com/bucket/path/to/file
     if parsed.scheme in {"http", "https"} and parsed.netloc == "storage.googleapis.com":
-        path = parsed.path.lstrip("/")
+        path = unquote(parsed.path.lstrip("/"))
         if "/" not in path:
             return None, None
         bucket, blob = path.split("/", 1)
@@ -131,7 +131,7 @@ def _parse_gcs_blob_ref(url: str) -> tuple[str | None, str | None]:
     # https://bucket.storage.googleapis.com/path/to/file
     if parsed.scheme in {"http", "https"} and parsed.netloc.endswith(".storage.googleapis.com"):
         bucket = parsed.netloc.replace(".storage.googleapis.com", "")
-        blob = parsed.path.lstrip("/") or None
+        blob = unquote(parsed.path.lstrip("/")) or None
         return (bucket or None), blob
 
     return None, None

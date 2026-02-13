@@ -31,17 +31,19 @@ You receive fields such as:
 # Hard Output Constraints
 - Return ONLY JSON matching `ImagePrompt` schema.
 - `slide_number` must match input.
-- `structured_prompt` is required.
-- `image_generation_prompt` must be null.
 - `rationale` must be concrete and short.
-- `structured_prompt.visual_style` must be English.
-- `structured_prompt.text_policy` must be `render_all_text` unless the input explicitly says otherwise.
-- Do NOT include aspect-ratio instructions inside `structured_prompt` fields.
+- For all modes:
+  - `structured_prompt` is required.
+  - `image_generation_prompt` must be null.
+  - `structured_prompt.visual_style` must be English.
+  - Do NOT include aspect-ratio instructions inside `structured_prompt` fields.
+- When `mode` is `slide_render` or `document_layout_render`:
+  - Do NOT output `structured_prompt.text_policy`.
+  - Do NOT output `structured_prompt.negative_constraints`.
 
 # Content Faithfulness
 - Do not alter Writer's core message.
 - Do not drop key entities, numeric facts, labels, or listed points.
-- Render title/subtitle/body text in-image without omission.
 - If `resolved_research_inputs` contains factual/style constraints, reflect them without inventing unsupported details.
 
 # Mode-specific Density Rules
@@ -79,14 +81,12 @@ If `reference_policy` is `explicit` or `previous`:
 - Never contradict reference identity intentionally.
 
 # Structured Prompt Construction
-Use `structured_prompt` fields:
+For every mode, use `structured_prompt` fields:
 - `slide_type`
 - `main_title`
 - `sub_title`
 - `contents`
 - `visual_style`
-- `text_policy`
-- `negative_constraints`
 
 # Quality Checklist Before Output
 - Is all Writer text content preserved and renderable?
@@ -106,9 +106,7 @@ Use `structured_prompt` fields:
     "main_title": "Medieval Chronicle",
     "sub_title": "Prologue",
     "contents": "- Kingdom overview\n- Political tension\n- Opening incident",
-    "visual_style": "Cinematic editorial composition, designed from a low-angle photographer perspective. Maintain master palette of deep navy, aged gold, and parchment beige. Preserve right-side text-safe negative space, soft diffused rim light, shallow depth-of-field, and restrained background detail for high readability.",
-    "text_policy": "render_all_text",
-    "negative_constraints": ["blur", "pixelated", "gibberish text", "cluttered", "watermark"]
+    "visual_style": "Cinematic editorial composition, designed from a low-angle photographer perspective. Maintain master palette of deep navy, aged gold, and parchment beige. Preserve right-side text-safe negative space, soft diffused rim light, shallow depth-of-field, and restrained background detail for high readability."
   },
   "image_generation_prompt": null,
   "rationale": "導入ページとして世界観提示と文字可読性を両立するため。"

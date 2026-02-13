@@ -15,6 +15,10 @@ def _render_planner_prompt(product_type: str) -> str:
         "unfinished_steps": "[]",
         "target_scope": "{}",
         "interrupt_intent": "false",
+        "attachment_signal": "{\"has_pptx_attachment\":false,\"attachment_count\":0,\"pptx_attachment_count\":0,\"pptx_context_template_count\":0,\"attachments_summary\":[]}",
+        "has_pptx_attachment": "false",
+        "pptx_attachment_count": "0",
+        "pptx_context_template_count": "0",
     }
     messages = apply_prompt_template("planner", state)
     assert isinstance(messages[0], SystemMessage)
@@ -25,6 +29,8 @@ def test_planner_prompt_loads_slide_specific_rules() -> None:
     prompt = _render_planner_prompt("slide")
     assert "Product Guidance: slide" in prompt
     assert "Researcher should be inserted by default." in prompt
+    assert "PPTX template policy (mandatory)" in prompt
+    assert "mode must be `pptx_slides_to_images` only." in prompt
 
 
 def test_planner_prompt_loads_design_specific_rules() -> None:

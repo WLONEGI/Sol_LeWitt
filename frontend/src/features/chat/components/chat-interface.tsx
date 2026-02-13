@@ -1013,6 +1013,7 @@ export function ChatInterface({ threadId }: { threadId?: string | null }) {
                             value={input}
                             onChange={handleInputChange}
                             onSend={handleSend}
+                            autoSelectOnFocus
                             onStop={handleStop}
                             isLoading={authLoading || !historyReady || isUploadingAttachments}
                             isProcessing={isLoading}

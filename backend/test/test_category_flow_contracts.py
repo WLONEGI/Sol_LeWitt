@@ -97,6 +97,75 @@ def test_category_fixed_flow_snapshot_contracts(
         "license_note": "CC BY-SA 4.0",
         "provider": "grounded_web",
     }
+    if product_type == "document_design":
+        visual_artifact = {
+            "execution_summary": "visual generated",
+            "product_type": "design",
+            "design_pages": [
+                {
+                    "page_number": 1,
+                    "title": "Key Visual",
+                    "generated_image_url": "https://example.com/generated-1.png",
+                    "compiled_prompt": "high quality illustration",
+                    "structured_prompt": {"main_title": "Key Visual"},
+                    "rationale": "aligns with story",
+                    "layout_type": "title_slide",
+                    "selected_inputs": [selected],
+                }
+            ],
+            "generation_config": {
+                "thinking_level": "high",
+                "media_resolution": "medium",
+                "aspect_ratio": "16:9",
+            },
+        }
+    elif product_type == "comic":
+        visual_artifact = {
+            "execution_summary": "visual generated",
+            "product_type": "comic",
+            "mode": "comic_page_render",
+            "comic_pages": [
+                {
+                    "page_number": 1,
+                    "title": "Key Visual",
+                    "generated_image_url": "https://example.com/generated-1.png",
+                    "compiled_prompt": "high quality illustration",
+                    "structured_prompt": {"main_title": "Key Visual"},
+                    "rationale": "aligns with story",
+                    "layout_type": "title_slide",
+                    "selected_inputs": [selected],
+                }
+            ],
+            "generation_config": {
+                "thinking_level": "high",
+                "media_resolution": "medium",
+                "aspect_ratio": "16:9",
+            },
+        }
+    else:
+        visual_artifact = {
+            "execution_summary": "visual generated",
+            "product_type": "slide",
+            "mode": "slide_render",
+            "slides": [
+                {
+                    "slide_number": 1,
+                    "title": "Key Visual",
+                    "generated_image_url": "https://example.com/generated-1.png",
+                    "compiled_prompt": "high quality illustration",
+                    "structured_prompt": {"main_title": "Key Visual"},
+                    "rationale": "aligns with story",
+                    "layout_type": "title_slide",
+                    "selected_inputs": [selected],
+                }
+            ],
+            "generation_config": {
+                "thinking_level": "high",
+                "media_resolution": "medium",
+                "aspect_ratio": "16:9",
+            },
+        }
+
     state_values = {
         "messages": [HumanMessage(content=f"{product_type} を新規作成")],
         "plan": [],
@@ -113,29 +182,7 @@ def test_category_fixed_flow_snapshot_contracts(
                 },
                 ensure_ascii=False,
             ),
-            "step_3_visual": json.dumps(
-                {
-                    "execution_summary": "visual generated",
-                    "prompts": [
-                        {
-                            "slide_number": 1,
-                            "title": "Key Visual",
-                            "generated_image_url": "https://example.com/generated-1.png",
-                            "compiled_prompt": "high quality illustration",
-                            "structured_prompt": {"main_title": "Key Visual"},
-                            "rationale": "aligns with story",
-                            "layout_type": "title_slide",
-                            "selected_inputs": [selected],
-                        }
-                    ],
-                    "generation_config": {
-                        "thinking_level": "high",
-                        "media_resolution": "medium",
-                        "aspect_ratio": "16:9",
-                    },
-                },
-                ensure_ascii=False,
-            ),
+            "step_3_visual": json.dumps(visual_artifact, ensure_ascii=False),
         },
     }
 

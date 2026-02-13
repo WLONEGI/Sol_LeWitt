@@ -22,6 +22,7 @@ interface ChatInputProps {
     disabledReason?: string | null;
     className?: string;
     placeholder?: string;
+    autoSelectOnFocus?: boolean;
     onFilesSelect?: (files: File[]) => void;
     selectedFiles?: File[];
     onRemoveFile?: (index: number) => void;
@@ -44,6 +45,7 @@ export function ChatInput({
     allowSendWhileLoading = false,
     className,
     placeholder = "Send message to Sol LeWitt",
+    autoSelectOnFocus = false,
     value,
     onChange,
     onFilesSelect,
@@ -60,6 +62,11 @@ export function ChatInput({
 }) {
     const [internalInput, setInternalInput] = React.useState("")
     const fileInputRef = React.useRef<HTMLInputElement>(null)
+    const textareaRef = React.useRef<HTMLTextAreaElement | null>(null)
+    const lastPointerDownRef = React.useRef<{ type: string; at: number }>({
+        type: "",
+        at: 0,
+    })
     const ActionIcon = actionPill?.icon
     const inputLocked = Boolean(isLoading && !allowSendWhileLoading)
     const showStopButton = Boolean(isProcessing)
@@ -87,6 +94,31 @@ export function ChatInput({
             onFilesSelect(files)
         }
         e.currentTarget.value = ""
+    }
+
+    const handleInputPointerDownCapture = (e: React.PointerEvent<HTMLTextAreaElement>) => {
+        lastPointerDownRef.current = {
+            type: e.pointerType || "",
+            at: Date.now(),
+        }
+    }
+
+    const handleInputFocus = (e: React.FocusEvent<HTMLTextAreaElement>) => {
+        if (!autoSelectOnFocus) return
+        if (!e.currentTarget.value) return
+
+        const now = Date.now()
+        const isRecentTouchFocus =
+            lastPointerDownRef.current.type === "touch" &&
+            now - lastPointerDownRef.current.at < 700
+        if (isRecentTouchFocus) return
+
+        requestAnimationFrame(() => {
+            const target = textareaRef.current
+            if (!target) return
+            if (document.activeElement !== target) return
+            target.select()
+        })
     }
 
     return (
@@ -128,10 +160,13 @@ export function ChatInput({
                 {/* Row 1: Textarea */}
                 <div className="relative w-full">
                     <TextareaAutosize
+                        ref={textareaRef}
                         minRows={1}
                         maxRows={5}
                         value={inputValue}
                         onChange={handleChange}
+                        onFocus={handleInputFocus}
+                        onPointerDownCapture={handleInputPointerDownCapture}
                         onKeyDown={handleKeyDown}
                         placeholder={placeholder}
                         disabled={inputLocked}

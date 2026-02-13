@@ -84,12 +84,12 @@ export function DataAnalystViewer({ content, embedded = false }: DataAnalystView
     const inputFiles = useMemo(() => {
         const dedup = new Map<string, ViewerFileEntry>()
 
-        const manifest = Array.isArray(input?.local_file_manifest) ? input.local_file_manifest : []
-        manifest.forEach((row: any) => {
+        const attachments = Array.isArray(input?.attachments) ? input.attachments : []
+        attachments.forEach((row: any) => {
             const entry = normalizeFileEntry({
-                url: row?.source_url,
-                title: defaultTitleFromUrl(String(row?.source_url || "")),
-                mime_type: undefined,
+                url: row?.url,
+                title: row?.filename,
+                mime_type: row?.mime_type,
             })
             if (entry && !dedup.has(entry.url)) dedup.set(entry.url, entry)
         })
@@ -107,12 +107,12 @@ export function DataAnalystViewer({ content, embedded = false }: DataAnalystView
             if (entry && !dedup.has(entry.url)) dedup.set(entry.url, entry)
         })
 
-        const attachments = Array.isArray(input?.attachments) ? input.attachments : []
-        attachments.forEach((row: any) => {
+        const manifest = Array.isArray(input?.local_file_manifest) ? input.local_file_manifest : []
+        manifest.forEach((row: any) => {
             const entry = normalizeFileEntry({
-                url: row?.url,
-                title: row?.filename,
-                mime_type: row?.mime_type,
+                url: row?.source_url,
+                title: defaultTitleFromUrl(String(row?.source_url || "")),
+                mime_type: undefined,
             })
             if (entry && !dedup.has(entry.url)) dedup.set(entry.url, entry)
         })
@@ -120,13 +120,20 @@ export function DataAnalystViewer({ content, embedded = false }: DataAnalystView
         return Array.from(dedup.values())
     }, [input?.attachments, input?.local_file_manifest, input?.selected_image_inputs])
 
-    const outputFiles = useMemo(() => {
+    const normalizedOutputFiles = useMemo(() => {
         const rows = Array.isArray(output?.output_files) ? output.output_files : []
-        const normalized = rows
+        return rows
             .map((row: any) => normalizeFileEntry(row))
             .filter((row: ViewerFileEntry | null): row is ViewerFileEntry => Boolean(row))
-        return normalized.filter((row: ViewerFileEntry) => !row.isImage)
     }, [output?.output_files])
+    const outputImages = useMemo(
+        () => normalizedOutputFiles.filter((row: ViewerFileEntry) => row.isImage),
+        [normalizedOutputFiles],
+    )
+    const outputFiles = useMemo(
+        () => normalizedOutputFiles.filter((row: ViewerFileEntry) => !row.isImage),
+        [normalizedOutputFiles],
+    )
 
     const codeLines = useMemo(() => code.split("\n"), [code])
     const logLines = useMemo(() => log.split("\n"), [log])
@@ -311,7 +318,7 @@ export function DataAnalystViewer({ content, embedded = false }: DataAnalystView
                             <CardTitle className={cn("text-sm", embedded && "text-xs")}>アウトプット</CardTitle>
                         </CardHeader>
                         <CardContent className={cn(embedded ? "space-y-2 px-3 pb-3 pt-0" : "space-y-4")}>
-                            {outputFiles.length === 0 && failedChecks.length === 0 ? (
+                            {outputFiles.length === 0 && outputImages.length === 0 && failedChecks.length === 0 ? (
                                 <div className={cn("text-muted-foreground italic", embedded ? "text-[11px]" : "text-xs")}>アウトプットはまだ生成されていません。</div>
                             ) : (
                                 <>
@@ -329,6 +336,34 @@ export function DataAnalystViewer({ content, embedded = false }: DataAnalystView
                                                     >
                                                         {check}
                                                     </span>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {outputImages.length > 0 && (
+                                        <div>
+                                            <div className={cn("text-muted-foreground uppercase tracking-wider mb-2", embedded ? "text-[11px]" : "text-xs")}>Generated Images</div>
+                                            <div className={cn("grid gap-2", embedded ? "grid-cols-2" : "grid-cols-3")}>
+                                                {outputImages.map((file: ViewerFileEntry, index: number) => (
+                                                    <a
+                                                        key={`output-image-${index}`}
+                                                        href={file.url}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="group rounded-md border border-border overflow-hidden bg-muted/20 hover:border-primary/50 transition-colors"
+                                                    >
+                                                        <div className="aspect-[4/3] bg-muted">
+                                                            <img
+                                                                src={file.url}
+                                                                alt={file.title}
+                                                                className="h-full w-full object-cover"
+                                                            />
+                                                        </div>
+                                                        <div className={cn("truncate border-t border-border", embedded ? "px-2 py-1 text-[11px]" : "px-2.5 py-1.5 text-xs")}>
+                                                            {file.title}
+                                                        </div>
+                                                    </a>
                                                 ))}
                                             </div>
                                         </div>

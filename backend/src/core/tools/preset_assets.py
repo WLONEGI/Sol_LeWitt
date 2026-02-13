@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import subprocess
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Annotated
@@ -84,39 +85,38 @@ def render_pptx_master_images_tool(
 
         dpi_value = max(72, min(300, int(dpi)))
         stem = Path(source_pptx).stem
-        rendered_pdf = os.path.join(out_dir, f"{stem}.pdf")
-
-        convert_cmd = [
-            "soffice",
-            "--headless",
-            "--convert-to",
-            "pdf",
-            "--outdir",
-            out_dir,
-            source_pptx,
-        ]
-        convert_result = subprocess.run(convert_cmd, capture_output=True, text=True, check=False, timeout=120)
-        if convert_result.returncode != 0:
-            return (
-                "Error: Failed to render PPTX with LibreOffice.\n"
-                f"stdout: {convert_result.stdout}\n"
-                f"stderr: {convert_result.stderr}"
-            )
-        if not os.path.isfile(rendered_pdf):
-            return f"Error: Converted PDF not found: {rendered_pdf}"
-
-        pages = convert_from_path(rendered_pdf, dpi=dpi_value, fmt="png")
         image_paths: list[str] = []
-        for idx, page in enumerate(pages, start=1):
-            image_path = os.path.join(out_dir, f"{stem}_master_{idx:02d}.png")
-            page.save(image_path, format="PNG")
-            image_paths.append(image_path)
+        with tempfile.TemporaryDirectory(prefix="pptx_render_", dir=safe_work_dir) as convert_dir:
+            rendered_pdf = os.path.join(convert_dir, f"{stem}.pdf")
+            convert_cmd = [
+                "soffice",
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                convert_dir,
+                source_pptx,
+            ]
+            convert_result = subprocess.run(convert_cmd, capture_output=True, text=True, check=False, timeout=120)
+            if convert_result.returncode != 0:
+                return (
+                    "Error: Failed to render PPTX with LibreOffice.\n"
+                    f"stdout: {convert_result.stdout}\n"
+                    f"stderr: {convert_result.stderr}"
+                )
+            if not os.path.isfile(rendered_pdf):
+                return f"Error: Converted PDF not found: {rendered_pdf}"
+
+            pages = convert_from_path(rendered_pdf, dpi=dpi_value, fmt="png")
+            for idx, page in enumerate(pages, start=1):
+                image_path = os.path.join(out_dir, f"{stem}_master_{idx:02d}.png")
+                page.save(image_path, format="PNG")
+                image_paths.append(image_path)
 
         return json.dumps(
             {
                 "status": "ok",
                 "pptx_path": source_pptx,
-                "pdf_path": rendered_pdf,
                 "image_paths": image_paths,
             },
             ensure_ascii=False,

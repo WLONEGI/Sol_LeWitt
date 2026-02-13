@@ -11,6 +11,8 @@ import base64
 import mimetypes
 import re
 import uuid
+import time
+import random
 from typing import Any, Optional, Literal
 from urllib.parse import urlparse
 
@@ -62,9 +64,16 @@ _patch_langserve_serialization()
 DEFAULT_RECURSION_LIMIT = 50
 _THREADS_TABLE_READY = False
 _THREADS_TABLE_LOCK = asyncio.Lock()
+_STREAM_BENCH_ENABLED = os.getenv("STREAM_BENCH_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+try:
+    _STREAM_BENCH_SAMPLE_RATE = float(os.getenv("STREAM_BENCH_SAMPLE_RATE", "1.0"))
+except Exception:
+    _STREAM_BENCH_SAMPLE_RATE = 1.0
+_STREAM_BENCH_SAMPLE_RATE = max(0.0, min(1.0, _STREAM_BENCH_SAMPLE_RATE))
+_STREAM_UI_EVENT_FILTER_ENABLED = os.getenv("STREAM_UI_EVENT_FILTER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 MAX_UPLOAD_FILES = 5
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
-MAX_PPTX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_PPTX_UPLOAD_BYTES = 40 * 1024 * 1024
 MAX_DOCUMENT_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_INPAINT_REFERENCE_IMAGES = 3
 _ALLOWED_IMAGE_CONTENT_TYPES = {
@@ -401,9 +410,33 @@ def _is_protected_path(path: str) -> bool:
 
 
 def _sanitize_filename(filename: str) -> str:
-    base = os.path.basename(filename or "upload")
-    safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", base).strip("._")
-    return safe or "upload"
+    base = os.path.basename(filename or "upload").strip()
+    stem, ext = os.path.splitext(base)
+
+    # `.pptx` のような先頭ドットのみの名前は splitext で拡張子扱いされないため補正する。
+    if not ext and stem.startswith(".") and stem.count(".") == 1:
+        ext = stem
+        stem = ""
+
+    safe_stem = re.sub(r"[^a-zA-Z0-9._-]+", "_", stem).strip("._-")
+    safe_ext = re.sub(r"[^a-zA-Z0-9.]+", "", ext).lower()
+    if safe_ext and not safe_ext.startswith("."):
+        safe_ext = f".{safe_ext}"
+
+    if safe_stem:
+        return f"{safe_stem}{safe_ext}"
+    if safe_ext:
+        return f"upload{safe_ext}"
+    return "upload"
+
+
+def _normalize_display_filename(filename: str, fallback: str = "upload") -> str:
+    raw = str(filename or "")
+    base = raw.replace("\\", "/").split("/")[-1].strip()
+    base = re.sub(r"[\x00-\x1f\x7f]", "", base)
+    if base in {"", ".", ".."}:
+        return fallback
+    return base[:255]
 
 
 def _normalize_session_key(raw: str | None, fallback: str) -> str:
@@ -466,7 +499,7 @@ def _validate_upload_file(
         if normalized_content_type and normalized_content_type not in _ALLOWED_PPTX_CONTENT_TYPES:
             raise HTTPException(status_code=415, detail=f"Unsupported pptx content type: {content_type}")
         if size_bytes > MAX_PPTX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="PPTX file is too large (max 25MB)")
+            raise HTTPException(status_code=413, detail="PPTX file is too large (max 40MB)")
         return kind
 
     if kind == "pdf":
@@ -658,6 +691,262 @@ async def deprecated_chat_stream_endpoint():
     )
 
 
+def _compact_stream_metadata(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+
+    compact: dict[str, Any] = {}
+    for key in ("run_name", "langgraph_node", "langgraph_checkpoint_ns", "checkpoint_ns"):
+        value = raw.get(key)
+        if value is None:
+            continue
+        compact[key] = value
+    return compact
+
+
+def _encode_sse_payload(payload: dict[str, Any]) -> str:
+    return (
+        "data: "
+        + json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=langserve.serialization.default,
+        )
+        + "\n\n"
+    )
+
+
+_ALLOWED_DATA_CUSTOM_EVENTS: set[str] = {
+    "data-plan_update",
+    "data-plan_step_started",
+    "data-plan_step_ended",
+    "data-outline",
+    "data-title-update",
+    "data-coordinator-response",
+    "data-coordinator-followups",
+    "data-visual-plan",
+    "data-visual-prompt",
+    "data-visual-image",
+    "data-visual-pdf",
+    "data-analyst-start",
+    "data-analyst-code-delta",
+    "data-analyst-log-delta",
+    "data-analyst-output",
+    "data-analyst-complete",
+    "data-writer-output",
+    "data-research-start",
+    "data-research-token",
+    "data-research-complete",
+    "data-research-report",
+}
+
+_ALLOWED_LEGACY_CUSTOM_EVENTS: set[str] = {
+    "writer-output",
+    "plan_update",
+    "title_generated",
+    "research_worker_start",
+    "research_worker_token",
+    "research_worker_complete",
+}
+
+
+def _now_ms() -> float:
+    return time.perf_counter() * 1000.0
+
+
+def _should_collect_stream_bench() -> bool:
+    if not _STREAM_BENCH_ENABLED:
+        return False
+    if _STREAM_BENCH_SAMPLE_RATE >= 1.0:
+        return True
+    if _STREAM_BENCH_SAMPLE_RATE <= 0.0:
+        return False
+    return random.random() <= _STREAM_BENCH_SAMPLE_RATE
+
+
+def _estimate_tokens_from_chars(char_count: int) -> int:
+    if char_count <= 0:
+        return 0
+    # ざっくり推定（多言語混在向け）: 4文字 ≒ 1 token
+    return max(1, round(char_count / 4))
+
+
+def _extract_text_and_reasoning_chars_from_chunk(chunk: Any) -> tuple[int, int]:
+    text_chars = 0
+    reasoning_chars = 0
+
+    if isinstance(chunk, str):
+        return len(chunk), 0
+
+    content = _normalize_content_parts_for_ui(_extract_chunk_content(chunk))
+    if isinstance(content, str):
+        return len(content), 0
+    if not isinstance(content, list):
+        return 0, 0
+
+    for part in content:
+        if isinstance(part, str):
+            text_chars += len(part)
+            continue
+        if not isinstance(part, dict):
+            continue
+
+        part_type = part.get("type")
+        if part_type in {"thinking", "reasoning"}:
+            thinking = part.get("thinking")
+            if isinstance(thinking, str):
+                reasoning_chars += len(thinking)
+                continue
+
+        text_value = part.get("text")
+        if not isinstance(text_value, str):
+            continue
+
+        if part_type in {"thinking", "reasoning"}:
+            reasoning_chars += len(text_value)
+        else:
+            text_chars += len(text_value)
+
+    return text_chars, reasoning_chars
+
+
+def _read_content_part_field(part: Any, key: str) -> Any:
+    if isinstance(part, dict):
+        return part.get(key)
+    return getattr(part, key, None)
+
+
+def _normalize_content_parts_for_ui(content: Any) -> str | list[Any] | None:
+    if isinstance(content, str):
+        return content if content else None
+    if not isinstance(content, list):
+        return None
+
+    normalized_parts: list[Any] = []
+    for part in content:
+        if isinstance(part, str):
+            if part:
+                normalized_parts.append(part)
+            continue
+
+        part_type = _read_content_part_field(part, "type")
+        text = _read_content_part_field(part, "text")
+        thinking = _read_content_part_field(part, "thinking")
+
+        normalized: dict[str, Any] = {}
+        if isinstance(part_type, str) and part_type:
+            normalized["type"] = part_type
+        if isinstance(text, str) and text:
+            normalized["text"] = text
+        if isinstance(thinking, str) and thinking:
+            normalized["thinking"] = thinking
+
+        if normalized:
+            normalized_parts.append(normalized)
+
+    return normalized_parts if normalized_parts else None
+
+
+def _extract_chunk_content(chunk: Any) -> Any:
+    if isinstance(chunk, dict):
+        return chunk.get("content")
+    return getattr(chunk, "content", None)
+
+
+def _extract_chunk_position(chunk: Any) -> Any:
+    if isinstance(chunk, dict):
+        return chunk.get("chunk_position")
+    return getattr(chunk, "chunk_position", None)
+
+
+def _extract_chunk_additional_kwargs(chunk: Any) -> dict[str, Any]:
+    if isinstance(chunk, dict):
+        raw = chunk.get("additional_kwargs")
+    else:
+        raw = getattr(chunk, "additional_kwargs", None)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _extract_reasoning_text_from_additional_kwargs(chunk: Any) -> str:
+    additional_kwargs = _extract_chunk_additional_kwargs(chunk)
+    reasoning_value = additional_kwargs.get("reasoning_content")
+    if isinstance(reasoning_value, str):
+        return reasoning_value
+    if isinstance(reasoning_value, list):
+        parts: list[str] = []
+        for item in reasoning_value:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return ""
+
+
+def _compact_chat_chunk(chunk: Any, *, content_override: Any | None = None) -> dict[str, Any] | None:
+    content = _normalize_content_parts_for_ui(
+        content_override if content_override is not None else _extract_chunk_content(chunk)
+    )
+    if content is None:
+        return None
+
+    compact: dict[str, Any] = {"content": content}
+    chunk_position = _extract_chunk_position(chunk)
+    if isinstance(chunk_position, str) and chunk_position:
+        compact["chunk_position"] = chunk_position
+    return compact
+
+
+def _filter_planner_writer_content_for_ui(chunk: Any) -> Any | None:
+    normalized_content = _normalize_content_parts_for_ui(_extract_chunk_content(chunk))
+
+    filtered_parts: list[dict[str, Any]] = []
+    if isinstance(normalized_content, list):
+        for part in normalized_content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type not in {"thinking", "reasoning"}:
+                continue
+
+            thinking = part.get("thinking")
+            text = part.get("text")
+            if isinstance(thinking, str) and thinking:
+                filtered_parts.append({"type": "thinking", "thinking": thinking})
+                continue
+            if isinstance(text, str) and text:
+                filtered_parts.append({"type": "thinking", "text": text})
+
+    # Gemini may stream thoughts via additional_kwargs.reasoning_content instead of content parts.
+    if not filtered_parts:
+        reasoning_text = _extract_reasoning_text_from_additional_kwargs(chunk)
+        if reasoning_text:
+            filtered_parts.append({"type": "thinking", "thinking": reasoning_text})
+
+    return filtered_parts if filtered_parts else None
+
+
+def _is_supervisor_internal_run(*, node: str, run_name: str, checkpoint: str) -> bool:
+    is_supervisor_node = node == "supervisor" or checkpoint.find("supervisor:") >= 0
+    is_supervisor_user_facing = run_name == "supervisor"
+    return (is_supervisor_node or run_name.startswith("supervisor_")) and not is_supervisor_user_facing
+
+
+def _is_visual_or_analyst_run(*, node: str, checkpoint: str) -> bool:
+    is_visualizer = node == "visualizer" or checkpoint.find("visualizer:") >= 0
+    is_analyst = node == "data_analyst" or checkpoint.find("data_analyst:") >= 0
+    return is_visualizer or is_analyst
+
+
+def _is_researcher_internal_run(*, node: str, checkpoint: str) -> bool:
+    is_researcher_subgraph = checkpoint.find("researcher:") >= 0
+    return is_researcher_subgraph and node in {"manager", "research_worker"}
+
+
 @app.post("/api/chat/stream_events")
 async def custom_stream_events(request: Request, input_data: ChatRequest):
     """
@@ -667,6 +956,7 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
     - on_custom_event (excluding citation_metadata)
     """
     try:
+        request_start_ms = _now_ms()
         uid = getattr(request.state, "user_uid", None)
         if not isinstance(uid, str) or not uid:
             raise HTTPException(status_code=401, detail="Unauthorized")
@@ -695,6 +985,21 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
         
         # 2. Define Generator
         async def event_generator():
+            benchmark_enabled = _should_collect_stream_bench()
+            first_event_ms: float | None = None
+            first_chat_token_ms: float | None = None
+            total_events = 0
+            total_chat_events = 0
+            forwarded_chat_events = 0
+            dropped_chat_events = 0
+            total_custom_events = 0
+            forwarded_custom_events = 0
+            dropped_custom_events = 0
+            total_text_chars = 0
+            total_reasoning_chars = 0
+            total_bytes_sent = 0
+            setup_completed_ms: float | None = None
+
             try:
                 # Use the 'input' field from the payload for the graph input
                 # pydantic model 'input' field will contain ChatInput instance
@@ -715,6 +1020,7 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
                 merged_config["configurable"]["checkpoint_ns"] = uid
                 merged_config["configurable"]["user_uid"] = uid
                 merged_config.setdefault("recursion_limit", DEFAULT_RECURSION_LIMIT)
+                setup_completed_ms = _now_ms()
                 
                 # Stream events from the graph
                 async for event in graph_with_types.astream_events(
@@ -723,23 +1029,120 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
                     version="v2"
                 ):
                     event_type = event.get("event")
-                    event_run_name = event.get("metadata", {}).get("run_name")
-                    
+                    now_ms = _now_ms()
+                    if first_event_ms is None:
+                        first_event_ms = now_ms
+                    total_events += 1
+
                     # Filter Logic
                     if event_type == "on_chat_model_stream":
-                        # Pass through chat model tokens
-                        yield f"data: {json.dumps(event, default=langserve.serialization.default)}\n\n"
-                        
+                        total_chat_events += 1
+                        event_data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                        chunk = event_data.get("chunk")
+                        if chunk is None:
+                            dropped_chat_events += 1
+                            continue
+
+                        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+                        run_name = str(metadata.get("run_name") or event.get("name") or "")
+                        node = str(metadata.get("langgraph_node") or "")
+                        checkpoint = str(
+                            metadata.get("langgraph_checkpoint_ns")
+                            or metadata.get("checkpoint_ns")
+                            or ""
+                        )
+
+                        if _is_researcher_internal_run(node=node, checkpoint=checkpoint):
+                            dropped_chat_events += 1
+                            continue
+                        if _is_visual_or_analyst_run(node=node, checkpoint=checkpoint):
+                            dropped_chat_events += 1
+                            continue
+                        if _is_supervisor_internal_run(node=node, run_name=run_name, checkpoint=checkpoint):
+                            dropped_chat_events += 1
+                            continue
+
+                        is_planner = run_name == "planner" or node == "planner" or checkpoint.find("planner:") >= 0
+                        is_writer = run_name == "writer" or node == "writer" or checkpoint.find("writer:") >= 0
+                        is_coordinator = run_name == "coordinator" or node == "coordinator" or checkpoint.find("coordinator:") >= 0
+                        normalized_chunk: dict[str, Any] | None = None
+
+                        if is_coordinator:
+                            dropped_chat_events += 1
+                            continue
+
+                        if is_planner or is_writer:
+                            planner_writer_content = _filter_planner_writer_content_for_ui(chunk)
+                            if planner_writer_content is None:
+                                dropped_chat_events += 1
+                                continue
+                            normalized_chunk = _compact_chat_chunk(chunk, content_override=planner_writer_content)
+                        else:
+                            normalized_chunk = _compact_chat_chunk(chunk)
+
+                        if normalized_chunk is None:
+                            dropped_chat_events += 1
+                            continue
+
+                        forwarded_chat_events += 1
+                        text_chars, reasoning_chars = _extract_text_and_reasoning_chars_from_chunk(normalized_chunk)
+                        total_text_chars += text_chars
+                        total_reasoning_chars += reasoning_chars
+                        if first_chat_token_ms is None and (text_chars > 0 or reasoning_chars > 0):
+                            first_chat_token_ms = now_ms
+
+                        payload: dict[str, Any] = {
+                            "event": "on_chat_model_stream",
+                            "data": {"chunk": normalized_chunk},
+                        }
+                        run_id = event.get("run_id")
+                        if run_id is not None:
+                            payload["run_id"] = run_id
+                        name = event.get("name")
+                        if isinstance(name, str) and name:
+                            payload["name"] = name
+                        compact_metadata = _compact_stream_metadata(metadata)
+                        if compact_metadata:
+                            payload["metadata"] = compact_metadata
+
+                        sse_payload = _encode_sse_payload(payload)
+                        total_bytes_sent += len(sse_payload.encode("utf-8"))
+                        yield sse_payload
+
                     elif event_type == "on_custom_event":
+                        total_custom_events += 1
                         event_name = event.get("name")
-                        
+                        if not isinstance(event_name, str):
+                            dropped_custom_events += 1
+                            continue
+
                         # Exclude citation_metadata standalone event
                         if event_name == "citation_metadata":
+                            dropped_custom_events += 1
                             continue
-                            
-                        # Pass through other custom events (e.g. research_worker_token)
-                        yield f"data: {json.dumps(event, default=langserve.serialization.default)}\n\n"
-                        
+                        if _STREAM_UI_EVENT_FILTER_ENABLED:
+                            if event_name.startswith("data-"):
+                                if event_name not in _ALLOWED_DATA_CUSTOM_EVENTS:
+                                    dropped_custom_events += 1
+                                    continue
+                            elif event_name not in _ALLOWED_LEGACY_CUSTOM_EVENTS:
+                                dropped_custom_events += 1
+                                continue
+
+                        forwarded_custom_events += 1
+                        payload = {
+                            "event": "on_custom_event",
+                            "name": event_name,
+                            "data": event.get("data"),
+                        }
+                        metadata = _compact_stream_metadata(event.get("metadata"))
+                        if metadata:
+                            payload["metadata"] = metadata
+
+                        sse_payload = _encode_sse_payload(payload)
+                        total_bytes_sent += len(sse_payload.encode("utf-8"))
+                        yield sse_payload
+
                     # All other events (on_chain_start, on_tool_start, etc.) are IGNORED
             except Exception as stream_err:
                 logger.error(f"Error inside stream generator: {stream_err}")
@@ -762,11 +1165,76 @@ async def custom_stream_events(request: Request, input_data: ChatRequest):
                             "retryable": False,
                         },
                     }
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                sse_payload = _encode_sse_payload(payload)
+                total_bytes_sent += len(sse_payload.encode("utf-8"))
+                yield sse_payload
+            finally:
+                if benchmark_enabled:
+                    end_ms = _now_ms()
+                    first_event_latency_ms = (
+                        round(first_event_ms - request_start_ms, 2)
+                        if first_event_ms is not None else None
+                    )
+                    first_chat_token_latency_ms = (
+                        round(first_chat_token_ms - request_start_ms, 2)
+                        if first_chat_token_ms is not None else None
+                    )
+                    setup_latency_ms = (
+                        round(setup_completed_ms - request_start_ms, 2)
+                        if setup_completed_ms is not None else None
+                    )
+                    generation_window_ms = (
+                        round(end_ms - first_chat_token_ms, 2)
+                        if first_chat_token_ms is not None else None
+                    )
+                    text_tokens_est = _estimate_tokens_from_chars(total_text_chars)
+                    reasoning_tokens_est = _estimate_tokens_from_chars(total_reasoning_chars)
+                    total_tokens_est = text_tokens_est + reasoning_tokens_est
+
+                    tokens_per_sec = None
+                    if first_chat_token_ms is not None:
+                        elapsed_sec = max((end_ms - first_chat_token_ms) / 1000.0, 1e-6)
+                        tokens_per_sec = round(total_tokens_est / elapsed_sec, 2)
+
+                    logger.info(
+                        "[STREAM_BENCH][backend] %s",
+                        json.dumps(
+                            {
+                                "thread_id": thread_id,
+                                "product_type": product_type,
+                                "events_total": total_events,
+                                "chat_events": total_chat_events,
+                                "chat_events_forwarded": forwarded_chat_events,
+                                "chat_events_dropped": dropped_chat_events,
+                                "custom_events": total_custom_events,
+                                "custom_events_forwarded": forwarded_custom_events,
+                                "custom_events_dropped": dropped_custom_events,
+                                "bytes_sent": total_bytes_sent,
+                                "text_chars": total_text_chars,
+                                "reasoning_chars": total_reasoning_chars,
+                                "text_tokens_est": text_tokens_est,
+                                "reasoning_tokens_est": reasoning_tokens_est,
+                                "tokens_est_total": total_tokens_est,
+                                "setup_ms": setup_latency_ms,
+                                "first_event_ms": first_event_latency_ms,
+                                "first_chat_token_ms": first_chat_token_latency_ms,
+                                "generation_window_ms": generation_window_ms,
+                                "total_stream_ms": round(end_ms - request_start_ms, 2),
+                                "tokens_est_per_sec": tokens_per_sec,
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    )
 
         return StreamingResponse(
             event_generator(),
-            media_type="text/event-stream"
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
         
     except HTTPException:
@@ -803,13 +1271,15 @@ async def upload_files(
     uploaded_items: list[dict[str, Any]] = []
 
     for upload in files:
-        safe_name = _sanitize_filename(upload.filename or "upload")
+        original_name = upload.filename or "upload"
+        safe_name = _sanitize_filename(original_name)
+        display_name = _normalize_display_filename(original_name, fallback=safe_name)
         guessed_content_type = mimetypes.guess_type(safe_name)[0]
         content_type = (upload.content_type or guessed_content_type or "application/octet-stream").lower()
         payload = await upload.read()
         size_bytes = len(payload)
         if size_bytes <= 0:
-            raise HTTPException(status_code=400, detail=f"Empty file: {safe_name}")
+            raise HTTPException(status_code=400, detail=f"Empty file: {display_name}")
 
         kind = _validate_upload_file(
             content_type=content_type,
@@ -834,7 +1304,7 @@ async def upload_files(
         uploaded_items.append(
             {
                 "id": uuid.uuid4().hex,
-                "filename": safe_name,
+                "filename": display_name,
                 "mime_type": content_type,
                 "size_bytes": size_bytes,
                 "url": file_url,
@@ -1057,96 +1527,189 @@ def _build_writer_structured_artifact(
     ]
 
 
+def _is_visual_output_payload(data: dict[str, Any]) -> bool:
+    if not isinstance(data, dict):
+        return False
+
+    visual_keys = {
+        "generated_image_url",
+        "image_url",
+        "compiled_prompt",
+        "image_generation_prompt",
+        "structured_prompt",
+        "rationale",
+        "layout_type",
+        "selected_inputs",
+    }
+
+    def _rows_have_visual_keys(rows: Any) -> bool:
+        if not isinstance(rows, list):
+            return False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if any(key in row for key in visual_keys):
+                return True
+        return False
+
+    if _rows_have_visual_keys(data.get("prompts")):
+        return True
+    if _rows_have_visual_keys(data.get("slides")):
+        return True
+    if _rows_have_visual_keys(data.get("design_pages")):
+        return True
+    if _rows_have_visual_keys(data.get("comic_pages")):
+        return True
+    if _rows_have_visual_keys(data.get("pages")):
+        return True
+    if _rows_have_visual_keys(data.get("characters")):
+        return True
+    if isinstance(data.get("combined_pdf_url"), str):
+        return True
+    if isinstance(data.get("mode"), str) and isinstance(data.get("generation_config"), dict):
+        return True
+    return False
+
+
 def _build_visual_artifact(artifact_id: str, value: Any) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     data = _safe_json_loads(value)
     if not isinstance(data, dict):
         return None, []
 
-    prompts = data.get("prompts")
-    if not isinstance(prompts, list):
-        return None, []
+    mode = data.get("mode") if isinstance(data.get("mode"), str) else None
+    product_type = data.get("product_type") if isinstance(data.get("product_type"), str) else None
 
     events: list[dict[str, Any]] = []
     slides: list[dict[str, Any]] = []
 
-    for prompt in sorted(prompts, key=lambda item: item.get("slide_number", 0) if isinstance(item, dict) else 0):
-        if not isinstance(prompt, dict):
-            continue
-        slide_number = prompt.get("slide_number")
-        if not isinstance(slide_number, int):
-            continue
+    units: dict[tuple[str, int], dict[str, Any]] = {}
 
-        structured_prompt = prompt.get("structured_prompt")
+    def _append_units(raw_rows: Any, *, unit_kind: str, number_key: str) -> None:
+        if not isinstance(raw_rows, list):
+            return
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                continue
+            unit_number = row.get(number_key)
+            if not isinstance(unit_number, int):
+                fallback_number = row.get("slide_number")
+                if isinstance(fallback_number, int):
+                    unit_number = fallback_number
+            if not isinstance(unit_number, int):
+                continue
+            units[(unit_kind, unit_number)] = row
+
+    _append_units(data.get("prompts"), unit_kind="slide", number_key="slide_number")
+    _append_units(data.get("slides"), unit_kind="slide", number_key="slide_number")
+    _append_units(data.get("design_pages"), unit_kind="page", number_key="page_number")
+    _append_units(data.get("comic_pages"), unit_kind="page", number_key="page_number")
+    _append_units(data.get("pages"), unit_kind="page", number_key="page_number")  # legacy compatibility
+    _append_units(data.get("characters"), unit_kind="character", number_key="character_number")
+
+    for (unit_kind, unit_number), row in sorted(units.items(), key=lambda item: (item[0][1], item[0][0])):
+        structured_prompt = row.get("structured_prompt")
         structured_title = (
             structured_prompt.get("main_title")
             if isinstance(structured_prompt, dict)
             else None
         )
-        title = prompt.get("title") or structured_title or f"Slide {slide_number}"
-        image_url = prompt.get("generated_image_url")
-        prompt_text = prompt.get("compiled_prompt") or prompt.get("image_generation_prompt")
-        status = "completed" if isinstance(image_url, str) and image_url else "streaming"
+        default_label = "Slide" if unit_kind == "slide" else "Page" if unit_kind == "page" else "Character"
+        title = row.get("title") or structured_title or f"{default_label} {unit_number}"
+
+        generated_image_url = row.get("generated_image_url")
+        image_url = (
+            generated_image_url
+            if isinstance(generated_image_url, str) and generated_image_url.strip()
+            else row.get("image_url")
+        )
+        prompt_text = row.get("compiled_prompt") or row.get("image_generation_prompt") or row.get("prompt_text")
+        explicit_status = row.get("status")
+        status = (
+            explicit_status.strip()
+            if isinstance(explicit_status, str) and explicit_status.strip()
+            else ("completed" if isinstance(image_url, str) and image_url else "streaming")
+        )
 
         slide: dict[str, Any] = {
-            "slide_number": slide_number,
+            "slide_number": unit_number,
             "title": title,
+            "unit_kind": unit_kind,
             "status": status,
         }
+        if unit_kind == "page":
+            slide["page_number"] = unit_number
+        if unit_kind == "character":
+            slide["character_number"] = unit_number
+            if isinstance(row.get("character_name"), str):
+                slide["character_name"] = row.get("character_name")
         if isinstance(image_url, str) and image_url:
             slide["image_url"] = image_url
         if isinstance(prompt_text, str) and prompt_text:
             slide["prompt_text"] = prompt_text
         if structured_prompt is not None:
             slide["structured_prompt"] = structured_prompt
-        if prompt.get("rationale") is not None:
-            slide["rationale"] = prompt.get("rationale")
-        if prompt.get("layout_type") is not None:
-            slide["layout_type"] = prompt.get("layout_type")
-        if prompt.get("selected_inputs") is not None:
-            slide["selected_inputs"] = prompt.get("selected_inputs")
+        if row.get("rationale") is not None:
+            slide["rationale"] = row.get("rationale")
+        if row.get("layout_type") is not None:
+            slide["layout_type"] = row.get("layout_type")
+        if row.get("selected_inputs") is not None:
+            slide["selected_inputs"] = row.get("selected_inputs")
         slides.append(slide)
 
-        events.append({
-            "type": "data-visual-image",
-            "data": {
-                "artifact_id": artifact_id,
-                "deck_title": "Generated Slides",
-                "slide_number": slide_number,
-                "title": title,
-                "image_url": image_url,
-                "prompt_text": prompt_text,
-                "structured_prompt": structured_prompt,
-                "rationale": prompt.get("rationale"),
-                "layout_type": prompt.get("layout_type"),
-                "selected_inputs": prompt.get("selected_inputs"),
-                "status": status,
-            }
-        })
+        image_event_data: dict[str, Any] = {
+            "artifact_id": artifact_id,
+            "deck_title": "Generated Slides",
+            "asset_unit_kind": unit_kind,
+            "slide_number": unit_number,
+            "page_number": unit_number if unit_kind == "page" else None,
+            "character_number": unit_number if unit_kind == "character" else None,
+            "title": title,
+            "image_url": image_url,
+            "prompt_text": prompt_text,
+            "structured_prompt": structured_prompt,
+            "rationale": row.get("rationale"),
+            "layout_type": row.get("layout_type"),
+            "selected_inputs": row.get("selected_inputs"),
+            "status": status,
+        }
+        if isinstance(mode, str) and mode:
+            image_event_data["mode"] = mode
+        if isinstance(product_type, str) and product_type:
+            image_event_data["product_type"] = product_type
+        events.append({"type": "data-visual-image", "data": image_event_data})
 
     pdf_url = data.get("combined_pdf_url")
     if isinstance(pdf_url, str) and pdf_url:
-        events.append({
-            "type": "data-visual-pdf",
-            "data": {
-                "artifact_id": artifact_id,
-                "deck_title": "Generated Slides",
-                "pdf_url": pdf_url,
-                "status": "completed",
-            }
-        })
+        pdf_event_data: dict[str, Any] = {
+            "artifact_id": artifact_id,
+            "deck_title": "Generated Slides",
+            "pdf_url": pdf_url,
+            "status": "completed",
+        }
+        if isinstance(mode, str) and mode:
+            pdf_event_data["mode"] = mode
+        if isinstance(product_type, str) and product_type:
+            pdf_event_data["product_type"] = product_type
+        events.append({"type": "data-visual-pdf", "data": pdf_event_data})
 
     if not slides:
         return None, events
 
     is_completed = all(bool(slide.get("image_url")) for slide in slides)
+    content_payload: dict[str, Any] = {
+        "slides": slides,
+        "pdf_url": pdf_url,
+    }
+    if isinstance(mode, str) and mode:
+        content_payload["mode"] = mode
+    if isinstance(product_type, str) and product_type:
+        content_payload["product_type"] = product_type
+
     artifact = {
         "id": artifact_id,
         "type": "slide_deck",
         "title": "Generated Slides",
-        "content": {
-            "slides": slides,
-            "pdf_url": pdf_url,
-        },
+        "content": content_payload,
         "version": 1,
         "status": "completed" if is_completed else "streaming",
     }
@@ -1422,7 +1985,7 @@ def _build_snapshot_payload(thread_id: str, state_values: dict[str, Any]) -> dic
                 artifact, events = _build_data_analyst_artifact(artifact_id, value)
             else:
                 parsed = _safe_json_loads(value)
-                if isinstance(parsed, dict) and "prompts" in parsed:
+                if isinstance(parsed, dict) and _is_visual_output_payload(parsed):
                     artifact, events = _build_visual_artifact(artifact_id, parsed)
                 elif isinstance(parsed, dict) and "slides" in parsed:
                     artifact, events = _build_story_artifact(artifact_id, parsed)
@@ -1584,6 +2147,18 @@ class InpaintRequest(BaseModel):
     )
 
 
+def _inpaint_source_kind(image_ref: str) -> str:
+    source = (image_ref or "").strip().lower()
+    if source.startswith("data:"):
+        return "data_url"
+    if source.startswith("gs://"):
+        return "gcs_uri"
+    parsed = urlparse(source)
+    if parsed.scheme in {"http", "https"}:
+        return f"{parsed.scheme}_url"
+    return "unknown"
+
+
 def _build_inpaint_instruction(
     user_prompt: str,
     reference_images: list[InpaintReferenceImage] | None = None,
@@ -1613,30 +2188,6 @@ def _build_inpaint_instruction(
         "Optional references are guidance only. Do not copy unrelated layout/content outside the mask.\n\n"
         f"Edit instruction:\n{cleaned}"
     )
-
-
-def _storage_url_to_gs_uri(source: str) -> str | None:
-    parsed = urlparse(source)
-    if parsed.scheme not in {"http", "https"}:
-        return None
-
-    if parsed.netloc == "storage.googleapis.com":
-        path = parsed.path.lstrip("/")
-        if "/" not in path:
-            return None
-        bucket, blob = path.split("/", 1)
-        if bucket and blob:
-            return f"gs://{bucket}/{blob}"
-        return None
-
-    if parsed.netloc.endswith(".storage.googleapis.com"):
-        bucket = parsed.netloc.replace(".storage.googleapis.com", "")
-        blob = parsed.path.lstrip("/")
-        if bucket and blob:
-            return f"gs://{bucket}/{blob}"
-        return None
-
-    return None
 
 
 def _normalize_inpaint_mime_type(mime_type: str | None) -> str | None:
@@ -1681,10 +2232,6 @@ async def _resolve_inpaint_reference(image_ref: str, *, field_name: str) -> str 
 
     if source.startswith("gs://"):
         return source
-
-    gcs_uri = _storage_url_to_gs_uri(source)
-    if gcs_uri:
-        return gcs_uri
 
     payload = await asyncio.to_thread(download_blob_as_bytes, source)
     if not payload:
@@ -1790,10 +2337,25 @@ async def inpaint_image(image_id: str, request: InpaintRequest):
             "original_image_id": image_id,
         }
     except ValueError as ve:
-        logger.warning(f"In-painting validation failed: {ve}")
+        logger.warning(
+            "In-painting validation failed for image_id=%s (image_source=%s, mask_source=%s, references=%s): %s",
+            image_id,
+            _inpaint_source_kind(request.image_url),
+            _inpaint_source_kind(request.mask_image_url),
+            len(request.reference_images or []),
+            ve,
+        )
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        logger.error(f"In-painting failed: {e}")
+        logger.exception(
+            "In-painting failed for image_id=%s (image_source=%s, mask_source=%s, prompt_len=%s, references=%s, error_type=%s)",
+            image_id,
+            _inpaint_source_kind(request.image_url),
+            _inpaint_source_kind(request.mask_image_url),
+            len(request.prompt or ""),
+            len(request.reference_images or []),
+            type(e).__name__,
+        )
         raise HTTPException(status_code=500, detail="In-painting failed")
 
 
@@ -1823,8 +2385,25 @@ async def inpaint_slide_deck(deck_id: str, slide_number: int, request: InpaintRe
             "slide_number": slide_number,
         }
     except ValueError as ve:
-        logger.warning(f"In-painting validation failed: {ve}")
+        logger.warning(
+            "In-painting validation failed for deck_id=%s slide_number=%s (image_source=%s, mask_source=%s, references=%s): %s",
+            deck_id,
+            slide_number,
+            _inpaint_source_kind(request.image_url),
+            _inpaint_source_kind(request.mask_image_url),
+            len(request.reference_images or []),
+            ve,
+        )
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        logger.error(f"In-painting failed: {e}")
+        logger.exception(
+            "In-painting failed for deck_id=%s slide_number=%s (image_source=%s, mask_source=%s, prompt_len=%s, references=%s, error_type=%s)",
+            deck_id,
+            slide_number,
+            _inpaint_source_kind(request.image_url),
+            _inpaint_source_kind(request.mask_image_url),
+            len(request.prompt or ""),
+            len(request.reference_images or []),
+            type(e).__name__,
+        )
         raise HTTPException(status_code=500, detail="In-painting failed")

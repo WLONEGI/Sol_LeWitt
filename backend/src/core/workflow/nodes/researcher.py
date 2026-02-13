@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+import os
 import re
 from typing import Literal, Any
 
@@ -20,6 +22,15 @@ from .common import _update_artifact, run_structured_output
 
 logger = logging.getLogger(__name__)
 VALID_SEARCH_MODES = {"text_search"}
+try:
+    RESEARCH_TOKEN_FLUSH_CHARS = max(64, int(os.getenv("RESEARCH_TOKEN_FLUSH_CHARS", "256")))
+except Exception:
+    RESEARCH_TOKEN_FLUSH_CHARS = 256
+try:
+    RESEARCH_TOKEN_FLUSH_INTERVAL_SEC = float(os.getenv("RESEARCH_TOKEN_FLUSH_INTERVAL_SEC", "0.4"))
+except Exception:
+    RESEARCH_TOKEN_FLUSH_INTERVAL_SEC = 0.4
+RESEARCH_TOKEN_FLUSH_INTERVAL_SEC = max(0.05, min(2.0, RESEARCH_TOKEN_FLUSH_INTERVAL_SEC))
 DEFAULT_RESEARCH_PERSPECTIVES = (
     "市場動向・背景データの最新情報",
     "先行事例・ベストプラクティス",
@@ -278,7 +289,34 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
         
         # 2. Stream Tokens
         full_content = ""
-        
+        token_buffer = ""
+        loop = asyncio.get_running_loop()
+        last_token_flush_at = loop.time()
+
+        async def flush_token_buffer(force: bool = False) -> None:
+            nonlocal token_buffer, last_token_flush_at
+            if not token_buffer:
+                return
+
+            now = loop.time()
+            if not force:
+                has_line_break = "\n" in token_buffer
+                should_flush = (
+                    len(token_buffer) >= RESEARCH_TOKEN_FLUSH_CHARS
+                    or (now - last_token_flush_at) >= RESEARCH_TOKEN_FLUSH_INTERVAL_SEC
+                    or has_line_break
+                )
+                if not should_flush:
+                    return
+
+            await adispatch_custom_event(
+                "research_worker_token",
+                {"task_id": task.id, "token": token_buffer},
+                config=config
+            )
+            token_buffer = ""
+            last_token_flush_at = now
+
         async for chunk in astream_with_retry(
             lambda: llm.astream(messages, config=stream_config),
             operation_name=f"research_worker.{task_id}.astream",
@@ -289,11 +327,10 @@ async def research_worker_node(state: ResearchSubgraphState, config: RunnableCon
                 if not text_chunk:
                     continue
                 full_content += text_chunk
-                await adispatch_custom_event(
-                    "research_worker_token",
-                    {"task_id": task.id, "token": text_chunk},
-                    config=config
-                )
+                token_buffer += text_chunk
+                await flush_token_buffer()
+
+        await flush_token_buffer(force=True)
 
         sources = _extract_urls(full_content)
 

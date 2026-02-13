@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react";
-import { CheckCircle2, Circle, ChevronDown, ChevronUp } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,12 +12,6 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import type { PlanStep, PlanStepStatus, PlanUpdateData } from "@/features/chat/types/plan";
 import { normalizePlanUpdateData } from "@/features/chat/types/plan";
-const PLAN_STATUS_LABEL: Record<PlanStepStatus, string> = {
-    pending: "待機",
-    in_progress: "実行中",
-    completed: "完了",
-    blocked: "要確認",
-};
 
 interface FixedPlanOverlayProps {
     data: PlanUpdateData;
@@ -25,12 +19,84 @@ interface FixedPlanOverlayProps {
     isInitialExpanded?: boolean;
 }
 
+const getStepRowClass = (status: PlanStepStatus) =>
+    cn(
+        "flex gap-3 rounded-xl px-3 py-2 transition-all",
+        "items-start",
+        status === "in_progress"
+            ? "bg-indigo-50/70 dark:bg-indigo-950/30"
+            : status === "completed"
+                ? "bg-transparent"
+                : "bg-slate-50/60 dark:bg-slate-900/40",
+    );
+
+const PLAIN_STEP_ROW_CLASS =
+    "flex gap-3 rounded-xl px-3 py-2 bg-transparent";
+
+const StepStatusIcon = ({
+    status,
+    index,
+    animated = true,
+    align = "top",
+    tone = "default",
+    animationDelayMs = 0,
+}: {
+    status: PlanStepStatus;
+    index: number;
+    animated?: boolean;
+    align?: "top" | "center";
+    tone?: "default" | "plain";
+    animationDelayMs?: number;
+}) => (
+    <div className={cn("flex-shrink-0", align === "top" ? "mt-1" : "mt-0")}>
+        {status === "completed" ? (
+            <div
+                className={cn(
+                    "h-5 w-5 rounded-full flex items-center justify-center",
+                    tone === "plain"
+                        ? "border border-slate-300 dark:border-slate-600"
+                        : "bg-emerald-100 dark:bg-emerald-900/30",
+                )}
+            >
+                <CheckCircle2
+                    className={cn(
+                        "h-3.5 w-3.5",
+                        tone === "plain" ? "text-slate-500 dark:text-slate-400" : "text-emerald-600 dark:text-emerald-400",
+                    )}
+                />
+            </div>
+        ) : status === "in_progress" ? (
+            animated ? (
+                <div className="relative flex items-center justify-center h-5 w-5">
+                    <div
+                        className="absolute inset-0 rounded-full animate-ping bg-indigo-500/20"
+                        style={{ animationDelay: `${animationDelayMs}ms` }}
+                    />
+                    <div
+                        className="h-2.5 w-2.5 rounded-full animate-pulse bg-indigo-600"
+                        style={{ animationDelay: `${animationDelayMs}ms` }}
+                    />
+                </div>
+            ) : (
+                <div className="h-5 w-5 flex items-center justify-center">
+                    <div className="h-2.5 w-2.5 rounded-full bg-indigo-600" />
+                </div>
+            )
+        ) : (
+            <div className="h-5 w-5 rounded-full border-2 border-slate-200 dark:border-slate-700 flex items-center justify-center text-[10px] font-medium text-slate-400">
+                {index}
+            </div>
+        )}
+    </div>
+);
+
 export function FixedPlanOverlay({
     data,
     className,
     isInitialExpanded = false
 }: FixedPlanOverlayProps) {
     const [isExpanded, setIsExpanded] = useState(isInitialExpanded);
+    const [dotAnimationSyncDelayMs] = useState(() => -(Date.now() % 2000));
 
     const steps = normalizePlanUpdateData(data).plan as Array<PlanStep & { status: PlanStepStatus }>;
     const totalSteps = steps.length;
@@ -47,80 +113,76 @@ export function FixedPlanOverlay({
 
     return (
         <div className={cn("w-full max-w-5xl mx-auto", className)}>
-            <Card className="overflow-hidden border-none shadow-2xl rounded-2xl bg-white dark:bg-slate-900 transition-all duration-300 ease-in-out">
+            <Card className="overflow-hidden py-0 gap-0 border border-slate-200/70 dark:border-slate-800 shadow-xl rounded-2xl bg-white dark:bg-slate-900 transition-all duration-300 ease-in-out">
                 <Collapsible open={isExpanded} onOpenChange={setIsExpanded} className="flex flex-col-reverse">
                     {/* Collapsed/Header View (Bottom position) */}
-                    <div className="flex items-center justify-between py-0 px-4 gap-4 bg-white dark:bg-slate-900">
-                        {/* Status Icon Area */}
-                        <div className="flex items-center gap-3 flex-1 min-w-0">
-                            {/* Unified Header Text */}
-                            <div className="flex flex-col -space-y-1">
-                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">
-                                    Task Progress
-                                </span>
-                                <span className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
-                                    {activeStep.title || "Task"}
-                                </span>
+                    <div className="px-3 py-1.5 bg-white dark:bg-slate-900">
+                        <div className={cn(PLAIN_STEP_ROW_CLASS, "items-center")}>
+                            <StepStatusIcon
+                                status={activeStep.status}
+                                index={activeStepIndex}
+                                animated
+                                align="center"
+                                tone="plain"
+                                animationDelayMs={dotAnimationSyncDelayMs}
+                            />
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between gap-2">
+                                    <span
+                                        className={cn(
+                                            "text-sm font-medium truncate",
+                                            activeStep.status === "completed"
+                                                ? "text-slate-500"
+                                                : "text-slate-900 dark:text-slate-100",
+                                        )}
+                                    >
+                                        {activeStep.title || "Task"}
+                                    </span>
+                                </div>
                             </div>
-                        </div>
-
-                        {/* Progress and Toggle Area */}
-                        <div className="flex items-center gap-4 shrink-0">
-                            <span className="text-sm font-medium text-slate-500 dark:text-slate-400">
-                                {activeStepIndex} / {totalSteps}
-                            </span>
-                            <CollapsibleTrigger asChild>
-                                <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    aria-label={isExpanded ? "Collapse plan" : "Expand plan"}
-                                    className="h-8 w-8 p-0 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 transition-colors shrink-0"
-                                >
-                                    {isExpanded ? (
-                                        <ChevronDown className="h-4 w-4" />
-                                    ) : (
-                                        <ChevronUp className="h-4 w-4" />
-                                    )}
-                                </Button>
-                            </CollapsibleTrigger>
+                            <div className="flex items-center shrink-0 gap-2.5">
+                                <span className="font-medium text-slate-500 dark:text-slate-400 text-xs">
+                                    {activeStepIndex} / {totalSteps}
+                                </span>
+                                <CollapsibleTrigger asChild>
+                                    <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        aria-label={isExpanded ? "Collapse plan" : "Expand plan"}
+                                        className="h-7 w-7 p-0 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 transition-colors shrink-0"
+                                    >
+                                        {isExpanded ? (
+                                            <ChevronDown className="h-3.5 w-3.5" />
+                                        ) : (
+                                            <ChevronUp className="h-3.5 w-3.5" />
+                                        )}
+                                    </Button>
+                                </CollapsibleTrigger>
+                            </div>
                         </div>
                     </div>
 
 
                     {/* Expanded Content (Top position) */}
-                    <CollapsibleContent>
-                        <CardContent className="pb-2 pt-0 px-0">
+                    <CollapsibleContent className="border-b border-slate-200/70 dark:border-slate-800">
+                        <CardContent className="px-3 pb-2 pt-1">
                             {/* Normal Order List (Step 1 -> N) */}
-                            <div className="max-h-[30vh] overflow-y-auto px-4 pb-4 space-y-1 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
+                            <div className="max-h-[240px] overflow-y-auto pr-1 space-y-1 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
                                 {steps.map((step, index) => (
                                     <div
                                         key={step.id}
-                                        className={cn(
-                                            "flex items-start gap-3 p-2 rounded-lg transition-all",
-                                            step.status === "in_progress" && "bg-indigo-50/50 dark:bg-indigo-950/30"
-                                        )}
+                                        className={getStepRowClass(step.status)}
                                     >
-                                        <div className="mt-1 flex-shrink-0">
-                                            {step.status === "completed" ? (
-                                                <div className="h-5 w-5 rounded-full bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
-                                                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-                                                </div>
-                                            ) : step.status === "in_progress" ? (
-                                                <div className="relative flex items-center justify-center h-5 w-5">
-                                                    <div className="absolute inset-0 rounded-full bg-indigo-500/20 animate-ping" />
-                                                    <div className="h-2.5 w-2.5 rounded-full bg-indigo-600 animate-pulse" />
-                                                </div>
-                                            ) : (
-                                                <div className="h-5 w-5 rounded-full border-2 border-slate-200 dark:border-slate-700 flex items-center justify-center text-[10px] font-medium text-slate-400">
-                                                    {index + 1}
-                                                </div>
-                                            )}
-                                        </div>
+                                        <StepStatusIcon
+                                            status={step.status}
+                                            index={index + 1}
+                                            animationDelayMs={dotAnimationSyncDelayMs}
+                                        />
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-center justify-between gap-2">
                                                 <span className={cn(
                                                     "text-sm font-medium",
-                                                    step.status === "completed" ? "text-slate-500 line-through" : "text-slate-900 dark:text-slate-100"
+                                                    step.status === "completed" ? "text-slate-500" : "text-slate-900 dark:text-slate-100"
                                                 )}>
                                                     {step.title || "Task"}
                                                 </span>

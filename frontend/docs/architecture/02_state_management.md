@@ -22,6 +22,9 @@ AIエージェントが生成する成果物（スライド、画像、データ
   - `currentArtifact`: 現在右側パネルでプレビュー中の成果物オブジェクト。
   - `artifacts`: ID をキーとした生成済み成果物のキャッシュ。
   - `isPreviewOpen`: サイドパネルの表示状態。
+- **版管理 (Versioning)**:
+  - 成果物内のスライドデータ等で `image_versions` (配列) と `current_version` (インデックス) を管理。
+  - In-paint や再生成による変更を破壊せずに保持し、ユーザーによる比較・選択を可能にします。
 - **主なアクション**:
   - `setArtifact`: プレビュー対象の切り替え。
   - `updateArtifactContent`: ストリーミング中または完了時に成果物の内容を更新。

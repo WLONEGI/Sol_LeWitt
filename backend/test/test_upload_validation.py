@@ -1,7 +1,12 @@
 import pytest
 from fastapi import HTTPException
 
-from src.app.app import _infer_upload_kind, _validate_upload_file
+from src.app.app import (
+    _infer_upload_kind,
+    _normalize_display_filename,
+    _sanitize_filename,
+    _validate_upload_file,
+)
 
 
 def test_infer_upload_kind_detects_image() -> None:
@@ -61,6 +66,22 @@ def test_validate_upload_file_accepts_pptx() -> None:
     assert kind == "pptx"
 
 
+def test_sanitize_filename_preserves_pptx_extension_for_non_ascii_name() -> None:
+    safe_name = _sanitize_filename("資料.pptx")
+    assert safe_name.endswith(".pptx")
+    assert safe_name == "upload.pptx"
+
+
+def test_validate_upload_file_accepts_sanitized_non_ascii_pptx_name() -> None:
+    safe_name = _sanitize_filename("テンプレート.pptx")
+    kind = _validate_upload_file(
+        content_type="application/octet-stream",
+        filename=safe_name,
+        size_bytes=1024,
+    )
+    assert kind == "pptx"
+
+
 def test_validate_upload_file_accepts_pdf() -> None:
     kind = _validate_upload_file(
         content_type="application/pdf",
@@ -98,3 +119,13 @@ def test_validate_upload_file_accepts_csv() -> None:
         size_bytes=1024,
     )
     assert kind == "csv"
+
+
+def test_normalize_display_filename_keeps_original_basename() -> None:
+    display_name = _normalize_display_filename("C:\\fakepath\\提案資料 v1.pptx")
+    assert display_name == "提案資料 v1.pptx"
+
+
+def test_normalize_display_filename_falls_back_for_invalid_name() -> None:
+    display_name = _normalize_display_filename("../\u0000", fallback="upload.pptx")
+    assert display_name == "upload.pptx"

@@ -128,7 +128,9 @@ def test_supervisor_routes_visualizer_all_images_failed_to_retry_node() -> None:
             "step_13_visual": json.dumps(
                 {
                     "execution_summary": "画像生成を完了しました。",
-                    "prompts": [
+                    "product_type": "slide",
+                    "mode": "slide_render",
+                    "slides": [
                         {"slide_number": 1, "generated_image_url": None},
                         {"slide_number": 2, "generated_image_url": ""},
                     ],

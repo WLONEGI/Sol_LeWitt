@@ -152,3 +152,101 @@ def test_upload_result_files_rewrites_local_path_to_gcs(monkeypatch, tmp_path):
 
     assert result.output_files[0].url == "https://example.com/generated/deck.pdf"
     assert trace and "uploaded deck.pdf" in trace[0]
+
+
+def test_resolve_data_analyst_mode_prefers_template_images_when_package_intent_is_implicit() -> None:
+    mode = data_analyst_module._resolve_data_analyst_mode(
+        {
+            "mode": "images_to_package",
+            "instruction": "PPTXテンプレートを解析してマスタースライドを画像化する",
+        }
+    )
+    assert mode == "pptx_master_to_images"
+
+
+def test_filter_output_files_for_pptx_mode_keeps_only_images() -> None:
+    result = data_analyst_module.DataAnalystOutput(
+        implementation_code="",
+        execution_log="ok",
+        output_value={"mode": "pptx_master_to_images"},
+        failed_checks=[],
+        output_files=[
+            {"url": "outputs/master_images/template_master_01.png", "title": "slide1", "mime_type": "image/png"},
+            {"url": "outputs/master_images/template.pdf", "title": "tmp-pdf", "mime_type": "application/pdf"},
+            {"url": "outputs/master_images/template.pptx", "title": "tmp-pptx", "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+        ],
+    )
+
+    data_analyst_module._filter_output_files_for_mode(
+        mode="pptx_master_to_images",
+        result=result,
+    )
+
+    assert len(result.output_files) == 1
+    assert result.output_files[0].url.endswith(".png")
+
+
+def test_build_pptx_render_output_files_includes_slide_metadata() -> None:
+    output_files = data_analyst_module._build_pptx_render_output_files(
+        mode="pptx_slides_to_images",
+        image_paths=[
+            "/tmp/workspace/outputs/slide_images/template_master_01.png",
+            "/tmp/workspace/outputs/slide_images/template_master_02.png",
+        ],
+        slide_rows=[
+            {"slide_number": 1, "title": "現状分析", "texts": ["高齢化率 34.2%", "移動困難者 1.8万人"]},
+            {"slide_number": 2, "title": "施策案", "texts": ["デマンド交通", "MaaS連携"]},
+        ],
+    )
+
+    assert len(output_files) == 2
+    assert output_files[0]["source_slide_number"] == 1
+    assert output_files[0]["source_title"] == "現状分析"
+    assert output_files[0]["source_texts"] == ["高齢化率 34.2%", "移動困難者 1.8万人"]
+    assert output_files[0]["source_mode"] == "pptx_slides_to_images"
+    assert output_files[1]["source_slide_number"] == 2
+
+
+def test_extract_visualizer_generated_image_urls_supports_pages_and_characters() -> None:
+    dependency_context = {
+        "resolved_dependency_artifacts": [
+            {
+                "producer_capability": "visualizer",
+                "content": json.dumps(
+                    {
+                        "product_type": "design",
+                        "design_pages": [
+                            {
+                                "page_number": 2,
+                                "generated_image_url": "https://example.com/page-2.png",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+            {
+                "producer_capability": "visualizer",
+                "content": json.dumps(
+                    {
+                        "product_type": "comic",
+                        "mode": "character_sheet_render",
+                        "characters": [
+                            {
+                                "character_number": 1,
+                                "image_url": "https://example.com/character-1.png",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+    }
+
+    urls = data_analyst_module._extract_visualizer_generated_image_urls(dependency_context)
+
+    assert urls == [
+        "https://example.com/character-1.png",
+        "https://example.com/page-2.png",
+    ]

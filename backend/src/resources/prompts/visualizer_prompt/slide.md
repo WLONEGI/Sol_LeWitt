@@ -6,6 +6,7 @@
   - Preserve concrete facts from Writer/Research inputs without simplification.
   - Keep explicit hierarchy and text-safe zones.
   - Comparison content: use split/grid composition.
+  - Do not output `text_policy` and `negative_constraints` in `structured_prompt`.
 
 # High-density Content Rules (`slide_render`)
 - Use `structured_prompt.contents` to include substantive text content (not short slogans).
@@ -34,5 +35,5 @@
 - Title slide can be lighter, but all other slides should remain content-forward.
 - Keep labels attached to values (no unlabeled bars, icons, or shapes).
 
-# Negative Constraints
-- "blur", "pixelated", "low resolution", "artifacts", "grainy", "washed out", "distortion", "cropped", "out of frame", "bad composition", "cluttered", "watermark", "signature", "username", "gibberish text", "blurry text", "decorative-only scene", "abstract art without data", "vague unlabeled chart"
+# Quality Direction
+- Mention anti-artifact requirements inside `visual_style` narrative (e.g. readability, no clutter, no gibberish text), instead of using `negative_constraints` field.

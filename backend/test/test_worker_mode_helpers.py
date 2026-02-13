@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from src.core.workflow.nodes.common import resolve_step_dependency_context
@@ -5,10 +6,15 @@ from src.core.workflow.nodes.researcher import (
     _extract_urls,
     _normalize_task_modes_by_instruction,
 )
-from src.shared.schemas.outputs import ResearchTask, StructuredImagePrompt
+from src.shared.schemas.outputs import ImagePrompt, ResearchTask, StructuredImagePrompt
 from src.core.workflow.nodes.visualizer import (
+    _append_reference_guidance,
     _build_comic_page_prompt_text,
+    _extract_pptx_slide_reference_assets,
     _find_latest_character_sheet_render_urls,
+    _plan_visual_asset_usage,
+    _prompt_item_to_output_payload,
+    _resolve_image_generation_prompt,
     _resolve_asset_unit_meta,
     _writer_output_to_slides,
     compile_structured_prompt,
@@ -85,9 +91,11 @@ def test_find_latest_character_sheet_render_urls_prefers_latest_character_visual
     artifacts = {
         "step_2_visual": json.dumps(
             {
-                "prompts": [
+                "product_type": "comic",
+                "mode": "comic_page_render",
+                "comic_pages": [
                     {
-                        "compiled_prompt": "#Page1\nMode: comic_page_render",
+                        "page_number": 1,
                         "generated_image_url": "https://example.com/comic-1.png",
                     }
                 ]
@@ -96,13 +104,15 @@ def test_find_latest_character_sheet_render_urls_prefers_latest_character_visual
         ),
         "step_3_visual": json.dumps(
             {
-                "prompts": [
+                "product_type": "comic",
+                "mode": "character_sheet_render",
+                "characters": [
                     {
-                        "compiled_prompt": "#Character1\nMode: character_sheet_render",
+                        "character_number": 1,
                         "generated_image_url": "https://example.com/char-latest-1.png",
                     },
                     {
-                        "compiled_prompt": "#Character2\nMode: character_sheet_render",
+                        "character_number": 2,
                         "generated_image_url": "https://example.com/char-latest-2.png",
                     },
                 ]
@@ -111,9 +121,11 @@ def test_find_latest_character_sheet_render_urls_prefers_latest_character_visual
         ),
         "step_1_visual": json.dumps(
             {
-                "prompts": [
+                "product_type": "comic",
+                "mode": "character_sheet_render",
+                "characters": [
                     {
-                        "compiled_prompt": "#Character1\nMode: character_sheet_render",
+                        "character_number": 1,
                         "generated_image_url": "https://example.com/char-old-1.png",
                     }
                 ]
@@ -147,15 +159,14 @@ def test_compile_structured_prompt_omits_type_line() -> None:
         sub_title="経営判断に必要な共通指標",
         contents="- ARR\n- Churn",
         visual_style="clean business infographic, blue and gray palette, high contrast typography",
-        text_policy="render_all_text",
-        negative_constraints=["blurry text", "warped chart axis"],
     )
     prompt = compile_structured_prompt(structured, slide_number=1, mode="slide_render")
     assert "Type:" not in prompt
-    assert "#Slide1" in prompt
-    assert "## SaaS主要KPIの定義と計算式" in prompt
+    assert "# Slide 1 : SaaS主要KPIの定義と計算式" in prompt
+    assert "## 経営判断に必要な共通指標" in prompt
+    assert "### 経営判断に必要な共通指標" not in prompt
     assert "Text policy: render_all_text" not in prompt
-    assert "Render all provided text (title, subtitle, and contents) in-image without omission." in prompt
+    assert "Render all provided text (title, subtitle, and contents) in-image without omission." not in prompt
 
 
 def test_compile_structured_prompt_omits_default_text_policy_label_for_design_mode() -> None:
@@ -165,13 +176,66 @@ def test_compile_structured_prompt_omits_default_text_policy_label_for_design_mo
         sub_title="カラーとタイポグラフィ",
         contents="- Color palette\n- Font rules",
         visual_style="clean editorial layout, modern typography, white background",
-        text_policy="render_all_text",
-        negative_constraints=["distorted text"],
     )
     prompt = compile_structured_prompt(structured, slide_number=2, mode="document_layout_render")
-    assert "#Page2" in prompt
+    assert "# Page 2 : ブランドガイドライン" in prompt
+    assert "## カラーとタイポグラフィ" in prompt
+    assert "### カラーとタイポグラフィ" not in prompt
     assert "Text policy: render_all_text" not in prompt
-    assert "Render all provided text (title, subtitle, and contents) in-image without omission." in prompt
+    assert "Render all provided text (title, subtitle, and contents) in-image without omission." not in prompt
+
+
+def test_append_reference_guidance_adds_english_note_when_references_exist() -> None:
+    base_prompt = "# Slide 1 : タイトル\nVisual style: clean business"
+    updated = _append_reference_guidance(base_prompt, has_references=True)
+
+    assert "[Reference Guidance]" in updated
+    assert "Use attached reference image(s) as strong guidance" in updated
+    assert updated.startswith(base_prompt)
+
+
+def test_append_reference_guidance_noop_when_no_references() -> None:
+    base_prompt = "# Slide 2 : 内容\nVisual style: modern infographic"
+    updated = _append_reference_guidance(base_prompt, has_references=False)
+
+    assert updated == base_prompt
+
+
+def test_append_reference_guidance_is_idempotent() -> None:
+    base_prompt = "# Slide 3 : 比較\nVisual style: editorial"
+    once = _append_reference_guidance(base_prompt, has_references=True)
+    twice = _append_reference_guidance(once, has_references=True)
+
+    assert once == twice
+
+
+def test_append_reference_guidance_adds_template_text_handling_when_template_reference_exists() -> None:
+    base_prompt = "# Slide 4 : 構成\nVisual style: corporate"
+    updated = _append_reference_guidance(
+        base_prompt,
+        has_references=True,
+        has_template_references=True,
+    )
+
+    assert "[Reference Guidance]" in updated
+    assert "[Template Text Handling]" in updated
+    assert "Do not copy or preserve template sample text." in updated
+
+
+def test_append_reference_guidance_template_block_is_idempotent() -> None:
+    base_prompt = "# Slide 5 : 施策"
+    once = _append_reference_guidance(
+        base_prompt,
+        has_references=True,
+        has_template_references=True,
+    )
+    twice = _append_reference_guidance(
+        once,
+        has_references=True,
+        has_template_references=True,
+    )
+
+    assert once == twice
 
 
 def test_compile_structured_prompt_keeps_text_policy_label_for_comic_mode() -> None:
@@ -187,6 +251,76 @@ def test_compile_structured_prompt_keeps_text_policy_label_for_comic_mode() -> N
     prompt = compile_structured_prompt(structured, slide_number=1, mode="comic_page_render")
     assert "#Page1" in prompt
     assert "Text policy: render_all_text" in prompt
+
+
+def test_document_layout_resolves_prompt_from_structured_prompt() -> None:
+    structured = StructuredImagePrompt(
+        slide_type="Document Page",
+        main_title="自治体向け交通再編",
+        sub_title="実装ロードマップ",
+        contents="- 施策A\n- 施策B",
+        visual_style="clean editorial grid, strong hierarchy, neutral palette",
+    )
+    prompt_item = ImagePrompt(
+        slide_number=2,
+        layout_type="title_and_content",
+        structured_prompt=structured,
+        image_generation_prompt="legacy plain prompt should be ignored",
+        rationale="test",
+    )
+
+    resolved = _resolve_image_generation_prompt(prompt_item, mode="document_layout_render")
+    assert resolved.startswith("Design a single editorial document page (page 2).")
+    assert "Main title: 自治体向け交通再編" in resolved
+    assert "legacy plain prompt should be ignored" not in resolved
+
+
+def test_slide_prompt_can_suppress_visual_style_for_template_reference() -> None:
+    structured = StructuredImagePrompt(
+        slide_type="Content",
+        main_title="売上推移",
+        sub_title="Q1-Q4",
+        contents="- Q1: 100\n- Q4: 180",
+        visual_style="modern clean business",
+    )
+    prompt_item = ImagePrompt(
+        slide_number=1,
+        layout_type="title_and_content",
+        structured_prompt=structured,
+        image_generation_prompt=None,
+        rationale="test",
+    )
+
+    resolved = _resolve_image_generation_prompt(
+        prompt_item,
+        mode="slide_render",
+        suppress_visual_style=True,
+    )
+    assert "Visual style:" not in resolved
+
+
+def test_output_payload_omits_empty_legacy_prompt_field() -> None:
+    prompt_item = ImagePrompt(
+        slide_number=1,
+        layout_type="title_slide",
+        structured_prompt=StructuredImagePrompt(
+            slide_type="Title Slide",
+            main_title="再設計提案",
+            sub_title=None,
+            contents="- 現状\n- 提案",
+            visual_style="editorial infographic",
+        ),
+        image_generation_prompt=None,
+        compiled_prompt="# Slide 1 : 再設計提案",
+        rationale="test",
+        generated_image_url="https://example.com/image.png",
+    )
+
+    payload = _prompt_item_to_output_payload(prompt_item, title="再設計提案", selected_inputs=[])
+    assert "image_generation_prompt" not in payload
+    assert payload["compiled_prompt"] == "# Slide 1 : 再設計提案"
+    assert "text_policy" not in payload["structured_prompt"]
+    assert "negative_constraints" not in payload["structured_prompt"]
 
 
 def test_research_mode_default_is_text_without_explicit_image_instruction() -> None:
@@ -343,3 +477,108 @@ def test_resolve_step_dependency_context_falls_back_to_research_labels_without_d
     context = resolve_step_dependency_context(state, current_step)
     assert context["depends_on_step_ids"] == []
     assert len(context["resolved_research_inputs"]) == 1
+
+
+def test_extract_pptx_slide_reference_assets_reads_data_analyst_metadata() -> None:
+    dependency_context = {
+        "resolved_dependency_artifacts": [
+            {
+                "artifact_id": "step_1_data",
+                "producer_step_id": 1,
+                "producer_capability": "data_analyst",
+                "producer_mode": "pptx_slides_to_images",
+                "content": {
+                    "output_files": [
+                        {
+                            "url": "https://example.com/template_01.png",
+                            "mime_type": "image/png",
+                            "source_slide_number": 1,
+                            "source_title": "交通課題の現状",
+                            "source_texts": ["高齢化率 34.2%", "移動困難者 1.8万人"],
+                            "source_mode": "pptx_slides_to_images",
+                        },
+                        {
+                            "url": "https://example.com/template_01.pdf",
+                            "mime_type": "application/pdf",
+                            "source_mode": "pptx_slides_to_images",
+                        },
+                    ]
+                },
+            }
+        ]
+    }
+
+    assets = _extract_pptx_slide_reference_assets(dependency_context)
+
+    assert len(assets) == 1
+    assert assets[0]["uri"] == "https://example.com/template_01.png"
+    assert assets[0]["source_slide_number"] == 1
+    assert assets[0]["source_title"] == "交通課題の現状"
+    assert assets[0]["source_texts"] == ["高齢化率 34.2%", "移動困難者 1.8万人"]
+    assert assets[0]["is_pptx_slide_reference"] is True
+
+
+def test_plan_visual_asset_usage_limits_pptx_reference_to_one_per_slide(monkeypatch) -> None:
+    class _Assignment:
+        def __init__(self, slide_number: int, asset_ids: list[str]) -> None:
+            self.slide_number = slide_number
+            self.asset_ids = asset_ids
+
+    class _Plan:
+        def __init__(self, assignments: list[_Assignment]) -> None:
+            self.assignments = assignments
+
+    async def _fake_run_structured_output(**kwargs):  # noqa: ANN003
+        return _Plan(
+            assignments=[
+                _Assignment(slide_number=1, asset_ids=["pptx_asset_1", "pptx_asset_2", "image_asset_1"])
+            ]
+        )
+
+    monkeypatch.setattr(
+        "src.core.workflow.nodes.visualizer.run_structured_output",
+        _fake_run_structured_output,
+    )
+
+    assignments = asyncio.run(
+        _plan_visual_asset_usage(
+            llm=object(),
+            mode="slide_render",
+            writer_slides=[
+                {
+                    "slide_number": 1,
+                    "title": "交通課題の現状",
+                    "description": "移動困難の増加",
+                    "bullet_points": ["高齢化率 34.2%", "移動困難者 1.8万人"],
+                }
+            ],
+            selected_assets=[
+                {
+                    "asset_id": "pptx_asset_1",
+                    "uri": "https://example.com/template_01.png",
+                    "is_image": True,
+                    "producer_mode": "pptx_slides_to_images",
+                    "source_slide_number": 1,
+                    "is_pptx_slide_reference": True,
+                },
+                {
+                    "asset_id": "pptx_asset_2",
+                    "uri": "https://example.com/template_02.png",
+                    "is_image": True,
+                    "producer_mode": "pptx_slides_to_images",
+                    "source_slide_number": 2,
+                    "is_pptx_slide_reference": True,
+                },
+                {
+                    "asset_id": "image_asset_1",
+                    "uri": "https://example.com/other_ref.png",
+                    "is_image": True,
+                    "producer_mode": "slide_render",
+                },
+            ],
+            instruction="Writer内容に近い参照を選んで生成する",
+            config={},
+        )
+    )
+
+    assert assignments[1] == ["pptx_asset_1", "image_asset_1"]

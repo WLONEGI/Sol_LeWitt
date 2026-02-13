@@ -298,6 +298,51 @@ def _artifact_suffix_for_step(step: dict) -> str:
     return "output"
 
 
+def _extract_visualizer_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+
+    for key in ("prompts", "slides"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    rows.append(item)
+
+    for page_key in ("design_pages", "comic_pages", "pages"):
+        pages = payload.get(page_key)
+        if not isinstance(pages, list):
+            continue
+        for item in pages:
+            if not isinstance(item, dict):
+                continue
+            normalized = dict(item)
+            if "slide_number" not in normalized and isinstance(normalized.get("page_number"), int):
+                normalized["slide_number"] = normalized.get("page_number")
+            rows.append(normalized)
+
+    characters = payload.get("characters")
+    if isinstance(characters, list):
+        for item in characters:
+            if not isinstance(item, dict):
+                continue
+            normalized = dict(item)
+            if "slide_number" not in normalized and isinstance(normalized.get("character_number"), int):
+                normalized["slide_number"] = normalized.get("character_number")
+            rows.append(normalized)
+
+    return rows
+
+
+def _extract_generated_visual_image_url(item: dict[str, Any]) -> str | None:
+    for key in ("generated_image_url", "image_url"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def _extract_failure_metadata(current_step: dict, artifact_value: object) -> tuple[bool, list[str], str | None]:
     failed = False
     failed_checks: list[str] = []
@@ -348,20 +393,18 @@ def _extract_failure_metadata(current_step: dict, artifact_value: object) -> tup
                     notes = execution_summary
 
         if capability == "visualizer":
-            prompts = parsed.get("prompts")
-            if isinstance(prompts, list):
+            rows = _extract_visualizer_rows(parsed)
+            if rows:
                 generated_count = 0
-                for item in prompts:
-                    if not isinstance(item, dict):
-                        continue
-                    image_url = item.get("generated_image_url")
+                for item in rows:
+                    image_url = _extract_generated_visual_image_url(item)
                     if isinstance(image_url, str) and image_url.strip():
                         generated_count += 1
-                if prompts and generated_count == 0:
+                if generated_count == 0:
                     failed = True
                     failed_checks.append("all_images_failed")
                     if not notes:
-                        notes = "Visualizer produced no generated_image_url in prompts."
+                        notes = "Visualizer produced no generated_image_url in output rows."
 
     if failed and not failed_checks:
         failed_checks = ["worker_execution"]

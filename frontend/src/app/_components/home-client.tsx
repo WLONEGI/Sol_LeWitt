@@ -173,6 +173,7 @@ export function HomeClient() {
                     value={input}
                     onChange={handleInputChange}
                     onSend={handleSend}
+                    autoSelectOnFocus
                     isLoading={isSubmitting}
                     placeholder="Send message to Sol LeWitt"
                     actionPill={

@@ -6,6 +6,7 @@ import pytest
 from src.app.app import (
     InpaintReferenceImage,
     _build_inpaint_instruction,
+    _inpaint_source_kind,
     _resolve_inpaint_reference,
     _run_inpaint,
 )
@@ -19,6 +20,13 @@ def test_build_inpaint_instruction_contains_constraints() -> None:
     assert "Image[2] = MASK" in instruction
     assert "white = editable" in instruction
     assert prompt in instruction
+
+
+def test_inpaint_source_kind_classifies_sources() -> None:
+    assert _inpaint_source_kind("data:image/png;base64,AAAA") == "data_url"
+    assert _inpaint_source_kind("gs://bucket/path.png") == "gcs_uri"
+    assert _inpaint_source_kind("https://example.com/a.png") == "https_url"
+    assert _inpaint_source_kind("http://example.com/a.png") == "http_url"
 
 
 def test_build_inpaint_instruction_includes_optional_references() -> None:
@@ -50,10 +58,12 @@ def test_resolve_inpaint_reference_accepts_gs_uri() -> None:
     assert result == source
 
 
-def test_resolve_inpaint_reference_converts_storage_url_to_gs_uri() -> None:
+def test_resolve_inpaint_reference_downloads_storage_url() -> None:
     source = "https://storage.googleapis.com/demo-bucket/generated_assets/demo.webp"
-    result = asyncio.run(_resolve_inpaint_reference(source, field_name="image_url"))
-    assert result == "gs://demo-bucket/generated_assets/demo.webp"
+    with patch("src.app.app.download_blob_as_bytes", return_value=b"storage-image") as mocked:
+        result = asyncio.run(_resolve_inpaint_reference(source, field_name="image_url"))
+    assert result == b"storage-image"
+    mocked.assert_called_once_with(source)
 
 
 def test_resolve_inpaint_reference_downloads_http_url() -> None:

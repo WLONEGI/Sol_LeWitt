@@ -11,28 +11,51 @@
 
 | `on_custom_event.name` | 配信元ノード | 用途 |
 | :--- | :--- | :--- |
-| `plan_update` | planner / supervisor | 実行プラン更新（全量）。 |
-| `writer-output` | writer | Writer成果物（JSON）通知。 |
-| `data-visual-plan` | visualizer | 画像生成計画。 |
-| `data-visual-prompt` | visualizer | 各画像の生成プロンプト。 |
-| `data-visual-image` | visualizer | 生成画像 URL とメタ情報。 |
-| `data-visual-pdf` | visualizer | 統合 PDF URL。 |
-| `data-research-report` | researcher | 調査レポート（本文・出典URL）。 |
-| `data-analyst-start` / `data-analyst-output` / `data-analyst-complete` | data_analyst | 実行開始・出力・完了。 |
-| `title_generated` | coordinator | スレッドタイトル候補。 |
+| `data-plan_update` | planner / supervisor | 実行プランの全量更新（配列）。 |
+| `data-writer-output` | writer | Writer成果物（JSON）通知。`artifact_type`: `report`, `outline`, `writer_character_sheet` 等。 |
+| `data-visual-plan` | visualizer | 画像生成計画の開始。 |
+| `data-visual-prompt` | visualizer | 各画像の生成プロンプト。`slide_number`, `prompt_text` 等を含む。 |
+| `data-visual-image` | visualizer | 生成直後の画像 URL。`unit_id` を含む。 |
+| `data-visual-pdf` | visualizer | 全スライドを統合した PDF URL。これを受信するとプレビュー全体が完了扱いとなる。 |
+| `data-research-report` | researcher | 調査レポート。`report` (テキスト) と `sources` (URL配列) を含む。 |
+| `data-analyst-output` | data_analyst | Python コード、実行ログ、成果物 URL（CSV, PNG等）の随時配信。 |
 
-## 3. フロント変換ルール（要点）
-- `plan_update` → `data-plan_update`
-- `writer-output` → `data-writer-output`
-- `name` が `data-` で始まるイベントは原則そのまま UI へ転送
-- `on_chat_model_stream` のテキスト/推論は `text-*` / `reasoning-*` に分離
+### 2.1 Visualizer モードの推論
+フロントエンドは受信したペイロードから `mode` を推論し、表示コンポーネントを切り替えます。
+- **`character_sheet_render`**: `artifact_type` が `writer_character_sheet` またはプロンプト内容から推論。
+- **`comic_page_render`**: `product_type` が `comic` または画像が `panels` 構造を持つ場合に推論。
+- **`slide_render`**: 上記以外（標準）。
 
-## 4. スナップショット再生
-`GET /api/threads/{thread_id}/snapshot` は以下を返し、画面再読込時に同じ状態を復元します。
-- `messages`
-- `plan`
-- `artifacts`
-- `ui_events`（`data-*` イベント列）
+---
+
+## 3. ペイロード仕様 (Schema)
+
+### `data-visual-image` の例
+```json
+{
+  "artifact_id": "visual_deck_123",
+  "slide_number": 1,
+  "image_url": "https://storage.../image.png",
+  "unit_id": "image_unit_abc",
+  "status": "completed",
+  "metadata": {
+    "aspect_ratio": "16:9"
+  }
+}
+```
+
+### `data-analyst-output` の例
+```json
+{
+  "artifact_id": "data_analyst_456",
+  "title": "Sales Data Analysis",
+  "code": "print('Hello')",
+  "logs": "Hello\n",
+  "files": [
+    { "url": "...", "filename": "chart.png", "kind": "image" }
+  ]
+}
+```
 
 > [!CAUTION]
 > 旧 `Storywriter` / `artifact_open` / `artifact_ready` 前提の実装は廃止済みです。現在は `writer` と `data-*` ベースのイベント契約を使用してください。

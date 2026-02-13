@@ -17,6 +17,10 @@ Create an executable plan that improves output quality while keeping execution s
 - Unfinished step cards (JSON): `<<unfinished_steps>>`
 - Target scope hint (JSON): `<<target_scope>>`
 - Interrupt intent: `<<interrupt_intent>>`  (informational only)
+- Attachment signal (JSON): `<<attachment_signal>>`
+- Has PPTX attachment: `<<has_pptx_attachment>>`
+- PPTX attachment count: `<<pptx_attachment_count>>`
+- PPTX context template count: `<<pptx_context_template_count>>`
 - Conversation history is included in messages.
 
 # Output Contract (Strict)

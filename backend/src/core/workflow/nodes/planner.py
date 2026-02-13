@@ -4,7 +4,7 @@ import re
 from copy import deepcopy
 from typing import Any, Literal
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
@@ -406,6 +406,74 @@ def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in text or keyword in lowered for keyword in keywords)
 
 
+def _is_pptx_attachment(item: dict[str, Any]) -> bool:
+    kind = str(item.get("kind") or "").lower()
+    if kind == "pptx":
+        return True
+
+    filename = str(item.get("filename") or "").lower()
+    if filename.endswith(".pptx"):
+        return True
+
+    mime_type = str(item.get("mime_type") or item.get("content_type") or "").lower()
+    return "presentationml.presentation" in mime_type
+
+
+def _attachment_summary_for_planner(
+    attachments: Any,
+    *,
+    max_items: int = 5,
+) -> list[dict[str, Any]]:
+    if not isinstance(attachments, list):
+        return []
+
+    summarized: list[dict[str, Any]] = []
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        row = {
+            "filename": str(item.get("filename") or ""),
+            "kind": str(item.get("kind") or ""),
+            "mime_type": str(item.get("mime_type") or ""),
+            "size_bytes": int(item.get("size_bytes") or 0) if isinstance(item.get("size_bytes"), int) else None,
+        }
+        summarized.append(row)
+        if len(summarized) >= max_items:
+            break
+    return summarized
+
+
+def _build_attachment_signal(state: State) -> dict[str, Any]:
+    attachments = state.get("attachments")
+    attachment_rows = attachments if isinstance(attachments, list) else []
+
+    pptx_attachment_count = 0
+    for item in attachment_rows:
+        if isinstance(item, dict) and _is_pptx_attachment(item):
+            pptx_attachment_count += 1
+
+    pptx_context = state.get("pptx_context")
+    pptx_context_template_count = 0
+    if isinstance(pptx_context, dict):
+        templates = pptx_context.get("templates")
+        if isinstance(templates, list):
+            pptx_context_template_count = len([row for row in templates if isinstance(row, dict)])
+        elif isinstance(pptx_context.get("template_count"), int):
+            pptx_context_template_count = max(0, int(pptx_context.get("template_count")))
+        elif isinstance(pptx_context.get("primary"), dict):
+            pptx_context_template_count = 1
+
+    has_pptx_attachment = (pptx_attachment_count > 0) or (pptx_context_template_count > 0)
+
+    return {
+        "has_pptx_attachment": has_pptx_attachment,
+        "attachment_count": len(attachment_rows),
+        "pptx_attachment_count": pptx_attachment_count,
+        "pptx_context_template_count": pptx_context_template_count,
+        "attachments_summary": _attachment_summary_for_planner(attachment_rows),
+    }
+
+
 def _default_asset_requirements_for_step(step: dict[str, Any]) -> list[dict[str, Any]]:
     capability = capability_from_any(step)
     mode = str(step.get("mode") or "")
@@ -798,8 +866,26 @@ async def planner_node(state: State, config: RunnableConfig) -> Command[Literal[
     )
     context_state["target_scope"] = json.dumps(target_scope or {}, ensure_ascii=False)
     context_state["interrupt_intent"] = "true" if bool(state.get("interrupt_intent")) else "false"
+    attachment_signal = _build_attachment_signal(state)
+    context_state["attachment_signal"] = json.dumps(attachment_signal, ensure_ascii=False)
+    context_state["has_pptx_attachment"] = "true" if attachment_signal["has_pptx_attachment"] else "false"
+    context_state["pptx_attachment_count"] = str(attachment_signal["pptx_attachment_count"])
+    context_state["pptx_context_template_count"] = str(attachment_signal["pptx_context_template_count"])
 
     messages = apply_prompt_template("planner", context_state)
+    messages.append(
+        HumanMessage(
+            content=json.dumps(
+                {
+                    "planner_context": {
+                        "attachment_signal": attachment_signal,
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            name="supervisor",
+        )
+    )
     logger.debug(f"[DEBUG] Planner Input Messages: {messages}")
 
     llm = get_llm_by_type("reasoning", streaming=True)

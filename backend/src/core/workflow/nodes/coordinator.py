@@ -123,6 +123,19 @@ async def coordinator_node(state: State, config: RunnableConfig) -> Command[Lite
     if effective_product_type == "unsupported" or effective_product_type not in SUPPORTED_PRODUCT_TYPES:
         goto_destination = "__end__"
 
+    if isinstance(result.response, str) and result.response.strip():
+        try:
+            await adispatch_custom_event(
+                "data-coordinator-response",
+                {
+                    "response": result.response,
+                    "goto": goto_destination,
+                },
+                config=config,
+            )
+        except Exception as e:
+            logger.warning("Failed to dispatch coordinator response event: %s", e)
+
     updates: dict = {
         "messages": [AIMessage(content=result.response)],
     }
@@ -132,6 +145,18 @@ async def coordinator_node(state: State, config: RunnableConfig) -> Command[Lite
         if len(followup_options) < 3:
             followup_options = _fill_followup_options(followup_options)
         updates["coordinator_followup_options"] = followup_options
+        if followup_options:
+            try:
+                await adispatch_custom_event(
+                    "data-coordinator-followups",
+                    {
+                        "question": result.response,
+                        "options": followup_options,
+                    },
+                    config=config,
+                )
+            except Exception as e:
+                logger.warning("Failed to dispatch coordinator followup event: %s", e)
     else:
         updates["coordinator_followup_options"] = []
 

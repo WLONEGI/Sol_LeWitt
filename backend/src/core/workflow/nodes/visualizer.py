@@ -3,6 +3,7 @@ import json
 import random
 import asyncio
 import re
+import hashlib
 from pathlib import Path
 from typing import Literal, Any
 from pydantic import BaseModel, Field
@@ -65,9 +66,22 @@ ASPECT_RATIO_HINTS = {
     "3:4": ("3:4",),
     "9:16": ("9:16", "縦長", "vertical"),
 }
-MAX_VISUAL_REFERENCES_PER_UNIT = 3
-MAX_MANDATORY_CHARACTER_SHEET_REFERENCES = 4
+# Upper bound for reference images passed to one generation request.
+MAX_VISUAL_REFERENCES_PER_UNIT = 14
+MAX_MANDATORY_CHARACTER_SHEET_REFERENCES = 14
 CHARACTER_PROMPT_HEADER_PATTERN = re.compile(r"^\s*#Character\d+\b", re.IGNORECASE)
+PROMPT_LOG_PREVIEW_MAX_CHARS = 2000
+REFERENCE_GUIDANCE_HEADER = "[Reference Guidance]"
+REFERENCE_GUIDANCE_TEXT = (
+    "Use attached reference image(s) as strong guidance for visual style, composition, and color palette. "
+    "Keep the final output faithful to the requested content and text intent."
+)
+TEMPLATE_TEXT_HANDLING_HEADER = "[Template Text Handling]"
+TEMPLATE_TEXT_HANDLING_TEXT = (
+    "Treat any text visible in template/reference images as placeholder examples only. "
+    "Do not copy or preserve template sample text. "
+    "Render only the current slide's provided title, subtitle, and contents."
+)
 
 
 class VisualAssetUnitSelection(BaseModel):
@@ -89,6 +103,39 @@ def _safe_json_loads(value: Any) -> Any | None:
     return None
 
 
+def _log_prompt_preview(value: str | None, *, max_chars: int = PROMPT_LOG_PREVIEW_MAX_CHARS) -> str:
+    if not isinstance(value, str):
+        return "null"
+    normalized = value.replace("\r", "\\r").replace("\n", "\\n").strip()
+    if not normalized:
+        return "<empty>"
+    if len(normalized) > max_chars:
+        return f"{normalized[:max_chars]}...(truncated)"
+    return normalized
+
+
+def _append_reference_guidance(
+    prompt_text: str,
+    *,
+    has_references: bool,
+    has_template_references: bool = False,
+) -> str:
+    base = (prompt_text or "").rstrip()
+    sections: list[str] = []
+
+    if has_references and REFERENCE_GUIDANCE_HEADER not in base:
+        sections.append(f"{REFERENCE_GUIDANCE_HEADER}\n{REFERENCE_GUIDANCE_TEXT}")
+
+    if has_template_references and TEMPLATE_TEXT_HANDLING_HEADER not in base:
+        sections.append(f"{TEMPLATE_TEXT_HANDLING_HEADER}\n{TEMPLATE_TEXT_HANDLING_TEXT}")
+
+    if not sections:
+        return prompt_text
+    if base:
+        return f"{base}\n\n" + "\n\n".join(sections)
+    return "\n\n".join(sections)
+
+
 def _is_image_asset(asset: dict[str, Any]) -> bool:
     if bool(asset.get("is_image")):
         return True
@@ -108,7 +155,127 @@ def _asset_summary(asset: dict[str, Any]) -> dict[str, Any]:
         "producer_step_id": asset.get("producer_step_id"),
         "producer_capability": asset.get("producer_capability"),
         "producer_mode": asset.get("producer_mode"),
+        "source_slide_number": asset.get("source_slide_number"),
+        "source_title": asset.get("source_title"),
+        "source_texts": (
+            asset.get("source_texts")
+            if isinstance(asset.get("source_texts"), list)
+            else []
+        ),
+        "is_pptx_slide_reference": bool(asset.get("is_pptx_slide_reference")),
     }
+
+
+def _is_pptx_slide_reference_asset(asset: dict[str, Any]) -> bool:
+    if bool(asset.get("is_pptx_slide_reference")):
+        return True
+    if str(asset.get("producer_mode") or "").strip().lower() == "pptx_slides_to_images":
+        return True
+    return isinstance(asset.get("source_slide_number"), int)
+
+
+def _is_template_reference_asset(asset: dict[str, Any]) -> bool:
+    if _is_pptx_slide_reference_asset(asset):
+        return True
+    role_hints = asset.get("role_hints")
+    if isinstance(role_hints, list):
+        lowered_hints = {str(item).strip().lower() for item in role_hints if isinstance(item, str)}
+        if {"layout_reference", "template_source"} & lowered_hints:
+            return True
+    label = str(asset.get("label") or "").strip().lower()
+    return label == "pptx_slide_reference"
+
+
+def _extract_pptx_slide_reference_assets(
+    dependency_context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    raw_dependencies = (dependency_context or {}).get("resolved_dependency_artifacts")
+    if not isinstance(raw_dependencies, list):
+        return []
+
+    output: list[dict[str, Any]] = []
+    seen_by_uri: set[str] = set()
+
+    for dependency in raw_dependencies:
+        if not isinstance(dependency, dict):
+            continue
+        if str(dependency.get("producer_capability") or "").strip().lower() != "data_analyst":
+            continue
+
+        producer_mode = str(dependency.get("producer_mode") or "").strip().lower()
+        content = dependency.get("content")
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except Exception:
+                continue
+        if not isinstance(content, dict):
+            continue
+
+        output_files = content.get("output_files")
+        if not isinstance(output_files, list):
+            continue
+
+        for item in output_files:
+            if not isinstance(item, dict):
+                continue
+            uri = str(item.get("url") or "").strip()
+            if not uri or uri in seen_by_uri:
+                continue
+            mime_type = str(item.get("mime_type") or "").strip().lower()
+            if not mime_type.startswith("image/") and not uri.lower().endswith(
+                (".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg")
+            ):
+                continue
+            source_mode = str(item.get("source_mode") or producer_mode).strip().lower()
+            source_slide_number = item.get("source_slide_number")
+            if source_mode != "pptx_slides_to_images" and not isinstance(source_slide_number, int):
+                continue
+            source_title = str(item.get("source_title") or "").strip() or None
+            source_texts = [
+                str(text).strip()
+                for text in (item.get("source_texts") if isinstance(item.get("source_texts"), list) else [])
+                if isinstance(text, str) and str(text).strip()
+            ]
+            artifact_id = str(dependency.get("artifact_id") or "artifact")
+            producer_step_id = dependency.get("producer_step_id")
+            digest = hashlib.sha1(
+                f"{artifact_id}|{uri}|{source_slide_number or 0}".encode("utf-8")
+            ).hexdigest()[:16]
+            source_label = (
+                f"PPTX Slide {source_slide_number}"
+                if isinstance(source_slide_number, int)
+                else "PPTX Slide"
+            )
+            output.append(
+                {
+                    "asset_id": f"asset:pptx:{digest}",
+                    "uri": uri,
+                    "mime_type": mime_type or "image/png",
+                    "is_image": True,
+                    "source_type": "dependency_artifact",
+                    "artifact_id": artifact_id,
+                    "producer_step_id": producer_step_id if isinstance(producer_step_id, int) else None,
+                    "producer_capability": "data_analyst",
+                    "producer_mode": source_mode or producer_mode or "pptx_slides_to_images",
+                    "label": "pptx_slide_reference",
+                    "title": source_title or source_label,
+                    "role_hints": [
+                        "image",
+                        "reference_image",
+                        "layout_reference",
+                        "template_source",
+                        "pptx_slide_reference",
+                    ],
+                    "source_slide_number": source_slide_number if isinstance(source_slide_number, int) else None,
+                    "source_title": source_title,
+                    "source_texts": source_texts,
+                    "is_pptx_slide_reference": True,
+                }
+            )
+            seen_by_uri.add(uri)
+
+    return output
 
 
 def _order_assets_with_bindings(
@@ -200,7 +367,13 @@ async def _plan_visual_asset_usage(
                 "あなたはVisualizerの参照画像ルータです。"
                 "各unit(slide/page)に対して、候補asset_idから必要な画像のみを選択してください。"
                 "出力はVisualAssetUsagePlanスキーマのJSONのみ。"
-                "選択は最大3件/unit。不要なら空配列。"
+                "選択上限は入力max_assets_per_unitに従ってください。"
+                "mode=slide_render では、is_pptx_slide_reference=true の候補は"
+                " source_title/source_texts をWriter内容と照合して選び、"
+                " 1 unitあたり最大1件までにしてください。"
+                " さらに、mode=slide_render かつ is_pptx_slide_reference=true の候補が1件以上ある場合は、"
+                " 各unitで is_pptx_slide_reference=true を必ず1件選択してください（空配列禁止）。"
+                " 必要であれば同じasset_idを複数unitで再利用して構いません。"
             ),
         ),
         HumanMessage(content=json.dumps(selector_input, ensure_ascii=False), name="supervisor"),
@@ -221,17 +394,32 @@ async def _plan_visual_asset_usage(
         return {}
 
     valid_ids = {str(asset.get("asset_id")) for asset in image_assets if isinstance(asset.get("asset_id"), str)}
+    image_assets_by_id = {
+        str(asset.get("asset_id")): asset
+        for asset in image_assets
+        if isinstance(asset.get("asset_id"), str)
+    }
     assignments: dict[int, list[str]] = {}
     for row in usage_plan.assignments:
         slide_number = row.slide_number
         if slide_number <= 0:
             continue
         deduped_ids: list[str] = []
+        pptx_reference_count = 0
         for asset_id in row.asset_ids:
             if not isinstance(asset_id, str):
                 continue
             if asset_id not in valid_ids or asset_id in deduped_ids:
                 continue
+            candidate = image_assets_by_id.get(asset_id)
+            if (
+                mode == "slide_render"
+                and isinstance(candidate, dict)
+                and _is_pptx_slide_reference_asset(candidate)
+            ):
+                if pptx_reference_count >= 1:
+                    continue
+                pptx_reference_count += 1
             deduped_ids.append(asset_id)
             if len(deduped_ids) >= MAX_VISUAL_REFERENCES_PER_UNIT:
                 break
@@ -336,31 +524,96 @@ def _is_character_sheet_prompt_payload(prompt_payload: dict[str, Any]) -> bool:
     return False
 
 
-def _extract_generated_image_urls(prompts: Any) -> list[str]:
-    if not isinstance(prompts, list):
+def _extract_image_url_from_visual_row(row: dict[str, Any]) -> str | None:
+    candidate = row.get("generated_image_url")
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    fallback = row.get("image_url")
+    if isinstance(fallback, str) and fallback.strip():
+        return fallback.strip()
+    return None
+
+
+def _extract_visual_output_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not isinstance(payload, dict):
+        return rows
+
+    prompts = payload.get("prompts")
+    if isinstance(prompts, list):
+        for item in prompts:
+            if isinstance(item, dict):
+                rows.append(dict(item))
+
+    slides = payload.get("slides")
+    if isinstance(slides, list):
+        for item in slides:
+            if not isinstance(item, dict):
+                continue
+            slide_number = item.get("slide_number")
+            if isinstance(slide_number, int):
+                row = dict(item)
+                row["slide_number"] = slide_number
+                rows.append(row)
+
+    for page_key in ("design_pages", "comic_pages", "pages"):
+        pages = payload.get(page_key)
+        if not isinstance(pages, list):
+            continue
+        for item in pages:
+            if not isinstance(item, dict):
+                continue
+            page_number = item.get("page_number")
+            if not isinstance(page_number, int):
+                continue
+            row = dict(item)
+            row["slide_number"] = page_number
+            rows.append(row)
+
+    characters = payload.get("characters")
+    if isinstance(characters, list):
+        for item in characters:
+            if not isinstance(item, dict):
+                continue
+            character_number = item.get("character_number")
+            if not isinstance(character_number, int):
+                continue
+            row = dict(item)
+            row["slide_number"] = character_number
+            rows.append(row)
+
+    return rows
+
+
+def _extract_generated_image_urls(rows: Any) -> list[str]:
+    if not isinstance(rows, list):
         return []
     urls: list[str] = []
-    for row in prompts:
+    for row in rows:
         if not isinstance(row, dict):
             continue
-        url = row.get("generated_image_url")
+        url = _extract_image_url_from_visual_row(row)
         if not isinstance(url, str):
             continue
-        normalized = url.strip()
-        if normalized and normalized not in urls:
-            urls.append(normalized)
+        if url not in urls:
+            urls.append(url)
     return urls
 
 
 def _find_latest_character_sheet_render_urls(artifacts: dict[str, Any]) -> list[str]:
     candidates = _collect_artifacts_by_suffix(artifacts, "_visual")
     for _, _, data in reversed(candidates):
-        prompts = data.get("prompts")
-        if not isinstance(prompts, list):
+        rows = _extract_visual_output_rows(data)
+        if not rows:
             continue
-        if not any(isinstance(row, dict) and _is_character_sheet_prompt_payload(row) for row in prompts):
+        mode = str(data.get("mode") or "").strip().lower()
+        is_character_mode = mode == "character_sheet_render" or isinstance(data.get("characters"), list)
+        if not is_character_mode and not any(
+            isinstance(row, dict) and _is_character_sheet_prompt_payload(row)
+            for row in rows
+        ):
             continue
-        urls = _extract_generated_image_urls(prompts)
+        urls = _extract_generated_image_urls(rows)
         if urls:
             return urls
     return []
@@ -411,6 +664,108 @@ def _resolve_asset_unit_meta(
     else:
         unit_kind = "slide"
     return f"{unit_kind}:{slide_number}", unit_kind, slide_number
+
+
+def _normalize_visual_product_type(product_type: str | None) -> str | None:
+    if product_type in {"slide", "design", "comic"}:
+        return product_type
+    return None
+
+
+def _prompt_item_to_output_payload(
+    prompt_item: ImagePrompt,
+    *,
+    title: str | None,
+    selected_inputs: list[str] | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "title": title,
+        "layout_type": prompt_item.layout_type,
+        "selected_inputs": selected_inputs or [],
+        "rationale": prompt_item.rationale,
+        "compiled_prompt": prompt_item.compiled_prompt,
+        "generated_image_url": prompt_item.generated_image_url,
+        "status": "completed"
+        if isinstance(prompt_item.generated_image_url, str) and prompt_item.generated_image_url.strip()
+        else "failed",
+    }
+    if isinstance(prompt_item.image_generation_prompt, str) and prompt_item.image_generation_prompt.strip():
+        payload["image_generation_prompt"] = prompt_item.image_generation_prompt.strip()
+    if prompt_item.structured_prompt is not None:
+        payload["structured_prompt"] = prompt_item.structured_prompt.model_dump(exclude_none=True)
+    if prompt_item.thought_signature is not None:
+        payload["thought_signature"] = prompt_item.thought_signature.model_dump()
+    return payload
+
+
+def _build_visualizer_output(
+    *,
+    execution_summary: str,
+    product_type: str | None,
+    mode: str,
+    prompts: list[ImagePrompt],
+    generation_config: GenerationConfig,
+    unit_meta_by_slide: dict[int, dict[str, Any]],
+) -> VisualizerOutput:
+    normalized_product_type = _normalize_visual_product_type(product_type)
+    slides: list[dict[str, Any]] = []
+    design_pages: list[dict[str, Any]] = []
+    comic_pages: list[dict[str, Any]] = []
+    characters: list[dict[str, Any]] = []
+
+    for prompt_item in sorted(prompts, key=lambda item: item.slide_number):
+        slide_number = int(prompt_item.slide_number)
+        unit_meta = unit_meta_by_slide.get(slide_number, {})
+        title = unit_meta.get("title") if isinstance(unit_meta.get("title"), str) else None
+        selected_inputs = (
+            unit_meta.get("selected_inputs")
+            if isinstance(unit_meta.get("selected_inputs"), list)
+            else []
+        )
+        base_payload = _prompt_item_to_output_payload(
+            prompt_item,
+            title=title,
+            selected_inputs=[str(item) for item in selected_inputs if isinstance(item, str)],
+        )
+
+        if normalized_product_type == "slide":
+            slides.append({"slide_number": slide_number, **base_payload})
+            continue
+
+        if normalized_product_type == "design":
+            design_pages.append({"page_number": slide_number, **base_payload})
+            continue
+
+        if normalized_product_type == "comic":
+            if mode == "character_sheet_render":
+                character_name = (
+                    unit_meta.get("character_name")
+                    if isinstance(unit_meta.get("character_name"), str)
+                    else None
+                )
+                characters.append(
+                    {
+                        "character_number": slide_number,
+                        "character_name": character_name,
+                        **base_payload,
+                    }
+                )
+            else:
+                comic_pages.append({"page_number": slide_number, **base_payload})
+            continue
+
+        slides.append({"slide_number": slide_number, **base_payload})
+
+    return VisualizerOutput(
+        execution_summary=execution_summary,
+        product_type=normalized_product_type,
+        mode=None if normalized_product_type == "design" else mode,
+        slides=slides or None,
+        design_pages=design_pages or None,
+        comic_pages=comic_pages or None,
+        characters=characters or None,
+        generation_config=generation_config,
+    )
 
 
 def _writer_output_to_slides(writer_data: dict, mode: str) -> list[dict]:
@@ -924,6 +1279,7 @@ def compile_structured_prompt(
     structured: StructuredImagePrompt,
     slide_number: int = 1,
     mode: str = "slide_render",
+    suppress_visual_style: bool = False,
 ) -> str:
     """
     構造化プロンプトをMarkdownスライド形式の最終プロンプトに変換。
@@ -931,19 +1287,25 @@ def compile_structured_prompt(
     prompt_lines = []
     
     normalized_mode = _normalize_visualizer_mode(mode)
-    if normalized_mode in {"document_layout_render", "comic_page_render"}:
+    if normalized_mode == "comic_page_render":
         header = f"#Page{slide_number}"
+    elif normalized_mode == "document_layout_render":
+        header = f"# Page {slide_number} : {structured.main_title}"
     elif normalized_mode == "character_sheet_render":
         header = f"#Character{slide_number}"
     else:
-        header = f"#Slide{slide_number}"
+        header = f"# Slide {slide_number} : {structured.main_title}"
     prompt_lines.append(header)
-    # Main Title: ## The Evolution of Japan's Economy
-    prompt_lines.append(f"## {structured.main_title}")
-    
-    # Sub Title (optional): ### From Post-War Recovery...
-    if structured.sub_title:
-        prompt_lines.append(f"### {structured.sub_title}")
+
+    if normalized_mode in {"slide_render", "document_layout_render"}:
+        # Slide/design mode: subtitle is optional second-level heading.
+        if structured.sub_title:
+            prompt_lines.append(f"## {structured.sub_title}")
+    else:
+        # Non-slide modes keep the legacy title/subtitle heading layout.
+        prompt_lines.append(f"## {structured.main_title}")
+        if structured.sub_title:
+            prompt_lines.append(f"### {structured.sub_title}")
     
     # Empty line before contents
     prompt_lines.append("")
@@ -954,33 +1316,26 @@ def compile_structured_prompt(
         prompt_lines.append("")
     
     # Visual style
-    prompt_lines.append(f"Visual style: {structured.visual_style}")
+    if not suppress_visual_style:
+        prompt_lines.append(f"Visual style: {structured.visual_style}")
 
-    # Text rendering policy
+    # text_policy / negative_constraints are retired for slide/design.
     is_slide_or_design_mode = normalized_mode in {"slide_render", "document_layout_render"}
-    if is_slide_or_design_mode and structured.text_policy == "render_all_text":
-        # Keep default behavior without exposing the explicit policy label in slide/design prompts.
-        prompt_lines.append(
-            "Render all provided text (title, subtitle, and contents) in-image without omission."
-        )
-    else:
-        prompt_lines.append(f"Text policy: {structured.text_policy}")
-        if structured.text_policy == "render_all_text":
-            prompt_lines.append(
-                "Render all provided text (title, subtitle, and contents) in-image without omission."
-            )
-        elif structured.text_policy == "render_title_only":
+    if not is_slide_or_design_mode:
+        text_policy = structured.text_policy or "render_all_text"
+        prompt_lines.append(f"Text policy: {text_policy}")
+        if text_policy == "render_title_only":
             prompt_lines.append("Render title/subtitle only. Keep body text out of image.")
-        else:
+        elif text_policy == "no_text":
             prompt_lines.append("Do not render text in the image.")
 
-    # Negative constraints
-    if structured.negative_constraints:
-        prompt_lines.append(
-            "Negative constraints: " + ", ".join(
-                str(item).strip() for item in structured.negative_constraints if str(item).strip()
-            )
-        )
+        negatives = [
+            str(item).strip()
+            for item in (structured.negative_constraints or [])
+            if str(item).strip()
+        ]
+        if negatives:
+            prompt_lines.append("Negative constraints: " + ", ".join(negatives))
     
     # 最終プロンプト生成
     final_prompt = "\n".join(prompt_lines)
@@ -989,13 +1344,62 @@ def compile_structured_prompt(
     return final_prompt
 
 
+def _build_document_plaintext_prompt(
+    structured: StructuredImagePrompt,
+    *,
+    slide_number: int,
+) -> str:
+    """Build a plain-text prompt for document layout rendering."""
+    lines: list[str] = [
+        f"Design a single editorial document page (page {slide_number}).",
+        "Keep a clear information hierarchy, strong readability, and balanced white space.",
+    ]
+    if structured.main_title:
+        lines.append(f"Main title: {structured.main_title}")
+    if structured.sub_title:
+        lines.append(f"Subtitle: {structured.sub_title}")
+    if structured.contents:
+        lines.append("Body content to render in-image:")
+        lines.append(str(structured.contents))
+    if structured.visual_style:
+        lines.append(f"Visual style: {structured.visual_style}")
+    return "\n".join(lines).strip()
+
+
+def _resolve_image_generation_prompt(
+    prompt_item: ImagePrompt,
+    *,
+    mode: str,
+    suppress_visual_style: bool = False,
+) -> str:
+    """Resolve final image-generation prompt text per mode."""
+    plain_prompt = (prompt_item.image_generation_prompt or "").strip()
+    if prompt_item.structured_prompt is not None:
+        if mode == "document_layout_render":
+            return _build_document_plaintext_prompt(
+                prompt_item.structured_prompt,
+                slide_number=prompt_item.slide_number,
+            )
+        return compile_structured_prompt(
+            prompt_item.structured_prompt,
+            slide_number=prompt_item.slide_number,
+            mode=mode,
+            suppress_visual_style=suppress_visual_style,
+        )
+    if plain_prompt:
+        return plain_prompt
+    raise ValueError(
+        f"Slide {prompt_item.slide_number} has neither structured_prompt nor image_generation_prompt"
+    )
+
+
 # Helper for single slide processing
 async def process_single_slide(
     prompt_item: ImagePrompt, 
-    previous_generations: list[dict] | None = None, 
     override_reference_bytes: bytes | None = None,
     override_reference_url: str | None = None,
     additional_references: list[str | bytes] | None = None,
+    has_template_references: bool = False,
     seed_override: int | None = None,
     session_id: str | None = None,
     aspect_ratio: str | None = None,
@@ -1008,28 +1412,30 @@ async def process_single_slide(
     try:
         layout_type = getattr(prompt_item, 'layout_type', 'title_and_content')
         logger.info(f"Processing slide {prompt_item.slide_number} (layout: {layout_type})...")
-        
-        # === Compile Structured Prompt (v2) ===
-        if prompt_item.structured_prompt is not None:
-            final_prompt = compile_structured_prompt(
-                prompt_item.structured_prompt,
-                slide_number=prompt_item.slide_number,
-                mode=mode,
+        precompiled_prompt = (prompt_item.compiled_prompt or "").strip()
+        if precompiled_prompt:
+            final_prompt = precompiled_prompt
+            logger.info(
+                "Using precompiled generation prompt for slide %s (mode=%s)",
+                prompt_item.slide_number,
+                mode,
             )
-            logger.info(f"Using structured prompt for slide {prompt_item.slide_number}")
-        elif prompt_item.image_generation_prompt:
-            final_prompt = prompt_item.image_generation_prompt
-            logger.info(f"Using string prompt for slide {prompt_item.slide_number}")
         else:
-            raise ValueError(f"Slide {prompt_item.slide_number} has neither structured_prompt nor image_generation_prompt")
-
-        prompt_item.compiled_prompt = final_prompt
+            final_prompt = _resolve_image_generation_prompt(
+                prompt_item,
+                mode=mode,
+                suppress_visual_style=has_template_references,
+            )
+            logger.info(
+                "Resolved generation prompt (fallback) for slide %s (mode=%s)",
+                prompt_item.slide_number,
+                mode,
+            )
 
         # === Reference Image Selection ===
         seed = None
         reference_image_bytes = None
         reference_url = None
-        previous_thought_signature_token = None
         reference_inputs: list[str | bytes] = []
         
         # 1. Use Override (Anchor Image) if provided - highest priority
@@ -1037,37 +1443,6 @@ async def process_single_slide(
             logger.info(f"Using explicit override reference for slide {prompt_item.slide_number}")
             reference_image_bytes = override_reference_bytes
             reference_url = override_reference_url
-        
-        # 2. Check for matching previous generation (Deep Edit)
-        elif previous_generations:
-            for prev in previous_generations:
-                if prev.get("slide_number") != prompt_item.slide_number:
-                    continue
-                
-                # Reuse Seed and Thought Signature
-                prev_sig = prev.get("thought_signature")
-                if prev_sig:
-                    if "seed" in prev_sig:
-                        seed = prev_sig["seed"]
-                        logger.info(f"Reusing seed {seed} from ThoughtSignature")
-                    
-                    if "api_thought_signature" in prev_sig and prev_sig["api_thought_signature"]:
-                        previous_thought_signature_token = prev_sig["api_thought_signature"]
-                        logger.info("Found persistent 'api_thought_signature' for Deep Edit consistency.")
-
-                # Reference Anchor (Visual Consistency)
-                if prev.get("generated_image_url"):
-                    reference_url = prev["generated_image_url"]
-                    if reference_url.startswith("gs://"):
-                        logger.info(f"Using GCS URI directly as reference anchor: {reference_url}")
-                    else:
-                        logger.info(f"Downloading reference anchor from {reference_url}...")
-                        try:
-                            reference_image_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
-                        except Exception as e:
-                            logger.warning(f"Failed to download previous reference image: {e}")
-                
-                break
 
         if reference_url and isinstance(reference_url, str) and reference_url.startswith("gs://"):
             reference_inputs.append(reference_url)
@@ -1080,6 +1455,14 @@ async def process_single_slide(
                     reference_inputs.append(ref)
             elif isinstance(ref, (bytes, bytearray)):
                 reference_inputs.append(bytes(ref))
+
+        if not precompiled_prompt:
+            final_prompt = _append_reference_guidance(
+                final_prompt,
+                has_references=bool(reference_inputs),
+                has_template_references=has_template_references,
+            )
+        prompt_item.compiled_prompt = final_prompt
         
         if seed_override is not None:
             seed = seed_override
@@ -1099,7 +1482,7 @@ async def process_single_slide(
             final_prompt,
             seed=seed,
             reference_image=reference_inputs if reference_inputs else None,
-            thought_signature=previous_thought_signature_token,
+            thought_signature=None,
             aspect_ratio=aspect_ratio
         )
         
@@ -1149,20 +1532,21 @@ async def process_slide_with_chat(
     try:
         layout_type = getattr(prompt_item, 'layout_type', 'title_and_content')
         logger.info(f"[Chat] Processing slide {prompt_item.slide_number} (layout: {layout_type})...")
-        
-        # === Compile Structured Prompt (v2) ===
-        if prompt_item.structured_prompt is not None:
-            final_prompt = compile_structured_prompt(
-                prompt_item.structured_prompt,
-                slide_number=prompt_item.slide_number,
-                mode=mode,
+        precompiled_prompt = (prompt_item.compiled_prompt or "").strip()
+        if precompiled_prompt:
+            final_prompt = precompiled_prompt
+            logger.info(
+                "[Chat] Using precompiled generation prompt for slide %s (mode=%s)",
+                prompt_item.slide_number,
+                mode,
             )
-            logger.info(f"[Chat] Using structured prompt for slide {prompt_item.slide_number}")
-        elif prompt_item.image_generation_prompt:
-            final_prompt = prompt_item.image_generation_prompt
-            logger.info(f"[Chat] Using string prompt for slide {prompt_item.slide_number}")
         else:
-            raise ValueError(f"Slide {prompt_item.slide_number} has neither structured_prompt nor image_generation_prompt")
+            final_prompt = _resolve_image_generation_prompt(prompt_item, mode=mode)
+            logger.info(
+                "[Chat] Resolved generation prompt (fallback) for slide %s (mode=%s)",
+                prompt_item.slide_number,
+                mode,
+            )
         
         logger.info(f"[Chat] Generating image {prompt_item.slide_number} via chat session...")
         
@@ -1222,6 +1606,9 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
     mode = _normalize_visualizer_mode(
         str(current_step.get("mode") or _default_visualizer_mode(state.get("product_type")))
     )
+    state_product_type = _normalize_visual_product_type(
+        state.get("product_type") if isinstance(state.get("product_type"), str) else None
+    )
     aspect_ratio = _resolve_aspect_ratio(mode, current_step, state.get("aspect_ratio"))
     artifacts = state.get("artifacts", {}) or {}
     selected_asset_bindings = resolve_asset_bindings_for_step(state, current_step.get("id"))
@@ -1237,6 +1624,29 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
     ]
     design_dir = current_step.get("design_direction")
     dependency_context = resolve_step_dependency_context(state, current_step)
+    if mode == "slide_render":
+        pptx_slide_assets = _extract_pptx_slide_reference_assets(dependency_context)
+        if pptx_slide_assets:
+            seen_uris = {
+                str(asset.get("uri") or "").strip()
+                for asset in selected_step_assets
+                if isinstance(asset, dict) and str(asset.get("uri") or "").strip()
+            }
+            merged_assets = list(selected_step_assets)
+            for asset in pptx_slide_assets:
+                uri = str(asset.get("uri") or "").strip()
+                if not uri or uri in seen_uris:
+                    continue
+                seen_uris.add(uri)
+                merged_assets.append(asset)
+            selected_step_assets = _order_assets_with_bindings(
+                merged_assets,
+                selected_asset_bindings,
+            )
+            logger.info(
+                "Visualizer merged %s pptx slide reference assets for slide mode.",
+                len(pptx_slide_assets),
+            )
 
     def _get_latest_artifact_by_suffix(suffix: str) -> dict | None:
         candidates: list[tuple[int, str]] = []
@@ -1281,7 +1691,26 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                 is_error=True,
             )
         if not character_sheet_reference_urls:
-            logger.warning("comic_page_render is running without character sheet rendered images. Text anchors only.")
+            logger.error("comic_page_render requires character sheet rendered images but none were found.")
+            result_summary = "Error: Character sheet rendered images are required for comic page rendering."
+            state["plan"][step_index]["result_summary"] = result_summary
+            content_json = build_worker_error_payload(
+                error_text="Character sheet rendered images are required for comic page rendering.",
+                failed_checks=["worker_execution", "missing_dependency"],
+                notes="character_sheet_render visual artifact missing",
+            )
+            return create_worker_response(
+                role="visualizer",
+                content_json=content_json,
+                result_summary=result_summary,
+                current_step_id=current_step["id"],
+                state=state,
+                artifact_key_suffix="visual",
+                artifact_title="Visual Assets",
+                artifact_icon="AlertTriangle",
+                artifact_preview_urls=[],
+                is_error=True,
+            )
 
     writer_slides = _writer_output_to_slides(writer_data, mode)
     data_analyst_data = _get_latest_artifact_by_suffix("_data")
@@ -1308,20 +1737,6 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
             is_error=True
         )
 
-    previous_generations: list[dict] = []
-    for dependency in dependency_context.get("resolved_dependency_artifacts", []):
-        if not isinstance(dependency, dict):
-            continue
-        if str(dependency.get("producer_capability") or "") != "visualizer":
-            continue
-        dependency_content = _safe_json_loads(dependency.get("content"))
-        prompts = dependency_content.get("prompts") if isinstance(dependency_content, dict) else None
-        if not isinstance(prompts, list):
-            continue
-        for item in prompts:
-            if isinstance(item, dict):
-                previous_generations.append(item)
-
     # Plan context (LLM decides order/inputs)
     plan_context = {
         "mode": mode,
@@ -1341,7 +1756,6 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         "story_framework": story_framework_data if mode in {"character_sheet_render", "comic_page_render"} else None,
         "character_sheet": character_sheet_data if mode in {"character_sheet_render", "comic_page_render"} else None,
         "data_analyst": data_analyst_data,
-        "previous_generations": previous_generations or None,
         "layout_template_id": CHARACTER_SHEET_TEMPLATE_ID if mode == "character_sheet_render" else None,
     }
     character_sheet_template_bytes = (
@@ -1415,11 +1829,10 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         )
 
         updated_prompts: list[ImagePrompt] = []
+        unit_meta_by_slide: dict[int, dict[str, Any]] = {}
         failed_image_errors: list[str] = []
         asset_unit_ledger = dict(state.get("asset_unit_ledger") or {})
         master_style: str | None = None
-        last_generated_image_bytes: bytes | None = None
-        last_generated_image_url: str | None = None
         reference_asset_cache: dict[str, bytes] = {}
 
         import uuid
@@ -1472,18 +1885,103 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
             else:
                 mandatory_assets = []
 
-            assigned_by_uri = {
-                str(asset.get("uri")): asset
-                for asset in assigned_assets
+            mandatory_uris = {
+                str(asset.get("uri")).strip()
+                for asset in mandatory_assets
                 if isinstance(asset, dict) and isinstance(asset.get("uri"), str) and str(asset.get("uri")).strip()
             }
-            for mandatory_asset in mandatory_assets:
-                uri = str(mandatory_asset.get("uri") or "").strip()
-                if uri and uri not in assigned_by_uri:
-                    assigned_assets.append(mandatory_asset)
-                    assigned_by_uri[uri] = mandatory_asset
+            prioritized_assets = list(mandatory_assets)
+            seen_uris = set(mandatory_uris)
+            for asset in assigned_assets:
+                if not isinstance(asset, dict):
+                    continue
+                uri = str(asset.get("uri") or "").strip()
+                if not uri:
+                    continue
+                if uri in seen_uris:
+                    continue
+                seen_uris.add(uri)
+                prioritized_assets.append(asset)
+            assigned_assets = prioritized_assets
+            has_template_references = (
+                mode == "slide_render"
+                and any(
+                    isinstance(asset, dict) and _is_template_reference_asset(asset)
+                    for asset in assigned_assets
+                )
+            )
+            if mode == "slide_render":
+                selected_template_refs = [
+                    {
+                        "asset_id": str(asset.get("asset_id") or ""),
+                        "source_slide_number": (
+                            int(asset.get("source_slide_number"))
+                            if isinstance(asset.get("source_slide_number"), int)
+                            else None
+                        ),
+                        "source_title": (
+                            str(asset.get("source_title") or "").strip() or None
+                        ),
+                        "uri": str(asset.get("uri") or "").strip(),
+                    }
+                    for asset in assigned_assets
+                    if isinstance(asset, dict)
+                    and _is_template_reference_asset(asset)
+                    and isinstance(asset.get("uri"), str)
+                    and str(asset.get("uri")).strip()
+                ]
+                if selected_template_refs:
+                    logger.info(
+                        "Slide %s selected template references: %s",
+                        slide_number,
+                        json.dumps(selected_template_refs, ensure_ascii=False),
+                    )
 
             assigned_asset_summaries = [_asset_summary(asset) for asset in assigned_assets]
+            selected_inputs_for_slide = [
+                *(plan_slide.selected_inputs if plan_slide else []),
+                *(
+                    [f"SystemTemplate: {CHARACTER_SHEET_TEMPLATE_ID}"]
+                    if use_local_character_sheet_template
+                    else []
+                ),
+                *[
+                    str(asset.get("uri"))
+                    for asset in assigned_assets
+                    if isinstance(asset, dict) and asset.get("uri")
+                ],
+                *[
+                    str(item.get("image_url"))
+                    for item in selected_image_inputs
+                    if isinstance(item, dict) and item.get("image_url")
+                ],
+            ]
+            selected_inputs_for_slide = [
+                item.strip()
+                for item in selected_inputs_for_slide
+                if isinstance(item, str) and item.strip()
+            ]
+
+            unit_meta: dict[str, Any] = {
+                "title": slide_content.get("title") if isinstance(slide_content.get("title"), str) else None,
+                "selected_inputs": selected_inputs_for_slide,
+            }
+            if mode == "character_sheet_render":
+                character_payload = _find_character_payload(
+                    writer_data,
+                    slide_number,
+                    fallback_profile=(
+                        slide_content.get("character_profile")
+                        if isinstance(slide_content.get("character_profile"), dict)
+                        else None
+                    ),
+                )
+                if isinstance(character_payload, dict):
+                    character_name = character_payload.get("name")
+                    if isinstance(character_name, str) and character_name.strip():
+                        unit_meta["character_name"] = character_name.strip()
+            unit_meta_by_slide[slide_number] = unit_meta
+
             if mode in {"comic_page_render", "character_sheet_render"}:
                 prompt_item = _build_mechanical_comic_prompt_item(
                     mode=mode,
@@ -1514,30 +2012,12 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                     "selected_asset_bindings": selected_asset_bindings,
                     "assigned_asset_ids": assigned_asset_ids,
                     "assigned_assets": assigned_asset_summaries,
-                    "selected_inputs": [
-                        *(plan_slide.selected_inputs if plan_slide else []),
-                        *(
-                            [f"SystemTemplate: {CHARACTER_SHEET_TEMPLATE_ID}"]
-                            if use_local_character_sheet_template
-                            else []
-                        ),
-                        *[
-                            str(asset.get("uri"))
-                            for asset in assigned_assets
-                            if isinstance(asset, dict) and asset.get("uri")
-                        ],
-                        *[
-                            str(item.get("image_url"))
-                            for item in selected_image_inputs
-                            if isinstance(item, dict) and item.get("image_url")
-                        ],
-                    ],
+                    "selected_inputs": selected_inputs_for_slide,
                     "reference_policy": reference_policy,
                     "reference_url": reference_url,
                     "layout_template_id": CHARACTER_SHEET_TEMPLATE_ID if use_local_character_sheet_template else None,
                     "generation_notes": plan_slide.generation_notes if plan_slide else None,
                     "master_style": master_style,
-                    "previous_generations": previous_generations or None
                 }
 
                 prompt_state = {
@@ -1570,60 +2050,33 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
             elif plan_slide and plan_slide.layout_type:
                 prompt_item.layout_type = plan_slide.layout_type  # override if planner prefers
 
-            # Compile prompt for UI
-            if prompt_item.structured_prompt is not None:
-                compiled_prompt = compile_structured_prompt(
-                    prompt_item.structured_prompt,
-                    slide_number=slide_number,
-                    mode=mode,
-                )
-            else:
-                compiled_prompt = prompt_item.image_generation_prompt or ""
+            image_generation_prompt_text = prompt_item.image_generation_prompt
+            logger.info(
+                "Visualizer prompt item resolved: slide=%s mode=%s structured_prompt_present=%s image_generation_prompt_len=%s image_generation_prompt=%s",
+                slide_number,
+                mode,
+                prompt_item.structured_prompt is not None,
+                len(image_generation_prompt_text) if isinstance(image_generation_prompt_text, str) else 0,
+                _log_prompt_preview(image_generation_prompt_text),
+            )
+
+            # Compile prompt for UI and generation (single source of truth)
+            compiled_prompt = _resolve_image_generation_prompt(
+                prompt_item,
+                mode=mode,
+                suppress_visual_style=has_template_references,
+            )
             prompt_item.compiled_prompt = compiled_prompt
 
             # Update master style if needed
             if prompt_item.structured_prompt and not master_style:
                 master_style = prompt_item.structured_prompt.visual_style
 
-            # Emit prompt event
+            # Resolve unit meta early (used by prompt/image events and ledger).
             asset_unit_id, asset_unit_kind, asset_unit_index = _resolve_asset_unit_meta(
                 mode=mode,
-                product_type=state.get("product_type"),
+                product_type=state_product_type,
                 slide_number=slide_number,
-            )
-            await adispatch_custom_event(
-                "data-visual-prompt",
-                {
-                    "artifact_id": artifact_id,
-                    "asset_unit_id": asset_unit_id,
-                    "asset_unit_kind": asset_unit_kind,
-                    "deck_title": deck_title,
-                    "slide_number": slide_number,
-                    "title": slide_content.get("title"),
-                    "layout_type": prompt_item.layout_type,
-                    "prompt_text": compiled_prompt,
-                    "structured_prompt": prompt_item.structured_prompt.model_dump() if prompt_item.structured_prompt else None,
-                    "rationale": prompt_item.rationale,
-                    "selected_inputs": [
-                        *(plan_slide.selected_inputs if plan_slide else []),
-                        *(
-                            [f"SystemTemplate: {CHARACTER_SHEET_TEMPLATE_ID}"]
-                            if use_local_character_sheet_template
-                            else []
-                        ),
-                        *[
-                            str(asset.get("uri"))
-                            for asset in assigned_assets
-                            if isinstance(asset, dict) and asset.get("uri")
-                        ],
-                        *[
-                            str(item.get("image_url"))
-                            for item in selected_image_inputs
-                            if isinstance(item, dict) and item.get("image_url")
-                        ],
-                    ]
-                },
-                config=config
             )
 
             # Reference image policy
@@ -1637,17 +2090,10 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                 if not reference_url.startswith("gs://"):
                     reference_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
             elif plan_slide and plan_slide.reference_policy == "previous":
-                if last_generated_image_bytes:
-                    reference_bytes = last_generated_image_bytes
-                    reference_url = last_generated_image_url
-                else:
-                    # fallback: previous generation of same slide (edit mode)
-                    for prev in previous_generations:
-                        if prev.get("slide_number") == slide_number and prev.get("generated_image_url"):
-                            reference_url = prev["generated_image_url"]
-                            if not reference_url.startswith("gs://"):
-                                reference_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
-                            break
+                logger.info(
+                    "Skipping deprecated reference_policy=previous for slide %s.",
+                    slide_number,
+                )
 
             additional_references, assigned_reference_uris = await _resolve_asset_reference_inputs(
                 assigned_assets,
@@ -1660,36 +2106,68 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                     len(assigned_reference_uris),
                 )
 
+            prompt_for_event = _append_reference_guidance(
+                compiled_prompt,
+                has_references=bool(reference_bytes or reference_url or additional_references),
+                has_template_references=has_template_references,
+            )
+            prompt_item.compiled_prompt = prompt_for_event
+
+            prompt_event_data: dict[str, Any] = {
+                "artifact_id": artifact_id,
+                "asset_unit_id": asset_unit_id,
+                "asset_unit_kind": asset_unit_kind,
+                "deck_title": deck_title,
+                "slide_number": slide_number,
+                "title": slide_content.get("title"),
+                "layout_type": prompt_item.layout_type,
+                "prompt_text": prompt_for_event,
+                "structured_prompt": (
+                    prompt_item.structured_prompt.model_dump(exclude_none=True)
+                    if prompt_item.structured_prompt
+                    else None
+                ),
+                "rationale": prompt_item.rationale,
+                "selected_inputs": selected_inputs_for_slide,
+            }
+            if state_product_type != "design":
+                prompt_event_data["mode"] = mode
+            await adispatch_custom_event(
+                "data-visual-prompt",
+                prompt_event_data,
+                config=config
+            )
+
             # Generate image
-            processed, image_bytes, image_error = await process_single_slide(
+            processed, _image_bytes, image_error = await process_single_slide(
                 prompt_item,
-                previous_generations=previous_generations,
                 override_reference_bytes=reference_bytes,
                 override_reference_url=reference_url,
                 additional_references=additional_references,
+                has_template_references=has_template_references,
                 session_id=session_id,
                 aspect_ratio=aspect_ratio,
                 mode=mode,
             )
 
             updated_prompts.append(processed)
-            if image_bytes and processed.generated_image_url:
-                last_generated_image_bytes = image_bytes
-                last_generated_image_url = processed.generated_image_url
-            elif image_error:
+            if image_error:
                 failed_image_errors.append(f"slide={slide_number}: {image_error}")
+            image_event_data: dict[str, Any] = {
+                "artifact_id": artifact_id,
+                "asset_unit_id": asset_unit_id,
+                "asset_unit_kind": asset_unit_kind,
+                "deck_title": deck_title,
+                "slide_number": slide_number,
+                "title": slide_content.get("title"),
+                "image_url": processed.generated_image_url,
+                "status": "completed" if processed.generated_image_url else "failed",
+            }
+            if state_product_type != "design":
+                image_event_data["mode"] = mode
             await adispatch_custom_event(
                 "data-visual-image",
-                {
-                    "artifact_id": artifact_id,
-                    "asset_unit_id": asset_unit_id,
-                    "asset_unit_kind": asset_unit_kind,
-                    "deck_title": deck_title,
-                    "slide_number": slide_number,
-                    "title": slide_content.get("title"),
-                    "image_url": processed.generated_image_url,
-                    "status": "completed" if processed.generated_image_url else "failed"
-                },
+                image_event_data,
                 config=config
             )
             asset_unit_ledger[asset_unit_id] = {
@@ -1736,17 +2214,21 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
             execution_summary = f"{visualizer_plan.execution_summary}（生成 {success_count}/{total_count}）"
 
         # Build final Visualizer output
-        visualizer_output = VisualizerOutput(
+        generation_config = GenerationConfig(
+            thinking_level="high",
+            media_resolution="medium",
+            aspect_ratio=aspect_ratio,
+        )
+        visualizer_output = _build_visualizer_output(
             execution_summary=execution_summary,
+            product_type=state_product_type,
+            mode=mode,
             prompts=updated_prompts,
-            generation_config=GenerationConfig(
-                thinking_level="high",
-                media_resolution="medium",
-                aspect_ratio=aspect_ratio,
-            )
+            generation_config=generation_config,
+            unit_meta_by_slide=unit_meta_by_slide,
         )
 
-        content_json = json.dumps(visualizer_output.model_dump(), ensure_ascii=False, indent=2)
+        content_json = json.dumps(visualizer_output.model_dump(exclude_none=True), ensure_ascii=False, indent=2)
         result_summary = visualizer_output.execution_summary
 
         state["plan"][step_index]["result_summary"] = result_summary
