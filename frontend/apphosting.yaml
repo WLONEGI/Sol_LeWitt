@@ -17,11 +17,11 @@ environmentVariables:
     availability: ["BUILD", "RUNTIME"]
   - variable: "BACKEND_URL"
     value: "https://ai-slide-backend-1021289594562.asia-northeast1.run.app"
-    availability: ["RUNTIME"]
+    availability: ["BUILD", "RUNTIME"]
 
 # Runtime configuration (Cloud Run settings)
 runConfig:
   minInstances: 0
   maxInstances: 10
-  memory: "1Gi"
-  cpu: 1
+  memory: "2Gi"
+  cpu: 2
