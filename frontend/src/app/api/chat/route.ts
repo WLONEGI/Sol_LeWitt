@@ -14,7 +14,7 @@ const BACKEND_STREAM_AGENT = new Agent({
 
 // Node.js runtime for long-running stream sessions.
 export const runtime = 'nodejs';
-export const maxDuration = 1800; // 30 minutes
+export const maxDuration = 1800; // 30 minutes (literal required for Next.js build)
 
 const ALLOWED_PRODUCT_TYPES = new Set(['slide', 'design', 'comic']);
 const STREAM_BENCH_ENABLED_RAW = (process.env.STREAM_BENCH_ENABLED ?? '1').trim().toLowerCase();
