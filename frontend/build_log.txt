@@ -1,0 +1,20 @@
+
+> temp-app@0.1.0 prebuild
+> node -v && npm -v && echo API_KEY_PRESENT: ${NEXT_PUBLIC_FIREBASE_API_KEY:+yes} && echo AUTH_DOMAIN_PRESENT: ${NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN:+yes}
+
+v22.19.0
+10.9.3
+API_KEY_PRESENT:
+AUTH_DOMAIN_PRESENT:
+
+> temp-app@0.1.0 build
+> next build
+
+▲ Next.js 16.1.6 (Turbopack)
+- Environments: .env
+
+  Creating an optimized production build ...
+✓ Compiled successfully in 26.1s
+  Running TypeScript ...
+  Collecting page data using 7 workers ...
+⨯ Invalid segment configuration export detected. This can cause unexpected behavior from the configs not being applied. You should see the relevant failures in the logs above. Please fix them to continue.
