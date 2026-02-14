@@ -234,6 +234,109 @@ def test_build_pptx_render_output_files_includes_slide_metadata() -> None:
     assert "source_layout_kind" not in output_files[0]
 
 
+def test_build_pptx_render_output_files_master_mode_uses_representative_layouts() -> None:
+    output_files = data_analyst_module._build_pptx_render_output_files(
+        mode="pptx_master_to_images",
+        image_paths=[
+            "/tmp/workspace/outputs/master_images/template_master_01.png",
+            "/tmp/workspace/outputs/master_images/template_master_02.png",
+            "/tmp/workspace/outputs/master_images/template_master_03.png",
+        ],
+        slide_rows=[
+            {
+                "slide_number": 1,
+                "title": "表紙",
+                "texts": ["2026年度 事業方針"],
+                "layout_name": "Title Slide",
+                "layout_placeholders": ["ctrtitle", "subtitle"],
+                "master_name": "Corporate Master",
+                "master_texts": ["年度方針", "重点施策"],
+            },
+            {
+                "slide_number": 2,
+                "title": "現状分析",
+                "texts": ["高齢化率 34.2%", "移動困難者 1.8万人"],
+                "layout_name": "Title and Content",
+                "layout_placeholders": ["title", "body"],
+                "master_name": "Corporate Master",
+                "master_texts": ["年度方針", "重点施策"],
+            },
+            {
+                "slide_number": 3,
+                "title": "施策案",
+                "texts": ["デマンド交通", "MaaS連携"],
+                "layout_name": "Title and Content",
+                "layout_placeholders": ["title", "body"],
+                "master_name": "Corporate Master",
+                "master_texts": ["年度方針", "重点施策"],
+            },
+        ],
+    )
+
+    assert len(output_files) == 2
+    assert output_files[0]["url"].endswith("template_master_01.png")
+    assert output_files[1]["url"].endswith("template_master_02.png")
+    assert output_files[0]["source_title"] is None
+    assert output_files[0]["source_texts"] == []
+    assert output_files[1]["source_layout_placeholders"] == ["title", "body"]
+    assert output_files[1]["source_mode"] == "pptx_master_to_images"
+
+
+def test_build_pptx_render_output_files_prefers_image_metadata_rows() -> None:
+    output_files = data_analyst_module._build_pptx_render_output_files(
+        mode="pptx_master_to_images",
+        image_paths=[
+            "/tmp/workspace/outputs/master_images/template_master_defs_01.png",
+            "/tmp/workspace/outputs/master_images/template_master_defs_02.png",
+        ],
+        slide_rows=[
+            {
+                "slide_number": 1,
+                "title": "通常スライド1",
+                "texts": ["本文1"],
+                "layout_name": "Ignored Layout",
+                "layout_placeholders": ["body"],
+                "master_name": "Ignored Master",
+                "master_texts": ["ignored"],
+            },
+            {
+                "slide_number": 2,
+                "title": "通常スライド2",
+                "texts": ["本文2"],
+                "layout_name": "Ignored Layout 2",
+                "layout_placeholders": ["body"],
+                "master_name": "Ignored Master",
+                "master_texts": ["ignored"],
+            },
+        ],
+        image_metadata=[
+            {
+                "source_layout_name": "Title Slide",
+                "source_layout_placeholders": ["ctrtitle", "subtitle"],
+                "source_master_name": "Corporate Master",
+                "source_master_texts": ["年度方針", "重点施策"],
+                "source_title": None,
+                "source_texts": [],
+            },
+            {
+                "source_layout_name": "Title and Content",
+                "source_layout_placeholders": ["title", "body"],
+                "source_master_name": "Corporate Master",
+                "source_master_texts": ["年度方針", "重点施策"],
+                "source_title": None,
+                "source_texts": [],
+            },
+        ],
+    )
+
+    assert len(output_files) == 2
+    assert output_files[0]["source_layout_name"] == "Title Slide"
+    assert output_files[0]["source_layout_placeholders"] == ["ctrtitle", "subtitle"]
+    assert output_files[0]["source_master_name"] == "Corporate Master"
+    assert output_files[0]["source_texts"] == []
+    assert output_files[0]["source_title"] is None
+
+
 def test_extract_visualizer_generated_image_urls_supports_pages_and_characters() -> None:
     dependency_context = {
         "resolved_dependency_artifacts": [

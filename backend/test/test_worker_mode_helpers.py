@@ -17,6 +17,7 @@ from src.core.workflow.nodes.visualizer import (
     _plan_visual_asset_usage,
     _prompt_item_to_output_payload,
     _selector_asset_summary,
+    _selector_unit_summary,
     _resolve_image_generation_prompt,
     _resolve_asset_unit_meta,
     _summarize_source_master_layout_meta,
@@ -591,19 +592,49 @@ def test_selector_asset_summary_for_slide_render_is_minimal() -> None:
             "asset_id": "asset:pptx:1",
             "is_pptx_slide_reference": True,
             "source_layout_placeholders": ["title", "pic", "body"],
-            "source_texts": ["自治体向け交通政策", "高齢化率 34.2%"],
             "source_master_name": "Corporate Master",
             "source_layout_name": "Title and Content",
+            "source_master_texts": ["年度方針", "重点施策"],
         },
     )
     assert set(summary.keys()) == {
         "asset_id",
         "is_pptx_slide_reference",
         "source_master_layout_meta",
-        "source_texts",
+        "source_layout_name",
+        "source_layout_placeholders",
+        "source_master_name",
+        "source_master_texts",
     }
     assert summary["source_master_layout_meta"] == "コンテンツ＋絵"
-    assert summary["source_texts"] == ["自治体向け交通政策", "高齢化率 34.2%"]
+    assert summary["source_layout_name"] == "Title and Content"
+    assert summary["source_layout_placeholders"] == ["title", "pic", "body"]
+    assert summary["source_master_name"] == "Corporate Master"
+    assert summary["source_master_texts"] == ["年度方針", "重点施策"]
+
+
+def test_selector_unit_summary_for_slide_render_is_minimal() -> None:
+    summary = _selector_unit_summary(
+        mode="slide_render",
+        slide={
+            "slide_number": 2,
+            "title": "交通課題の現状",
+            "description": "移動困難者の増加と路線維持コストの上昇",
+            "bullet_points": ["高齢化率 34.2%", "移動困難者 1.8万人", "高齢化率 34.2%"],
+            "key_message": "持続可能な地域交通への転換が必要",
+        },
+    )
+    assert summary == {
+        "slide_number": 2,
+        "content_title": "交通課題の現状",
+        "content_texts": [
+            "移動困難者の増加と路線維持コストの上昇",
+            "持続可能な地域交通への転換が必要",
+            "高齢化率 34.2%",
+            "移動困難者 1.8万人",
+        ],
+        "target_master_layout_meta": "タイトル＋コンテンツ",
+    }
 
 
 def test_plan_visual_asset_usage_limits_pptx_reference_to_one_per_slide(monkeypatch) -> None:

@@ -437,19 +437,97 @@ def _selector_asset_summary(
     mode: str,
     asset: dict[str, Any],
 ) -> dict[str, Any]:
-    # Slide の PPTX 判定は「マスター系メタ情報 + source_texts」に絞る。
+    # Slide はスライドマスター選択に必要なメタ情報のみに絞る。
     if mode == "slide_render":
         return {
             "asset_id": asset.get("asset_id"),
             "is_pptx_slide_reference": bool(asset.get("is_pptx_slide_reference")),
             "source_master_layout_meta": _summarize_source_master_layout_meta(asset),
-            "source_texts": (
-                asset.get("source_texts")
-                if isinstance(asset.get("source_texts"), list)
+            "source_layout_name": str(asset.get("source_layout_name") or "").strip() or None,
+            "source_layout_placeholders": (
+                asset.get("source_layout_placeholders")
+                if isinstance(asset.get("source_layout_placeholders"), list)
+                else []
+            ),
+            "source_master_name": str(asset.get("source_master_name") or "").strip() or None,
+            "source_master_texts": (
+                asset.get("source_master_texts")
+                if isinstance(asset.get("source_master_texts"), list)
                 else []
             ),
         }
     return _asset_summary(asset)
+
+
+def _infer_target_master_layout_meta(slide: dict[str, Any]) -> str:
+    slide_number = slide.get("slide_number")
+    if isinstance(slide_number, int) and slide_number == 1:
+        return "タイトル"
+
+    bullet_points = slide.get("bullet_points")
+    bullet_count = len([item for item in bullet_points if isinstance(item, str) and item.strip()]) if isinstance(bullet_points, list) else 0
+    title = str(slide.get("title") or "").strip()
+    content_text = " ".join(
+        str(value)
+        for value in (
+            slide.get("description"),
+            slide.get("key_message"),
+        )
+        if isinstance(value, str) and value.strip()
+    ).lower()
+    has_visual_hint = any(token in content_text for token in ("図", "グラフ", "チャート", "画像", "写真", "icon", "chart", "diagram"))
+
+    if has_visual_hint:
+        return "コンテンツ＋絵"
+    if title and bullet_count >= 1:
+        return "タイトル＋コンテンツ"
+    if bullet_count >= 2:
+        return "2コンテンツ"
+    return "コンテンツ"
+
+
+def _selector_unit_summary(
+    *,
+    mode: str,
+    slide: dict[str, Any],
+) -> dict[str, Any] | None:
+    slide_number = slide.get("slide_number")
+    if not isinstance(slide_number, int):
+        return None
+
+    if mode == "slide_render":
+        content_title = str(slide.get("title") or "").strip() or None
+        text_candidates: list[str] = []
+        for key in ("description", "key_message"):
+            value = slide.get(key)
+            if isinstance(value, str) and value.strip():
+                text_candidates.append(value.strip())
+        if isinstance(slide.get("bullet_points"), list):
+            for item in slide.get("bullet_points"):
+                if isinstance(item, str) and item.strip():
+                    text_candidates.append(item.strip())
+
+        seen_texts: set[str] = set()
+        content_texts: list[str] = []
+        for item in text_candidates:
+            if item in seen_texts:
+                continue
+            seen_texts.add(item)
+            content_texts.append(item)
+
+        return {
+            "slide_number": slide_number,
+            "content_title": content_title,
+            "content_texts": content_texts,
+            "target_master_layout_meta": _infer_target_master_layout_meta(slide),
+        }
+
+    return {
+        "slide_number": slide_number,
+        "title": slide.get("title"),
+        "description": slide.get("description"),
+        "bullet_points": slide.get("bullet_points") if isinstance(slide.get("bullet_points"), list) else [],
+    }
 
 
 def _build_asset_router_selector_messages(
@@ -485,21 +563,13 @@ async def _plan_visual_asset_usage(
     for slide in writer_slides:
         if not isinstance(slide, dict):
             continue
-        slide_number = slide.get("slide_number")
-        if not isinstance(slide_number, int):
+        unit_summary = _selector_unit_summary(mode=mode, slide=slide)
+        if not isinstance(unit_summary, dict):
             continue
-        unit_briefs.append(
-            {
-                "slide_number": slide_number,
-                "title": slide.get("title"),
-                "description": slide.get("description"),
-                "bullet_points": slide.get("bullet_points") if isinstance(slide.get("bullet_points"), list) else [],
-            }
-        )
+        unit_briefs.append(unit_summary)
 
-    selector_input = {
+    selector_input: dict[str, Any] = {
         "mode": mode,
-        "instruction": instruction or "",
         "units": unit_briefs,
         "candidate_assets": [
             _selector_asset_summary(mode=mode, asset=asset)
@@ -507,6 +577,8 @@ async def _plan_visual_asset_usage(
         ],
         "max_assets_per_unit": MAX_VISUAL_REFERENCES_PER_UNIT,
     }
+    if mode != "slide_render":
+        selector_input["instruction"] = instruction or ""
 
     selector_messages = _build_asset_router_selector_messages(
         mode=mode,

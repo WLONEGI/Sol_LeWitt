@@ -16,7 +16,7 @@ environmentVariables:
     value: "1:1021289594562:web:c3b69d6536dc1604d7455b"
     availability: ["BUILD", "RUNTIME"]
   - variable: "BACKEND_URL"
-    value: "https://ai-slide-backend-mt6fevmsiq-an.a.run.app"
+    value: "https://ai-slide-backend-1021289594562.asia-northeast1.run.app"
     availability: ["RUNTIME"]
 
 # Runtime configuration (Cloud Run settings)

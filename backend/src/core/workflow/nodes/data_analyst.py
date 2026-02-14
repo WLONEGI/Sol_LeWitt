@@ -304,39 +304,118 @@ def _extract_pptx_slide_rows(pptx_path: str) -> list[dict[str, Any]]:
     return slide_rows
 
 
+def _master_profile_key(slide_meta: dict[str, Any]) -> tuple[str, str, tuple[str, ...]]:
+    source_layout_name = _normalize_text(slide_meta.get("layout_name")).lower()
+    source_master_name = _normalize_text(slide_meta.get("master_name")).lower()
+    source_layout_placeholders = tuple(
+        _normalize_text(item).lower()
+        for item in (slide_meta.get("layout_placeholders") if isinstance(slide_meta.get("layout_placeholders"), list) else [])
+        if _normalize_text(item)
+    )
+    # メタ情報が取得できない場合は過度な重複圧縮を避ける。
+    if not source_layout_name and not source_master_name and not source_layout_placeholders:
+        slide_number = slide_meta.get("slide_number")
+        if isinstance(slide_number, int) and slide_number > 0:
+            return ("unknown", f"slide-{slide_number}", tuple())
+    return (source_master_name, source_layout_name, source_layout_placeholders)
+
+
+def _select_master_reference_slide_numbers(slide_rows: list[dict[str, Any]]) -> set[int]:
+    selected: set[int] = set()
+    seen_profiles: set[tuple[str, str, tuple[str, ...]]] = set()
+    for slide_meta in slide_rows:
+        if not isinstance(slide_meta, dict):
+            continue
+        slide_number = slide_meta.get("slide_number")
+        if not isinstance(slide_number, int) or slide_number <= 0:
+            continue
+        profile_key = _master_profile_key(slide_meta)
+        if profile_key in seen_profiles:
+            continue
+        seen_profiles.add(profile_key)
+        selected.add(slide_number)
+    return selected
+
+
 def _build_pptx_render_output_files(
     *,
     mode: str,
     image_paths: list[str],
     slide_rows: list[dict[str, Any]],
+    image_metadata: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    selected_master_slide_numbers: set[int] = set()
+    use_metadata_rows = isinstance(image_metadata, list) and len(image_metadata) == len(image_paths)
+    if mode == "pptx_master_to_images" and not use_metadata_rows:
+        selected_master_slide_numbers = _select_master_reference_slide_numbers(slide_rows)
+        if not selected_master_slide_numbers and image_paths:
+            selected_master_slide_numbers = {1}
+
     output_files: list[dict[str, Any]] = []
     for idx, image_path in enumerate(image_paths, start=1):
         if not isinstance(image_path, str) or not image_path.strip():
             continue
-        slide_meta = slide_rows[idx - 1] if idx - 1 < len(slide_rows) else {}
+        if mode == "pptx_master_to_images" and not use_metadata_rows and idx not in selected_master_slide_numbers:
+            continue
+        slide_meta = {}
+        if use_metadata_rows and isinstance(image_metadata, list) and idx - 1 < len(image_metadata):
+            candidate = image_metadata[idx - 1]
+            slide_meta = candidate if isinstance(candidate, dict) else {}
+        elif idx - 1 < len(slide_rows):
+            slide_meta = slide_rows[idx - 1]
         source_title = _normalize_text(slide_meta.get("title")) or None
+        source_title_override = _normalize_text(slide_meta.get("source_title"))
+        if source_title_override:
+            source_title = source_title_override
         source_texts = [
             _normalize_text(item)
             for item in (slide_meta.get("texts") if isinstance(slide_meta.get("texts"), list) else [])
             if _normalize_text(item)
         ]
+        if isinstance(slide_meta.get("source_texts"), list):
+            source_texts = [
+                _normalize_text(item)
+                for item in slide_meta.get("source_texts")
+                if _normalize_text(item)
+            ]
         source_layout_name = _normalize_text(slide_meta.get("layout_name")) or None
+        source_layout_name_override = _normalize_text(slide_meta.get("source_layout_name"))
+        if source_layout_name_override:
+            source_layout_name = source_layout_name_override
         source_layout_placeholders = [
             _normalize_text(item)
             for item in (slide_meta.get("layout_placeholders") if isinstance(slide_meta.get("layout_placeholders"), list) else [])
             if _normalize_text(item)
         ]
+        if isinstance(slide_meta.get("source_layout_placeholders"), list):
+            source_layout_placeholders = [
+                _normalize_text(item)
+                for item in slide_meta.get("source_layout_placeholders")
+                if _normalize_text(item)
+            ]
         source_master_name = _normalize_text(slide_meta.get("master_name")) or None
+        source_master_name_override = _normalize_text(slide_meta.get("source_master_name"))
+        if source_master_name_override:
+            source_master_name = source_master_name_override
         source_master_texts = [
             _normalize_text(item)
             for item in (slide_meta.get("master_texts") if isinstance(slide_meta.get("master_texts"), list) else [])
             if _normalize_text(item)
         ]
+        if isinstance(slide_meta.get("source_master_texts"), list):
+            source_master_texts = [
+                _normalize_text(item)
+                for item in slide_meta.get("source_master_texts")
+                if _normalize_text(item)
+            ]
+        if mode == "pptx_master_to_images":
+            source_title = None
+            source_texts = []
+        title = source_title or source_master_name or source_layout_name or os.path.basename(image_path)
         output_files.append(
             {
                 "url": image_path,
-                "title": source_title or os.path.basename(image_path),
+                "title": title,
                 "mime_type": "image/png",
                 "source_title": source_title,
                 "source_texts": source_texts,
@@ -1042,6 +1121,7 @@ async def _run_deterministic_data_analyst_mode(
                 "pptx_path": pptx_path,
                 "output_dir": output_dir,
                 "work_dir": workspace_dir,
+                "render_mode": "master_definition" if mode == "pptx_master_to_images" else "slide",
             },
             config=config,
         )
@@ -1052,6 +1132,9 @@ async def _run_deterministic_data_analyst_mode(
         image_paths = parsed_tool_output.get("image_paths") if isinstance(parsed_tool_output, dict) else None
         if not isinstance(image_paths, list):
             image_paths = []
+        image_metadata = parsed_tool_output.get("image_metadata") if isinstance(parsed_tool_output, dict) else None
+        if not isinstance(image_metadata, list):
+            image_metadata = []
         normalized_image_paths = [
             str(path).strip()
             for path in image_paths
@@ -1062,7 +1145,29 @@ async def _run_deterministic_data_analyst_mode(
             mode=mode,
             image_paths=normalized_image_paths,
             slide_rows=slide_rows,
+            image_metadata=image_metadata,
         )
+        if mode == "pptx_master_to_images":
+            selected_image_paths = {
+                str(item.get("url")).strip()
+                for item in output_files
+                if isinstance(item, dict) and isinstance(item.get("url"), str) and str(item.get("url")).strip()
+            }
+            for local_image_path in normalized_image_paths:
+                if local_image_path in selected_image_paths:
+                    continue
+                try:
+                    os.remove(local_image_path)
+                except FileNotFoundError:
+                    continue
+                except Exception as cleanup_err:
+                    logger.warning("Failed to delete non-selected rendered slide image: %s", cleanup_err)
+            normalized_image_set = set(normalized_image_paths)
+            detected_output_paths = {
+                path
+                for path in detected_output_paths
+                if path not in normalized_image_set or path in selected_image_paths
+            }
         rendered_images: list[dict[str, Any]] = []
         for row in output_files:
             rendered_images.append(
@@ -1310,7 +1415,9 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
         result.failed_checks = failed_checks
         is_error = bool(failed_checks)
 
-        workspace_detected_files = _discover_workspace_output_files(workspace_dir)
+        workspace_detected_files: list[str] = []
+        if execution_mode not in {"pptx_master_to_images", "pptx_slides_to_images"}:
+            workspace_detected_files = _discover_workspace_output_files(workspace_dir)
         detected_output_paths.update(workspace_detected_files)
         _merge_detected_output_files(
             result=result,
