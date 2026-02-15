@@ -35,7 +35,7 @@ const nextConfig: NextConfig = {
     ];
   },
   async rewrites() {
-    const backendUrl = process.env.BACKEND_URL || 'https://ai-slide-backend-1021289594562.asia-northeast1.run.app';
+    const backendUrl = process.env.BACKEND_URL || 'https://ai-slide-backend-mt6fevmsiq-an.a.run.app';
     return [
       {
         source: "/api/:path*",
