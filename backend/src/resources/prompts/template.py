@@ -12,6 +12,34 @@ logger = logging.getLogger(__name__)
 
 # プロンプトファイルが格納されているディレクトリ
 _PROMPTS_DIR: Path = Path(__file__).parent
+_MODE_FALLBACK_BY_PROMPT_AND_PRODUCT: dict[str, dict[str, str]] = {
+    "writer": {"comic": "story_framework"},
+    "visualizer_prompt": {"comic": "comic_page_render"},
+}
+
+
+def _resolve_specific_prompt_path(
+    *,
+    prompt_dir: Path,
+    product_type: Any,
+    mode: Any,
+) -> Path | None:
+    normalized_product_type = str(product_type).strip() if isinstance(product_type, str) and product_type.strip() else ""
+    normalized_mode = str(mode).strip() if isinstance(mode, str) and mode.strip() else ""
+
+    candidates: list[Path] = []
+    if normalized_product_type and normalized_mode:
+        candidates.append(prompt_dir / normalized_product_type / f"{normalized_mode}.md")
+        candidates.append(prompt_dir / f"{normalized_product_type}_{normalized_mode}.md")
+    if normalized_mode:
+        candidates.append(prompt_dir / f"{normalized_mode}.md")
+    if normalized_product_type:
+        candidates.append(prompt_dir / f"{normalized_product_type}.md")
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _format_prompt_for_langchain(template: str) -> str:
@@ -83,10 +111,20 @@ def apply_prompt_template(prompt_name: str, state: AgentState) -> list[Any]:
     """
     プロンプト構成を結合し、状態変数を適用してシステムメッセージを生成する。
     1. {prompt_name}/base.md
-    2. {prompt_name}/{product_type}.md
-    3. どちらもない場合は default.md または既存ファイル
+    2. mode指定時は mode専用ファイル（優先）:
+       - {prompt_name}/{product_type}/{mode}.md
+       - {prompt_name}/{product_type}_{mode}.md
+       - {prompt_name}/{mode}.md
+       mode未指定時は一部プロンプトで product_type ごとの既定 mode を補完する。
+    3. mode専用がなければ {prompt_name}/{product_type}.md
+    4. どちらもない場合は default.md または既存ファイル
     """
     product_type = state.get("product_type")
+    mode = state.get("mode")
+    resolved_mode = mode
+    if not (isinstance(mode, str) and mode.strip()):
+        product_key = str(product_type).strip() if isinstance(product_type, str) else ""
+        resolved_mode = _MODE_FALLBACK_BY_PROMPT_AND_PRODUCT.get(prompt_name, {}).get(product_key)
     prompt_dir = _PROMPTS_DIR / prompt_name
     
     parts = []
@@ -96,12 +134,15 @@ def apply_prompt_template(prompt_name: str, state: AgentState) -> list[Any]:
         base_path = prompt_dir / "base.md"
         if base_path.exists():
             parts.append(base_path.read_text(encoding="utf-8"))
-            
-        # 2. Specific (製品固有指示)
-        if product_type:
-            specific_path = prompt_dir / f"{product_type}.md"
-            if specific_path.exists():
-                parts.append(specific_path.read_text(encoding="utf-8"))
+
+        # 2. Specific (mode優先、なければproduct_type)
+        specific_path = _resolve_specific_prompt_path(
+            prompt_dir=prompt_dir,
+            product_type=product_type,
+            mode=resolved_mode,
+        )
+        if specific_path is not None:
+            parts.append(specific_path.read_text(encoding="utf-8"))
                 
         # 3. Fallback (単一指示)
         if not parts:
@@ -121,11 +162,15 @@ def apply_prompt_template(prompt_name: str, state: AgentState) -> list[Any]:
     else:
         full_content = "\n\n".join(parts)
 
+    prompt_state = dict(state)
+    if resolved_mode and not (isinstance(prompt_state.get("mode"), str) and str(prompt_state.get("mode")).strip()):
+        prompt_state["mode"] = resolved_mode
+
     system_prompt: str = PromptTemplate(
         input_variables=["CURRENT_TIME"],
         template=_format_prompt_for_langchain(full_content),
     ).format(
         CURRENT_TIME=datetime.now().strftime("%a %b %d %Y %H:%M:%S %z"),
-        **state
+        **prompt_state
     )
     return [SystemMessage(content=system_prompt)] + state.get("messages", [])

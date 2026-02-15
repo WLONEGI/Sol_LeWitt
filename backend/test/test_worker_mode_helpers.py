@@ -9,6 +9,7 @@ from src.core.workflow.nodes.researcher import (
 from src.shared.schemas.outputs import ImagePrompt, ResearchTask, StructuredImagePrompt
 from src.core.workflow.nodes.visualizer import (
     _append_reference_guidance,
+    _build_character_sheet_prompt_text,
     _build_comic_page_prompt_text,
     _extract_pptx_slide_reference_assets,
     _find_latest_character_sheet_render_urls,
@@ -90,6 +91,64 @@ def test_comic_page_prompt_includes_character_sheet_anchors() -> None:
     assert "アオイ (主人公)" in prompt
     assert "Face/Hair anchors: 右分けの短髪" in prompt
     assert "Forbidden drift: 髪型変更禁止" in prompt
+    assert "[Render Policy]" in prompt
+    assert "[Panel Layout Policy]" in prompt
+    assert "Avoid defaulting to a uniform four-panel vertical split." in prompt
+    assert "Controlled frame-break is allowed" in prompt
+    assert "[Mode Prompt]" in prompt
+    assert "Mode Directive: comic_page_render" in prompt
+    assert "masterpiece, best quality, cinematic black and white manga panel illustration," in prompt
+    assert "smooth and balanced grayscale shading (no screentone, no halftone pattern)," in prompt
+    assert "strict black-and-white manga page" not in prompt
+
+
+def test_comic_page_prompt_without_panels_adds_default_marker() -> None:
+    writer_data = {
+        "pages": [
+            {
+                "page_number": 1,
+                "page_goal": "導入",
+                "panels": [],
+            }
+        ]
+    }
+    prompt = _build_comic_page_prompt_text(
+        slide_number=1,
+        slide_content={"description": "導入", "bullet_points": []},
+        writer_data=writer_data,
+        character_sheet_data=None,
+    )
+    assert "[Panels]" in prompt
+    assert "- 未指定" in prompt
+
+
+def test_character_sheet_prompt_uses_monochrome_render_policy() -> None:
+    prompt = _build_character_sheet_prompt_text(
+        slide_number=1,
+        slide_content={"character_profile": {"name": "アオイ"}},
+        writer_data={
+            "characters": [
+                {
+                    "name": "アオイ",
+                    "story_role": "主人公",
+                    "core_personality": "責任感が強い",
+                    "motivation": "仲間を守る",
+                    "weakness_or_fear": "孤立",
+                    "silhouette_signature": "長いコート",
+                    "face_hair_anchors": "右分け短髪",
+                    "costume_anchors": "濃色コート",
+                    "color_palette": {"main": "#112233", "sub": "#445566", "accent": "#778899"},
+                }
+            ]
+        },
+        story_framework_data={},
+        layout_template_enabled=False,
+        assigned_assets=None,
+    )
+    assert "[Render Policy]" in prompt
+    assert "masterpiece, best quality, cinematic black and white manga panel illustration," in prompt
+    assert "pure black, pure white, and soft gray tones only (no texture noise, no color)," in prompt
+    assert "Color palette:" not in prompt
 
 
 def test_find_latest_character_sheet_render_urls_prefers_latest_character_visual() -> None:
@@ -167,7 +226,8 @@ def test_compile_structured_prompt_omits_type_line() -> None:
     )
     prompt = compile_structured_prompt(structured, slide_number=1, mode="slide_render")
     assert "Type:" not in prompt
-    assert "# Slide 1 : SaaS主要KPIの定義と計算式" in prompt
+    assert "Presentation Slide" in prompt
+    assert "# SaaS主要KPIの定義と計算式" in prompt
     assert "## 経営判断に必要な共通指標" in prompt
     assert "### 経営判断に必要な共通指標" not in prompt
     assert "Text policy: render_all_text" not in prompt
@@ -191,54 +251,57 @@ def test_compile_structured_prompt_omits_default_text_policy_label_for_design_mo
 
 
 def test_append_reference_guidance_adds_english_note_when_references_exist() -> None:
-    base_prompt = "# Slide 1 : タイトル\nVisual style: clean business"
-    updated = _append_reference_guidance(base_prompt, has_references=True)
+    base_prompt = "Presentation Slide\n# タイトル\nVisual style: clean business"
+    updated = _append_reference_guidance(base_prompt, enable_pptx_guidance=True)
 
     assert "[Reference Guidance]" in updated
-    assert "Use attached reference image(s) as strong guidance" in updated
+    assert "Use attached PPTX-derived reference images as the primary design anchor." in updated
     assert updated.startswith(base_prompt)
 
 
 def test_append_reference_guidance_noop_when_no_references() -> None:
-    base_prompt = "# Slide 2 : 内容\nVisual style: modern infographic"
-    updated = _append_reference_guidance(base_prompt, has_references=False)
+    base_prompt = "Presentation Slide\n# 内容\nVisual style: modern infographic"
+    updated = _append_reference_guidance(base_prompt, enable_pptx_guidance=False)
 
     assert updated == base_prompt
 
 
 def test_append_reference_guidance_is_idempotent() -> None:
-    base_prompt = "# Slide 3 : 比較\nVisual style: editorial"
-    once = _append_reference_guidance(base_prompt, has_references=True)
-    twice = _append_reference_guidance(once, has_references=True)
+    base_prompt = "Presentation Slide\n# 比較\nVisual style: editorial"
+    once = _append_reference_guidance(base_prompt, enable_pptx_guidance=True)
+    twice = _append_reference_guidance(once, enable_pptx_guidance=True)
 
     assert once == twice
 
 
 def test_append_reference_guidance_adds_template_text_handling_when_template_reference_exists() -> None:
-    base_prompt = "# Slide 4 : 構成\nVisual style: corporate"
-    updated = _append_reference_guidance(
-        base_prompt,
-        has_references=True,
-        has_template_references=True,
-    )
+    base_prompt = "Presentation Slide\n# 構成\nVisual style: corporate"
+    updated = _append_reference_guidance(base_prompt, enable_pptx_guidance=True)
 
     assert "[Reference Guidance]" in updated
-    assert "[Template Text Handling]" in updated
-    assert "Do not copy or preserve template sample text." in updated
+    assert "Treat any text visible in references as placeholder examples only; do not copy it." in updated
 
 
 def test_append_reference_guidance_template_block_is_idempotent() -> None:
-    base_prompt = "# Slide 5 : 施策"
-    once = _append_reference_guidance(
-        base_prompt,
-        has_references=True,
-        has_template_references=True,
-    )
-    twice = _append_reference_guidance(
-        once,
-        has_references=True,
-        has_template_references=True,
-    )
+    base_prompt = "Presentation Slide\n# 施策"
+    once = _append_reference_guidance(base_prompt, enable_pptx_guidance=True)
+    twice = _append_reference_guidance(once, enable_pptx_guidance=True)
+
+    assert once == twice
+
+
+def test_append_reference_guidance_adds_attachment_background_fit_note_for_slide() -> None:
+    base_prompt = "Presentation Slide\n# 施策\nVisual style: clean corporate"
+    updated = _append_reference_guidance(base_prompt, enable_pptx_guidance=True)
+
+    assert "[Reference Guidance]" in updated
+    assert "nuanced and delicate alignment" in updated
+
+
+def test_append_reference_guidance_attachment_background_fit_block_is_idempotent() -> None:
+    base_prompt = "Presentation Slide\n# 比較"
+    once = _append_reference_guidance(base_prompt, enable_pptx_guidance=True)
+    twice = _append_reference_guidance(once, enable_pptx_guidance=True)
 
     assert once == twice
 
@@ -316,14 +379,14 @@ def test_output_payload_omits_empty_legacy_prompt_field() -> None:
             visual_style="editorial infographic",
         ),
         image_generation_prompt=None,
-        compiled_prompt="# Slide 1 : 再設計提案",
+        compiled_prompt="Presentation Slide\n# 再設計提案",
         rationale="test",
         generated_image_url="https://example.com/image.png",
     )
 
     payload = _prompt_item_to_output_payload(prompt_item, title="再設計提案", selected_inputs=[])
     assert "image_generation_prompt" not in payload
-    assert payload["compiled_prompt"] == "# Slide 1 : 再設計提案"
+    assert payload["compiled_prompt"] == "Presentation Slide\n# 再設計提案"
     assert "text_policy" not in payload["structured_prompt"]
     assert "negative_constraints" not in payload["structured_prompt"]
 

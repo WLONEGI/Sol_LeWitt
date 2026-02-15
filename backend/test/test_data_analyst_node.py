@@ -128,6 +128,134 @@ def test_data_analyst_images_to_package_without_images_fails(monkeypatch):
     assert stored["output_value"] is None
 
 
+def test_data_analyst_slide_packaging_uses_only_visualizer_images(monkeypatch):
+    downloaded_urls: list[str] = []
+    captured_image_paths: list[str] = []
+
+    async def fake_dispatch(name, data, config=None):
+        return None
+
+    def fake_download(url: str):
+        downloaded_urls.append(url)
+        if url.endswith(".png"):
+            return b"png-bytes"
+        if url.endswith(".pptx"):
+            return b"pptx-bytes"
+        return None
+
+    class FakePackageTool:
+        async def ainvoke(self, args, config=None):
+            captured_image_paths.extend(args.get("image_paths") or [])
+            work_dir = Path(args["work_dir"])
+            out_dir = work_dir / "outputs" / "packaged_assets"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            pdf_path = out_dir / "deck.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 mock")
+            return json.dumps({"status": "ok", "pdf_path": str(pdf_path)})
+
+    def fake_upload(file_data, content_type, session_id=None, slide_number=None, object_name=None):
+        assert file_data.startswith(b"%PDF")
+        return "https://example.com/generated/deck.pdf"
+
+    def fake_dependency_context(_state, _step):
+        return {
+            "resolved_dependency_artifacts": [
+                {
+                    "producer_capability": "visualizer",
+                    "content": json.dumps(
+                        {
+                            "product_type": "slide",
+                            "slides": [
+                                {
+                                    "slide_number": 1,
+                                    "generated_image_url": "https://example.com/visualized.png",
+                                }
+                            ],
+                        }
+                    ),
+                },
+                {
+                    "producer_capability": "data_analyst",
+                    "content": json.dumps(
+                        {
+                            "source_pptx": "https://example.com/template.pptx",
+                            "rendered_images": [
+                                {"image_path": "https://example.com/template-slide.png"}
+                            ],
+                        }
+                    ),
+                },
+            ]
+        }
+
+    monkeypatch.setattr(data_analyst_module, "adispatch_custom_event", fake_dispatch)
+    monkeypatch.setattr(data_analyst_module, "download_blob_as_bytes", fake_download)
+    monkeypatch.setattr(data_analyst_module, "package_visual_assets_tool", FakePackageTool())
+    monkeypatch.setattr(data_analyst_module, "upload_to_gcs", fake_upload)
+    monkeypatch.setattr(data_analyst_module, "resolve_step_dependency_context", fake_dependency_context)
+
+    state = _base_state("images_to_package", "画像をpdf/pptx/zip化して")
+    state["product_type"] = "slide"
+    state["attachments"] = [
+        {
+            "id": "template",
+            "filename": "template.pptx",
+            "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "url": "https://example.com/template.pptx",
+            "kind": "pptx",
+        }
+    ]
+
+    cmd = asyncio.run(data_analyst_module.data_analyst_node(state, {}))
+
+    assert cmd.goto == "supervisor"
+    assert downloaded_urls == ["https://example.com/visualized.png"]
+    assert len(captured_image_paths) == 1
+    assert captured_image_paths[0].endswith(".png")
+
+    stored = json.loads(cmd.update["artifacts"]["step_1_data"])
+    assert stored["failed_checks"] == []
+    assert stored["output_value"]["input_images"] == 1
+
+
+def test_data_analyst_slide_packaging_without_visualizer_images_fails(monkeypatch):
+    async def fake_dispatch(name, data, config=None):
+        return None
+
+    def fake_dependency_context(_state, _step):
+        return {
+            "resolved_dependency_artifacts": [
+                {
+                    "producer_capability": "writer",
+                    "content": json.dumps({"summary": "no visuals"}),
+                }
+            ]
+        }
+
+    monkeypatch.setattr(data_analyst_module, "adispatch_custom_event", fake_dispatch)
+    monkeypatch.setattr(data_analyst_module, "resolve_step_dependency_context", fake_dependency_context)
+
+    state = _base_state("images_to_package", "画像をpdf/pptx/zip化して")
+    state["product_type"] = "slide"
+    state["attachments"] = [
+        {
+            "id": "img1",
+            "filename": "fallback.png",
+            "mime_type": "image/png",
+            "url": "https://example.com/fallback.png",
+            "kind": "image",
+        }
+    ]
+
+    cmd = asyncio.run(data_analyst_module.data_analyst_node(state, {}))
+
+    assert cmd.goto == "supervisor"
+    stored = json.loads(cmd.update["artifacts"]["step_1_data"])
+    assert "missing_dependency" in stored["failed_checks"]
+    assert stored["output_files"] == []
+    assert stored["output_value"] is None
+
+
 def test_upload_result_files_rewrites_local_path_to_gcs(monkeypatch, tmp_path):
     output_path = tmp_path / "deck.pdf"
     output_path.write_bytes(b"%PDF-1.4 mock")

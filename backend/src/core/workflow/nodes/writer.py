@@ -210,7 +210,9 @@ async def writer_node(state: State, config: RunnableConfig) -> Command[Literal["
         "available_artifacts": state.get("artifacts", {}),
     }
 
-    messages = apply_prompt_template("writer", state)
+    prompt_state = dict(state)
+    prompt_state["mode"] = mode
+    messages = apply_prompt_template("writer", prompt_state)
     messages.append(
         HumanMessage(
             content=json.dumps(context_payload, ensure_ascii=False, indent=2),

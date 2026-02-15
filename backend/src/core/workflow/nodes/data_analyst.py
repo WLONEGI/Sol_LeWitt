@@ -1022,6 +1022,7 @@ def _pick_first_local_pptx(local_file_manifest: list[dict[str, str]]) -> str | N
 def _pick_local_images(
     local_file_manifest: list[dict[str, str]],
     preferred_source_urls: list[str] | None = None,
+    strict_preferred_only: bool = False,
 ) -> list[str]:
     image_exts = (".png", ".jpg", ".jpeg", ".webp", ".gif")
     by_source_url: dict[str, str] = {}
@@ -1050,6 +1051,11 @@ def _pick_local_images(
             preferred_images.append(local_path)
         if preferred_images:
             return preferred_images
+        if strict_preferred_only:
+            return []
+
+    if strict_preferred_only:
+        return []
 
     for item in local_file_manifest:
         local_path = item.get("local_path")
@@ -1096,6 +1102,7 @@ async def _run_deterministic_data_analyst_mode(
     workspace_dir: str,
     local_file_manifest: list[dict[str, str]],
     preferred_image_source_urls: list[str],
+    strict_preferred_images: bool,
     pptx_context: Any,
     config: RunnableConfig,
 ) -> tuple[DataAnalystOutput, set[str]]:
@@ -1216,6 +1223,7 @@ async def _run_deterministic_data_analyst_mode(
         image_paths = _pick_local_images(
             local_file_manifest,
             preferred_source_urls=preferred_image_source_urls,
+            strict_preferred_only=strict_preferred_images,
         )
         if not image_paths:
             return (
@@ -1325,6 +1333,8 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     pptx_context = state.get("pptx_context")
     instruction = current_step.get("instruction", "")
     execution_mode = _resolve_data_analyst_mode(current_step)
+    product_type = str(state.get("product_type") or "").strip().lower()
+    slide_packaging_mode = execution_mode == "images_to_package" and product_type == "slide"
 
     thread_id = config.get("configurable", {}).get("thread_id")
     user_uid = config.get("configurable", {}).get("user_uid")
@@ -1340,7 +1350,13 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
     )
     _collect_file_urls(binding_priority_assets, source_urls)
     _collect_file_urls(selected_step_assets, source_urls)
-    if execution_mode == "images_to_package":
+    if slide_packaging_mode:
+        source_urls = {
+            url
+            for url in preferred_visualizer_image_urls
+            if isinstance(url, str) and url.strip()
+        }
+    elif execution_mode == "images_to_package":
         for url in preferred_visualizer_image_urls:
             source_urls.add(url)
         _collect_file_urls(dependency_context.get("resolved_dependency_artifacts", []), source_urls)
@@ -1372,9 +1388,10 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
         "planned_inputs": dependency_context.get("planned_inputs", []),
         "depends_on_step_ids": dependency_context.get("depends_on_step_ids", []),
         "resolved_dependency_artifacts": dependency_context.get("resolved_dependency_artifacts", []),
-        "selected_image_inputs": selected_image_inputs,
-        "attachments": attachments,
-        "pptx_context": pptx_context,
+        "selected_image_inputs": [] if slide_packaging_mode else selected_image_inputs,
+        "attachments": [] if slide_packaging_mode else attachments,
+        "pptx_context": None if slide_packaging_mode else pptx_context,
+        "effective_source_urls": sorted(source_urls),
         "output_prefix": output_prefix,
         "deck_title": deck_title,
         "session_id": session_id,
@@ -1405,6 +1422,7 @@ async def data_analyst_node(state: dict, config: RunnableConfig) -> Command[Lite
             workspace_dir=workspace_dir,
             local_file_manifest=local_file_manifest,
             preferred_image_source_urls=preferred_visualizer_image_urls,
+            strict_preferred_images=slide_packaging_mode,
             pptx_context=pptx_context,
             config=config,
         )

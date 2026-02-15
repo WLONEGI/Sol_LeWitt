@@ -57,6 +57,13 @@ CHARACTER_SHEET_TEMPLATE_PATH = (
     / "templates"
     / "character_sheet_layout_reference.png"
 )
+COMIC_MODE_PROMPT_DIR = (
+    Path(__file__).resolve().parents[3]
+    / "resources"
+    / "prompts"
+    / "visualizer_prompt"
+    / "comic"
+)
 
 ASPECT_RATIO_HINTS = {
     "16:9": ("16:9", "横長", "landscape"),
@@ -71,16 +78,32 @@ MAX_VISUAL_REFERENCES_PER_UNIT = 14
 MAX_MANDATORY_CHARACTER_SHEET_REFERENCES = 14
 CHARACTER_PROMPT_HEADER_PATTERN = re.compile(r"^\s*#Character\d+\b", re.IGNORECASE)
 PROMPT_LOG_PREVIEW_MAX_CHARS = 2000
+COMIC_PAGE_FIXED_STYLE_PRESET = (
+    "最高品質・傑作レベルのシネマティックな白黒漫画コマイラスト。\n"
+    "Gペンによる細く鋭い線画で、抜き差しと強弱のある表現的な線運びを徹底する。\n"
+    "プロの漫画家が描いたような、繊細かつ自信のある手描きインク表現にする。\n"
+    "輪郭線はクリーンに保ち、先細りや筆圧変化を自然に反映する。\n"
+    "陰影は滑らかで均整の取れたグレースケールのみを使い、スクリーントーンや網点は使わない。\n"
+    "純黒・純白・柔らかな灰色のみを使用し、ノイズ質感やカラー表現は使わない。\n"
+    "キャラクターと背景のライティング整合性を保ち、破綻を避ける。\n"
+    "シネマティックな広角構図で、明確なパースと奥行きを持たせる。\n"
+    "人体の比率と解剖を自然に保ち、感情は豊かだが過剰に騒がしくしない。\n"
+    "印刷・デジタル双方で映えるコントラスト設計にし、全体の調和を優先する。\n"
+    "画面は雑然とさせず、洗練されたレイアウトと落ち着いたトーンバランスを維持する。"
+)
+COMIC_PAGE_LAYOUT_FREEDOM_POLICY = (
+    "- 画一的な縦4分割を既定にしない。\n"
+    "- 演出の山場に応じて、コマのサイズ・縦横比・密度を変化させる（例: 導入の大コマ、細いアクション挿入、反応の寄り）。\n"
+    "- 可読性を保てる範囲で、非対称配置・段違い・選択的な重なりを使い、単調さを避ける。\n"
+    "- 制御されたコマ外しを許可する。髪・手・武器・衣装などは意図的にコマ枠を越えてよい。\n"
+    "- 動的なコマ割りでも、セリフの読み順とアクションの流れが明確に追えることを最優先する。"
+)
 REFERENCE_GUIDANCE_HEADER = "[Reference Guidance]"
 REFERENCE_GUIDANCE_TEXT = (
-    "Use attached reference image(s) as strong guidance for visual style, composition, and color palette. "
-    "Keep the final output faithful to the requested content and text intent."
-)
-TEMPLATE_TEXT_HANDLING_HEADER = "[Template Text Handling]"
-TEMPLATE_TEXT_HANDLING_TEXT = (
-    "Treat any text visible in template/reference images as placeholder examples only. "
-    "Do not copy or preserve template sample text. "
-    "Render only the current slide's provided title, subtitle, and contents."
+    "Use attached PPTX-derived reference images as the primary design anchor. "
+    "Adapt the output with nuanced and delicate alignment to their layout rhythm, spacing, composition, "
+    "and color/typography mood, while keeping the current slide text clear and readable. "
+    "Treat any text visible in references as placeholder examples only; do not copy it."
 )
 
 
@@ -117,23 +140,28 @@ def _log_prompt_preview(value: str | None, *, max_chars: int = PROMPT_LOG_PREVIE
 def _append_reference_guidance(
     prompt_text: str,
     *,
-    has_references: bool,
-    has_template_references: bool = False,
+    enable_pptx_guidance: bool = False,
 ) -> str:
     base = (prompt_text or "").rstrip()
-    sections: list[str] = []
-
-    if has_references and REFERENCE_GUIDANCE_HEADER not in base:
-        sections.append(f"{REFERENCE_GUIDANCE_HEADER}\n{REFERENCE_GUIDANCE_TEXT}")
-
-    if has_template_references and TEMPLATE_TEXT_HANDLING_HEADER not in base:
-        sections.append(f"{TEMPLATE_TEXT_HANDLING_HEADER}\n{TEMPLATE_TEXT_HANDLING_TEXT}")
-
-    if not sections:
+    legacy_headers = ("[Reference Guidance]", "[Template Text Handling]", "[Attachment Background Fit]")
+    if any(header in base for header in legacy_headers):
         return prompt_text
+
+    if not enable_pptx_guidance:
+        return prompt_text
+
+    guidance_block = REFERENCE_GUIDANCE_HEADER + "\n" + f"- {REFERENCE_GUIDANCE_TEXT}"
     if base:
-        return f"{base}\n\n" + "\n\n".join(sections)
-    return "\n\n".join(sections)
+        return f"{base}\n\n{guidance_block}"
+    return guidance_block
+
+
+def _should_enable_pptx_reference_guidance(
+    *,
+    mode: str,
+    has_pptx_attachment: bool,
+) -> bool:
+    return mode == "slide_render" and has_pptx_attachment
 
 
 def _is_image_asset(asset: dict[str, Any]) -> bool:
@@ -671,6 +699,21 @@ def _load_character_sheet_template_bytes() -> bytes | None:
             e,
             CHARACTER_SHEET_TEMPLATE_PATH,
         )
+        return None
+
+
+def _load_comic_mode_prompt_text(mode: str) -> str | None:
+    mode_name = str(mode or "").strip()
+    if not mode_name:
+        return None
+    prompt_path = COMIC_MODE_PROMPT_DIR / f"{mode_name}.md"
+    try:
+        if not prompt_path.exists():
+            return None
+        text = prompt_path.read_text(encoding="utf-8").strip()
+        return text or None
+    except Exception as e:
+        logger.warning("Comic mode prompt could not be loaded: %s (path=%s)", e, prompt_path)
         return None
 
 def _collect_artifacts_by_suffix(
@@ -1216,11 +1259,12 @@ def _build_comic_page_prompt_text(
     slide_number: int,
     slide_content: dict[str, Any],
     writer_data: dict[str, Any],
-    character_sheet_data: dict[str, Any] | None = None,
     assigned_assets: list[dict[str, Any]] | None = None,
 ) -> str:
     page = _find_comic_page_payload(writer_data, slide_number)
     lines: list[str] = [
+        COMIC_PAGE_FIXED_STYLE_PRESET,
+        "",
         f"#Page{slide_number}",
         "Mode: comic_page_render",
         "",
@@ -1237,48 +1281,25 @@ def _build_comic_page_prompt_text(
     if not page_goal:
         page_goal = _text_or_default(slide_content.get("description"), "未指定")
     lines.extend(["[Page Goal]", page_goal])
-
-    character_rows = (
-        character_sheet_data.get("characters")
-        if isinstance(character_sheet_data, dict)
-        else None
+    lines.extend(
+        [
+            "",
+            "[コマ割りポリシー]",
+            COMIC_PAGE_LAYOUT_FREEDOM_POLICY,
+        ]
     )
-    if isinstance(character_rows, list) and character_rows:
-        lines.extend(["", "[Character Sheet Anchors]"])
-        for idx, item in enumerate(character_rows[:8], start=1):
-            if not isinstance(item, dict):
-                continue
-            name = _text_or_default(item.get("name"), f"Character {idx}")
-            role = _text_or_default(item.get("story_role") or item.get("role"), "未指定")
-            lines.append(f"- {name} ({role})")
-            lines.append(f"  - Face/Hair anchors: {_text_or_default(item.get('face_hair_anchors'))}")
-            lines.append(f"  - Costume anchors: {_text_or_default(item.get('costume_anchors'))}")
-            lines.append(f"  - Silhouette signature: {_text_or_default(item.get('silhouette_signature'))}")
-
-            palette = item.get("color_palette")
-            if isinstance(palette, dict):
-                palette_items = [
-                    f"{key}={value.strip()}"
-                    for key in ("main", "sub", "accent")
-                    if isinstance((value := palette.get(key)), str) and value.strip()
-                ]
-                if palette_items:
-                    lines.append("  - Color palette: " + ", ".join(palette_items))
-
-            signature_items = _string_list(item.get("signature_items"))
-            if signature_items:
-                lines.append("  - Signature items: " + ", ".join(signature_items[:6]))
-
-            forbidden_drift = _string_list(item.get("forbidden_drift"))
-            if forbidden_drift:
-                lines.append("  - Forbidden drift: " + ", ".join(forbidden_drift[:6]))
+    comic_mode_prompt = _load_comic_mode_prompt_text("comic_page_render")
+    if comic_mode_prompt:
+        lines.extend(["", "[Mode Prompt]", comic_mode_prompt])
 
     lines.extend(["", "[Panels]"])
 
     if not panels:
+        has_panel_text = False
         for bullet in _string_list(slide_content.get("bullet_points"))[:5]:
             lines.append(f"- {bullet}")
-        if len(lines) == 7:
+            has_panel_text = True
+        if not has_panel_text:
             lines.append("- 未指定")
         if assigned_assets:
             lines.extend(["", "[Reference Assets]"])
@@ -1346,6 +1367,8 @@ def _build_character_sheet_prompt_text(
     art_style = story_payload.get("art_style_policy") if isinstance(story_payload, dict) else {}
 
     lines: list[str] = [
+        COMIC_PAGE_FIXED_STYLE_PRESET,
+        "",
         f"#Character{slide_number}",
         "Mode: character_sheet_render",
         "",
@@ -1360,16 +1383,6 @@ def _build_character_sheet_prompt_text(
         f"- Face and hair anchors: {_text_or_default(character_profile.get('face_hair_anchors'))}",
         f"- Costume anchors: {_text_or_default(character_profile.get('costume_anchors'))}",
     ]
-
-    color_palette = character_profile.get("color_palette")
-    if isinstance(color_palette, dict):
-        palette_items = [
-            f"{key}={value.strip()}"
-            for key in ("main", "sub", "accent")
-            if isinstance((value := color_palette.get(key)), str) and value.strip()
-        ]
-        if palette_items:
-            lines.append("- Color palette: " + ", ".join(palette_items))
 
     signature_items = _string_list(character_profile.get("signature_items"))
     if signature_items:
@@ -1402,6 +1415,10 @@ def _build_character_sheet_prompt_text(
         for item in style_negatives:
             lines.append(f"  - {item}")
 
+    character_mode_prompt = _load_comic_mode_prompt_text("character_sheet_render")
+    if character_mode_prompt:
+        lines.extend(["", "[Mode Prompt]", character_mode_prompt])
+
     if layout_template_enabled:
         lines.extend(["", "[Layout Template]", "- Provided reference template must be followed as-is."])
 
@@ -1424,7 +1441,6 @@ def _build_mechanical_comic_prompt_item(
     slide_content: dict[str, Any],
     writer_data: dict[str, Any],
     story_framework_data: dict[str, Any],
-    character_sheet_data: dict[str, Any] | None = None,
     layout_template_enabled: bool,
     assigned_assets: list[dict[str, Any]] | None = None,
 ) -> ImagePrompt:
@@ -1442,7 +1458,6 @@ def _build_mechanical_comic_prompt_item(
             slide_number=slide_number,
             slide_content=slide_content,
             writer_data=writer_data,
-            character_sheet_data=character_sheet_data,
             assigned_assets=assigned_assets,
         )
 
@@ -1493,15 +1508,17 @@ def compile_structured_prompt(
     prompt_lines = []
     
     normalized_mode = _normalize_visualizer_mode(mode)
-    if normalized_mode == "comic_page_render":
-        header = f"#Page{slide_number}"
+    if normalized_mode == "slide_render":
+        prompt_lines.append("Presentation Slide")
+        prompt_lines.append(f"# {structured.main_title}")
+    elif normalized_mode == "comic_page_render":
+        prompt_lines.append(f"#Page{slide_number}")
     elif normalized_mode == "document_layout_render":
-        header = f"# Page {slide_number} : {structured.main_title}"
+        prompt_lines.append(f"# Page {slide_number} : {structured.main_title}")
     elif normalized_mode == "character_sheet_render":
-        header = f"#Character{slide_number}"
+        prompt_lines.append(f"#Character{slide_number}")
     else:
-        header = f"# Slide {slide_number} : {structured.main_title}"
-    prompt_lines.append(header)
+        prompt_lines.append(f"# {structured.main_title}")
 
     if normalized_mode in {"slide_render", "document_layout_render"}:
         # Slide/design mode: subtitle is optional second-level heading.
@@ -1606,6 +1623,7 @@ async def process_single_slide(
     override_reference_url: str | None = None,
     additional_references: list[str | bytes] | None = None,
     has_template_references: bool = False,
+    has_attachment_background_hint: bool = False,
     seed_override: int | None = None,
     session_id: str | None = None,
     aspect_ratio: str | None = None,
@@ -1665,8 +1683,10 @@ async def process_single_slide(
         if not precompiled_prompt:
             final_prompt = _append_reference_guidance(
                 final_prompt,
-                has_references=bool(reference_inputs),
-                has_template_references=has_template_references,
+                enable_pptx_guidance=_should_enable_pptx_reference_guidance(
+                    mode=mode,
+                    has_pptx_attachment=has_attachment_background_hint,
+                ),
             )
         prompt_item.compiled_prompt = final_prompt
         
@@ -1829,10 +1849,12 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
             if not _is_pptx_processing_asset(asset)
         ]
     selected_image_inputs = state.get("selected_image_inputs") or []
+    raw_attachments = [item for item in (state.get("attachments") or []) if isinstance(item, dict)]
+    has_pptx_attachment = any(str(item.get("kind") or "").lower() == "pptx" for item in raw_attachments)
     attachments = [
         item
-        for item in (state.get("attachments") or [])
-        if isinstance(item, dict) and str(item.get("kind") or "").lower() != "pptx"
+        for item in raw_attachments
+        if str(item.get("kind") or "").lower() != "pptx"
     ]
     design_dir = current_step.get("design_direction")
     dependency_context = resolve_step_dependency_context(state, current_step)
@@ -1991,7 +2013,9 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         stream_config = config.copy()
         stream_config["run_name"] = "visualizer_plan"
 
-        plan_messages = apply_prompt_template("visualizer_plan", state)
+        plan_prompt_state = dict(state)
+        plan_prompt_state["mode"] = mode
+        plan_messages = apply_prompt_template("visualizer_plan", plan_prompt_state)
         plan_messages.append(
             HumanMessage(
                 content=json.dumps(plan_context, ensure_ascii=False, indent=2),
@@ -2053,6 +2077,7 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
         asset_unit_ledger = dict(state.get("asset_unit_ledger") or {})
         master_style: str | None = None
         reference_asset_cache: dict[str, bytes] = {}
+        last_generated_reference_url: str | None = None
 
         import uuid
         session_id = config.get("configurable", {}).get("thread_id") or str(uuid.uuid4())
@@ -2230,7 +2255,6 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                     slide_content=slide_content,
                     writer_data=writer_data,
                     story_framework_data=story_framework_data,
-                    character_sheet_data=character_sheet_data if mode == "comic_page_render" else None,
                     layout_template_enabled=use_local_character_sheet_template,
                     assigned_assets=assigned_assets,
                 )
@@ -2264,6 +2288,7 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                 prompt_state = {
                     "messages": [],
                     "product_type": state.get("product_type"),
+                    "mode": mode,
                 }
                 prompt_messages = apply_prompt_template("visualizer_prompt", prompt_state)
                 prompt_messages.append(
@@ -2330,6 +2355,48 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                 reference_url = plan_slide.reference_url
                 if not reference_url.startswith("gs://"):
                     reference_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
+            elif mode == "comic_page_render":
+                if isinstance(last_generated_reference_url, str) and last_generated_reference_url.strip():
+                    reference_url = last_generated_reference_url.strip()
+                    if not reference_url.startswith("gs://"):
+                        previous_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
+                        if previous_bytes is None:
+                            logger.warning(
+                                "Failed to fetch previous comic page reference for slide %s: %s",
+                                slide_number,
+                                reference_url,
+                            )
+                            reference_url = None
+                        else:
+                            reference_bytes = previous_bytes
+                else:
+                    logger.info(
+                        "comic_page_render: no previous generated image available for slide %s.",
+                        slide_number,
+                    )
+            elif (
+                state_product_type == "design"
+                and plan_slide
+                and plan_slide.reference_policy == "previous"
+            ):
+                if isinstance(last_generated_reference_url, str) and last_generated_reference_url.strip():
+                    reference_url = last_generated_reference_url.strip()
+                    if not reference_url.startswith("gs://"):
+                        previous_bytes = await asyncio.to_thread(download_blob_as_bytes, reference_url)
+                        if previous_bytes is None:
+                            logger.warning(
+                                "Failed to fetch previous generated image reference for slide %s: %s",
+                                slide_number,
+                                reference_url,
+                            )
+                            reference_url = None
+                        else:
+                            reference_bytes = previous_bytes
+                else:
+                    logger.info(
+                        "reference_policy=previous requested for slide %s but no previous generated image is available yet.",
+                        slide_number,
+                    )
             elif plan_slide and plan_slide.reference_policy == "previous":
                 logger.info(
                     "Skipping deprecated reference_policy=previous for slide %s.",
@@ -2349,8 +2416,10 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
 
             prompt_for_event = _append_reference_guidance(
                 compiled_prompt,
-                has_references=bool(reference_bytes or reference_url or additional_references),
-                has_template_references=has_template_references,
+                enable_pptx_guidance=_should_enable_pptx_reference_guidance(
+                    mode=mode,
+                    has_pptx_attachment=has_pptx_attachment,
+                ),
             )
             prompt_item.compiled_prompt = prompt_for_event
 
@@ -2386,12 +2455,15 @@ async def visualizer_node(state: State, config: RunnableConfig) -> Command[Liter
                 override_reference_url=reference_url,
                 additional_references=additional_references,
                 has_template_references=has_template_references,
+                has_attachment_background_hint=(mode == "slide_render" and has_pptx_attachment),
                 session_id=session_id,
                 aspect_ratio=aspect_ratio,
                 mode=mode,
             )
 
             updated_prompts.append(processed)
+            if isinstance(processed.generated_image_url, str) and processed.generated_image_url.strip():
+                last_generated_reference_url = processed.generated_image_url.strip()
             if image_error:
                 failed_image_errors.append(f"slide={slide_number}: {image_error}")
             image_event_data: dict[str, Any] = {

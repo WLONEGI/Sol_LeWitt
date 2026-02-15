@@ -268,11 +268,67 @@ class StoryFrameworkDirectionPolicy(BaseModel):
     dialogue_policy: str = Field(description="セリフ運用方針")
 
 
+StoryFrameworkStyleCategory = Literal[
+    "少年漫画風",
+    "少女漫画風",
+    "青年漫画風",
+    "ティーンズラブ風",
+    "ギャグ漫画風",
+    "日常系・癒し系",
+    "Webtoon風・縦スクロール",
+    "劇画風",
+    "デフォルメ風",
+    "ハードボイルド風",
+]
+
+
+def _infer_style_category_from_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "少年漫画風"
+    rules: list[tuple[tuple[str, ...], str]] = [
+        (("少女", "shojo", "romance"), "少女漫画風"),
+        (("青年", "seinen"), "青年漫画風"),
+        (("ティーンズラブ", "teens love", "tl"), "ティーンズラブ風"),
+        (("ギャグ", "gag", "comedy"), "ギャグ漫画風"),
+        (("日常", "癒し", "slice of life", "iyashi"), "日常系・癒し系"),
+        (("webtoon", "縦スクロール", "vertical scroll"), "Webtoon風・縦スクロール"),
+        (("劇画", "gekiga"), "劇画風"),
+        (("デフォルメ", "chibi", "deformed"), "デフォルメ風"),
+        (("ハードボイルド", "hardboiled", "hard-boiled", "noir"), "ハードボイルド風"),
+        (("少年", "shonen", "shounen", "action"), "少年漫画風"),
+    ]
+    for keywords, label in rules:
+        if any(keyword in text for keyword in keywords):
+            return label
+    return "少年漫画風"
+
+
 class StoryFrameworkArtStylePolicy(BaseModel):
     """画風方針."""
-    line_style: str = Field(description="線画仕様")
-    shading_style: str = Field(description="陰影仕様")
+    style_category: StoryFrameworkStyleCategory = Field(description="画風カテゴリ")
+    line_style: Optional[str] = Field(default=None, description="線画仕様（互換フィールド）")
+    shading_style: Optional[str] = Field(default=None, description="陰影仕様（互換フィールド）")
     negative_constraints: List[str] = Field(default_factory=list, description="禁止表現")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_style_shape(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+
+        normalized = dict(value)
+        raw_style = normalized.get("style_category")
+        if not (isinstance(raw_style, str) and raw_style.strip()):
+            raw_style = normalized.get("line_style") or normalized.get("shading_style")
+        style_category = _infer_style_category_from_text(raw_style)
+        normalized["style_category"] = style_category
+
+        if not (isinstance(normalized.get("line_style"), str) and str(normalized.get("line_style")).strip()):
+            normalized["line_style"] = style_category
+        if not (isinstance(normalized.get("shading_style"), str) and str(normalized.get("shading_style")).strip()):
+            normalized["shading_style"] = style_category
+        return normalized
 
 
 class StoryFrameworkPayload(BaseModel):
@@ -342,6 +398,7 @@ class WriterStoryFrameworkOutput(BaseModel):
                     "dialogue_policy": "1フキダシ1情報で簡潔にする",
                 },
                 "art_style_policy": {
+                    "style_category": "少年漫画風",
                     "line_style": "主線はGペン基調",
                     "shading_style": "スクリーントーン中心",
                     "negative_constraints": constraint_items or ["フォトリアル禁止"],

@@ -1,0 +1,18 @@
+steps:
+  - name: "gcr.io/k8s-skaffold/pack"
+    args:
+      - build
+      - "$_IMAGE_NAME"
+      - "--builder=gcr.io/buildpacks/builder:v1"
+      - "--env=NEXT_PUBLIC_FIREBASE_API_KEY=$_API_KEY"
+      - "--env=NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=$_AUTH_DOMAIN"
+      - "--env=NEXT_PUBLIC_FIREBASE_PROJECT_ID=$_PROJECT_ID"
+      - "--env=NEXT_PUBLIC_FIREBASE_APP_ID=$_APP_ID"
+images:
+  - "$_IMAGE_NAME"
+substitutions:
+  _IMAGE_NAME: gcr.io/aerobic-stream-483505-a0/ai-slide-frontend
+  _API_KEY: AIzaSyCCH9jNA8odZp-2MrgoI5hbj4eNJqNFxKI
+  _AUTH_DOMAIN: aerobic-stream-483505-a0.firebaseapp.com
+  _PROJECT_ID: aerobic-stream-483505-a0
+  _APP_ID: 1:1021289594562:web:c3b69d6536dc1604d7455b

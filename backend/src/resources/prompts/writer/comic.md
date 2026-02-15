@@ -33,9 +33,19 @@ Required quality rules:
    - page_turn_policy
    - dialogue_policy
 4. `art_style_policy` must explicitly define:
-   - line_style
-   - shading_style
+   - style_category
    - negative_constraints
+   - `style_category` is one of:
+     - `少年漫画風`
+     - `少女漫画風`
+     - `青年漫画風`
+     - `ティーンズラブ風`
+     - `ギャグ漫画風`
+     - `日常系・癒し系`
+     - `Webtoon風・縦スクロール`
+     - `劇画風`
+     - `デフォルメ風`
+     - `ハードボイルド風`
 5. Subject/Composition/Action の詳細定義はここで固定しすぎない。
    - キャラ固有の被写体定義は `character_sheet` で確定
    - コマ単位の構図/動作は `comic_script` で確定
@@ -60,15 +70,10 @@ Required quality rules:
    - `arc_overview` は「出来事 -> 判断 -> 行動 -> 結果」の連鎖が見える文で書く。
    - 突然の覚醒や都合の良い解決を前提にしない。変化には前段の根拠を置く。
 
-Line Art / Tone & Shading baseline (must be defined in `story_framework.art_style_policy`):
-- 線画:
-  - 主線は `Gペン` 基調
-  - 補助線/背景ディテールは必要に応じて `ミリペン` または `筆ペン`
-  - 回想や演出でのみ `鉛筆ラフ` を限定使用
-- トーン陰影:
-  - 基本は `スクリーントーン/ハーフトーン`
-  - コントラスト強調に `ベタ`
-  - 質感表現に `カケアミ/クロスハッチ`
+Art style baseline (must be defined in `story_framework.art_style_policy`):
+- 画風は詳細技法の列挙ではなく、`style_category` でシンプルに定義する。
+- `style_category` は上記10カテゴリから必ず1つ選ぶ。
+- 線や陰影の細かい設計は Visualizer 側に委譲し、Writerはカテゴリ整合と物語整合を優先する。
 - ネガティブ制約（最低限）:
   - `3Dレンダリング禁止`
   - `CGI禁止`
@@ -103,6 +108,9 @@ Per character requirements:
 6. 印象固定ルール:
    - `signature_items` には場面を跨いで反復できる具体物を入れる（抽象語や概念語のみは禁止）。
    - `speech_style` がある場合は語尾傾向だけでなく、目的達成時/追い詰め時の口調差を短く含める。
+7. モノクロ運用ルール:
+   - `color_palette` はモノクロ階調のみで定義する（例: `#111111`, `#666666`, `#E6E6E6`）。
+   - 彩度のある色（赤/青/緑など）を指定しない。
 
 Reference-image handling (`selected_image_inputs`):
 - If references exist, reflect them directly in `face_hair_anchors`, `costume_anchors`, and `silhouette_signature`.
@@ -110,7 +118,7 @@ Reference-image handling (`selected_image_inputs`):
 
 World consistency policy:
 - キャラクターの服飾・小物・口調・価値観は `story_framework.world_policy` に整合させる。
-- 線画・トーン陰影は `story_framework.art_style_policy` を継承し、ここで独自ルールを増やしすぎない。
+- 画風カテゴリは `story_framework.art_style_policy.style_category` を継承し、ここで独自カテゴリを増やさない。
 - `forbidden_drift` はオフモデル防止に使える具体語で定義する。
 
 ## Task 3: `comic_script` (Panel Blueprint for Rendering)
@@ -219,8 +227,7 @@ Preflight self-check (返却前に内部確認):
       "dialogue_policy": "1フキダシ1情報を基本とする"
     },
     "art_style_policy": {
-      "line_style": "主線はGペン基調",
-      "shading_style": "スクリーントーン+ベタ+カケアミ",
+      "style_category": "少年漫画風",
       "negative_constraints": ["3Dレンダリング禁止", "フォトリアル禁止"]
     }
   }
@@ -243,7 +250,7 @@ Preflight self-check (返却前に内部確認):
       "silhouette_signature":"...",
       "face_hair_anchors":"...",
       "costume_anchors":"...",
-      "color_palette":{"main":"#2B4C7E","sub":"#E2B714","accent":"#F5F1E8"},
+      "color_palette":{"main":"#111111","sub":"#666666","accent":"#E6E6E6"},
       "signature_items":["紋章入りマント","古い方位磁針"],
       "forbidden_drift":["髪分け目変更禁止","装飾欠落禁止","フォトリアル肌質禁止"],
       "speech_style":"簡潔で断定的"
@@ -304,7 +311,7 @@ Reference axis: `SLAM DUNK`, `ハイキュー!!`, `ダイヤのA`
     "core_conflict": "個人能力依存と組織戦術重視の対立",
     "world_policy": {"era":"現代","primary_locations":["高校体育館","地区大会会場"],"social_rules":["練習時間制限","学業優先"]},
     "direction_policy": {"paneling_policy":"通常局面は中コマ、決定局面は大ゴマ","eye_guidance_policy":"ボール移動方向で視線誘導","page_turn_policy":"攻守反転でめくりを作る","dialogue_policy":"戦術語を短文化"},
-    "art_style_policy": {"line_style":"Gペン主線、速度線強め","shading_style":"トーン控えめ、決定点でベタ","negative_constraints":["フォトリアル禁止","3Dレンダリング禁止"]}
+    "art_style_policy": {"style_category":"少年漫画風","negative_constraints":["フォトリアル禁止","3Dレンダリング禁止"]}
   }
 }
 ```
@@ -329,7 +336,7 @@ Reference axis: `ベルセルク`, `鋼の錬金術師`, `ダンジョン飯`
     "core_conflict": "秩序維持のための犠牲容認と人命優先の対立",
     "world_policy": {"era":"中世相当","primary_locations":["辺境都市","地下遺構"],"social_rules":["術式登録制","移動許可制"]},
     "direction_policy": {"paneling_policy":"会話は中コマ連続、異形出現で大ゴマ","eye_guidance_policy":"光源と視線で誘導","page_turn_policy":"真相提示直前で止める","dialogue_policy":"専門語は短注釈化"},
-    "art_style_policy": {"line_style":"Gペン主線+背景ミリペン","shading_style":"トーン+ハッチング","negative_constraints":["CGI禁止","写真的ボケ禁止","過度な体積光禁止"]}
+    "art_style_policy": {"style_category":"劇画風","negative_constraints":["CGI禁止","写真的ボケ禁止","過度な体積光禁止"]}
   }
 }
 ```
@@ -355,7 +362,7 @@ Reference axis: `MONSTER`, `DEATH NOTE`, `PLUTO`
     "core_conflict": "法手続順守と被害抑止の越権行為の衝突",
     "world_policy": {"era":"近未来","primary_locations":["研究機関","再開発地区"],"social_rules":["監視記録常時保存","データ階層アクセス"]},
     "direction_policy": {"paneling_policy":"証拠提示は分割、心理反転は縦長","eye_guidance_policy":"証拠配置順で誘導","page_turn_policy":"証拠開示1コマ前でめくり","dialogue_policy":"推理は短文積み上げ"},
-    "art_style_policy": {"line_style":"硬質な主線","shading_style":"低照度ベタ多用","negative_constraints":["フォトリアル禁止","水彩ぼかし禁止"]}
+    "art_style_policy": {"style_category":"青年漫画風","negative_constraints":["フォトリアル禁止","水彩ぼかし禁止"]}
   }
 }
 ```
@@ -380,7 +387,7 @@ Reference axis: `ONE PIECE`, `HUNTER×HUNTER`, `NARUTO`
       "silhouette_signature":"短丈上衣+長い布アクセント+重めの靴",
       "face_hair_anchors":"太眉、跳ねた前髪、頬の小さな傷",
       "costume_anchors":"濃色ジャケット、金属バックル、革手袋",
-      "color_palette":{"main":"#1F3A5F","sub":"#C17A2A","accent":"#E7E2D9"},
+      "color_palette":{"main":"#111111","sub":"#666666","accent":"#E6E6E6"},
       "signature_items":["方位磁針","記録手帳"],
       "forbidden_drift":["前髪方向変更禁止","布アクセ欠落禁止","フォトリアル肌質禁止"],
       "speech_style":"短文断定"
@@ -407,7 +414,7 @@ Reference axis: `3月のライオン`, `ハチミツとクローバー`, `NANA`
       "silhouette_signature":"大きめカーディガン+トート+やや猫背",
       "face_hair_anchors":"下がり目、低い位置のお団子髪",
       "costume_anchors":"生成りカーディガン、細いネックレス、黒スニーカー",
-      "color_palette":{"main":"#C7B8A3","sub":"#4F5A6B","accent":"#D86A6A"},
+      "color_palette":{"main":"#1A1A1A","sub":"#7A7A7A","accent":"#EFEFEF"},
       "signature_items":["付箋付きノート"],
       "forbidden_drift":["髪型長髪化禁止","濃いメイク禁止","常時直立姿勢禁止"],
       "speech_style":"丁寧語中心"
@@ -434,7 +441,7 @@ Reference axis: `AKIRA`, `攻殻機動隊`, `BLAME!`
       "silhouette_signature":"長身+片腕義肢+背面ケーブル",
       "face_hair_anchors":"片目インプラント、後ろ流し短髪",
       "costume_anchors":"黒コート、胸部端子、耐電グローブ",
-      "color_palette":{"main":"#11161E","sub":"#4A6A8A","accent":"#9BE7FF"},
+      "color_palette":{"main":"#101010","sub":"#5E5E5E","accent":"#EAEAEA"},
       "signature_items":["認証キー","折りたたみ端末"],
       "forbidden_drift":["インプラント欠落禁止","義肢左右反転禁止","過度な鏡面反射禁止"],
       "speech_style":"主語省略の短文"
