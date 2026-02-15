@@ -6,6 +6,10 @@ export type InpaintReferenceImagePayload = {
     mime_type?: string
 }
 
+type RequestError = Error & {
+    status?: number
+}
+
 interface UploadAttachmentsResponseItem {
     filename?: unknown
     kind?: unknown
@@ -46,7 +50,9 @@ export async function uploadInpaintReferenceImages(params: {
             typeof payload?.detail === "string"
                 ? payload.detail
                 : (typeof payload?.error === "string" ? payload.error : `画像アップロードに失敗しました (${response.status})`)
-        throw new Error(detail)
+        const error = new Error(detail) as RequestError
+        error.status = response.status
+        throw error
     }
 
     const attachments = Array.isArray(payload?.attachments) ? payload.attachments as UploadAttachmentsResponseItem[] : []

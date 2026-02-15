@@ -8,7 +8,10 @@ import { cn } from "@/lib/utils"
 import { InpaintCanvas, type InpaintSubmitPayload } from "@/features/preview/components/inpaint-canvas"
 import { useAuth } from "@/providers/auth-provider"
 import { useChatStore } from "@/features/chat/stores/chat"
-import { uploadInpaintReferenceImages } from "@/features/preview/lib/inpaint-reference-upload"
+import {
+    uploadInpaintReferenceImages,
+    type InpaintReferenceImagePayload,
+} from "@/features/preview/lib/inpaint-reference-upload"
 
 import { getAspectRatioClass } from "../utils/aspect-ratio"
 
@@ -56,7 +59,7 @@ function buildVersionedContent(content: any, url: string, versions: string[], cu
 
 export function SlideViewer({ content, imageId, aspectRatio }: SlideViewerProps) {
     const { updateArtifactContent } = useArtifactStore()
-    const { token } = useAuth()
+    const { token, user } = useAuth()
     const currentThreadId = useChatStore((state) => state.currentThreadId)
 
     const versionState = useMemo(() => getVersionState(content), [content])
@@ -80,27 +83,71 @@ export function SlideViewer({ content, imageId, aspectRatio }: SlideViewerProps)
         updateArtifactContent(imageId, buildVersionedContent(content, nextUrl, versions, nextIndex))
     }
 
+    const resolveAuthToken = async (forceRefresh = false): Promise<string> => {
+        if (user) {
+            try {
+                const nextToken = await user.getIdToken(forceRefresh)
+                if (nextToken) return nextToken
+            } catch (error) {
+                if (!forceRefresh && token) return token
+                throw error
+            }
+        }
+        if (token) return token
+        throw new Error("認証情報がありません。再ログインしてください。")
+    }
+
+    const isUnauthorizedError = (error: unknown): boolean => {
+        if (typeof error === "object" && error !== null && "status" in error) {
+            const status = Number((error as { status?: unknown }).status)
+            if (status === 401) return true
+        }
+        const message = (error instanceof Error ? error.message : String(error ?? "")).toLowerCase()
+        return message.includes("unauthorized") || message.includes("401") || message.includes("認証")
+    }
+
     const handleInpaintSubmit = async ({ prompt, maskImageUrl, referenceFiles }: InpaintSubmitPayload) => {
         if (!imageId) return
-        if (!token) throw new Error("認証情報がありません。再ログインしてください。")
-        const referenceImages = await uploadInpaintReferenceImages({
-            token,
-            files: referenceFiles,
-            threadId: currentThreadId || imageId,
-        })
-        const response = await fetch(`/api/image/${imageId}/inpaint`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${token}`,
-            },
-            body: JSON.stringify({
-                prompt,
-                image_url: imageUrl,
-                mask_image_url: maskImageUrl,
-                reference_images: referenceImages,
-            }),
-        })
+        let authToken = await resolveAuthToken(false)
+
+        let referenceImages: InpaintReferenceImagePayload[] = []
+        try {
+            referenceImages = await uploadInpaintReferenceImages({
+                token: authToken,
+                files: referenceFiles,
+                threadId: currentThreadId || imageId,
+            })
+        } catch (error) {
+            if (!user || !isUnauthorizedError(error)) throw error
+            authToken = await resolveAuthToken(true)
+            referenceImages = await uploadInpaintReferenceImages({
+                token: authToken,
+                files: referenceFiles,
+                threadId: currentThreadId || imageId,
+            })
+        }
+
+        const executeInpaintRequest = (currentToken: string) =>
+            fetch(`/api/image/${imageId}/inpaint`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${currentToken}`,
+                },
+                body: JSON.stringify({
+                    prompt,
+                    image_url: imageUrl,
+                    mask_image_url: maskImageUrl,
+                    reference_images: referenceImages,
+                }),
+            })
+
+        let response = await executeInpaintRequest(authToken)
+        if (response.status === 401 && user) {
+            authToken = await resolveAuthToken(true)
+            response = await executeInpaintRequest(authToken)
+        }
+
         const data = await response.json().catch(() => ({}))
         if (!response.ok) {
             const detail =
