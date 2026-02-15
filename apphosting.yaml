@@ -25,3 +25,4 @@ runConfig:
   maxInstances: 10
   memory: "2Gi"
   cpu: 2
+  timeoutSeconds: 3600

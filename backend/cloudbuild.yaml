@@ -29,6 +29,8 @@ steps:
       - "langgraph-sa@aerobic-stream-483505-a0.iam.gserviceaccount.com"
       - "--add-cloudsql-instances"
       - "aerobic-stream-483505-a0:asia-northeast1:langgraph-pg-core"
+      - "--timeout"
+      - "3600"
       - "--set-env-vars"
       - "GCS_BUCKET_NAME=ai-slide-artifacts-aerobic-stream-483505-a0,GCP_PROJECT_ID=$PROJECT_ID,VERTEX_PROJECT_ID=$PROJECT_ID,VERTEX_LOCATION=global,BASIC_MODEL=gemini-3-flash-preview,REASONING_MODEL=gemini-3-flash-preview,HIGH_REASONING_MODEL=gemini-3-pro-preview,VL_MODEL=gemini-3-pro-image-preview,LANGCHAIN_TRACING_V2=true,LANGCHAIN_ENDPOINT=https://api.smith.langchain.com,LANGCHAIN_PROJECT=pr-slight-might-72"
 
