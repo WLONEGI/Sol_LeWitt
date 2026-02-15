@@ -1,7 +1,7 @@
 <p align="center">
-  <h1 align="center">🎨 Sol LeWitt — AI Slide with Nano Banana</h1>
+  <h1 align="center">Sol LeWitt</h1>
   <p align="center">
-    <strong>「Hand for the Mind」— 想像力を形にする、AI マルチエージェント・ビジュアル生成システム</strong>
+    <strong>コンセプトをデザインするAgentic AI</strong>
   </p>
 </p>
 
@@ -12,6 +12,9 @@
   <img src="https://img.shields.io/badge/Gemini_3-Pro%20%7C%20Flash-4285F4?logo=google" alt="Gemini">
   <img src="https://img.shields.io/badge/Vercel_AI_SDK-6-000000" alt="Vercel AI SDK">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+</p>
+<p align="center">
+  <img src="frontend/public/sollewitt.png" width="800" alt="Sol LeWitt Visual">
 </p>
 
 ---
