@@ -35,7 +35,7 @@ const nextConfig: NextConfig = {
     ];
   },
   async rewrites() {
-    const backendUrl = process.env.BACKEND_URL || 'https://ai-slide-backend-mt6fevmsiq-an.a.run.app';
+    const backendUrl = process.env.BACKEND_URL || (process.env.NODE_ENV === 'development' ? 'http://localhost:8000' : 'https://ai-slide-backend-mt6fevmsiq-an.a.run.app');
     return [
       {
         source: "/api/:path*",

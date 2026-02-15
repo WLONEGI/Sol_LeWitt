@@ -7,7 +7,7 @@ export async function GET(req: NextRequest) {
             return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
         }
 
-        const backendUrl = process.env.BACKEND_URL || 'https://ai-slide-backend-mt6fevmsiq-an.a.run.app';
+        const backendUrl = process.env.BACKEND_URL || (process.env.NODE_ENV === 'development' ? 'http://localhost:8000' : 'https://ai-slide-backend-mt6fevmsiq-an.a.run.app');
         const response = await fetch(`${backendUrl}/api/history`, {
             headers: {
                 'Content-Type': 'application/json',
@@ -25,7 +25,7 @@ export async function GET(req: NextRequest) {
         const data = await response.json();
         return NextResponse.json(data);
     } catch (error) {
-        const backendUrl = process.env.BACKEND_URL || 'https://ai-slide-backend-mt6fevmsiq-an.a.run.app';
+        const backendUrl = process.env.BACKEND_URL || (process.env.NODE_ENV === 'development' ? 'http://localhost:8000' : 'https://ai-slide-backend-mt6fevmsiq-an.a.run.app');
         console.error(`History API proxy error (Target: ${backendUrl}):`, error);
         return NextResponse.json({ detail: "Failed to load history" }, { status: 500 });
     }
