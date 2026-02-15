@@ -11,7 +11,7 @@ export async function POST(req: NextRequest) {
         }
 
         const formData = await req.formData();
-        const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+        const BACKEND_URL = process.env.BACKEND_URL || 'https://ai-slide-backend-mt6fevmsiq-an.a.run.app';
 
         const response = await fetch(`${BACKEND_URL}/api/files/upload`, {
             method: 'POST',

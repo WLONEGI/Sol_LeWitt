@@ -126,7 +126,7 @@ export async function POST(req: NextRequest) {
             },
         };
 
-        const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+        const BACKEND_URL = process.env.BACKEND_URL || 'https://ai-slide-backend-mt6fevmsiq-an.a.run.app';
         const backendFetchStartMs = nowMs();
         const response = await fetch(`${BACKEND_URL}/api/chat/stream_events`, {
             method: 'POST',
